@@ -266,43 +266,12 @@ func (c Config) registerOnce(ctx context.Context, body registerRequest, out *reg
 	return nil
 }
 
-// registerRequest announces this host's capacity for placement.
-type registerRequest struct {
-	HostID         string `json:"hostId"`
-	CPUFamily      string `json:"cpuFamily"`
-	Kernel         string `json:"kernel"`
-	KernelRelease  string `json:"kernelRelease"`
-	Runtime        string `json:"runtime"`
-	VcpuTotal      int    `json:"vcpuTotal"`
-	MemTotalBytes  int64  `json:"memTotalBytes"`
-	MemBudgetBytes *int64 `json:"memBudgetBytes,omitempty"`
-	DiskTotalBytes int64  `json:"diskTotalBytes"`
-	MaxDocks       int    `json:"maxDocks"`
-	// AcceptsCredential tells the control plane this docklet stores the per-host
-	// credential, so it may issue one; older docklets stay credential-less.
-	AcceptsCredential bool `json:"acceptsCredential,omitempty"`
-}
+// registerRequest and the other fleet wire types live in api/v1 so fixtures pin them.
+type registerRequest = apiv1.FleetRegisterRequest
 
-// registerResponse carries the cadence the control plane wants from this host.
-type registerResponse struct {
-	HostID           string `json:"hostId"`
-	HeartbeatSeconds int    `json:"heartbeatSeconds"`
-	PollWaitSeconds  int    `json:"pollWaitSeconds"`
-	// Credential is the per-host secret, returned only to the enrollment token.
-	Credential string `json:"credential,omitempty"`
-}
+type registerResponse = apiv1.FleetRegisterResponse
 
-// heartbeatRequest refreshes this host's inventory; the control plane treats
-// running as the reconciler's source of truth.
-type heartbeatRequest struct {
-	HostID    string              `json:"hostId"`
-	UsedDocks int                 `json:"usedDocks"`
-	Runtime   string              `json:"runtime,omitempty"`
-	Running   []apiv1.RunningVM   `json:"running"`
-	Samples   []apiv1.StatsSample `json:"samples,omitempty"`
-	// BaseFingerprints is a pointer so a microvm host holding no base still reports [].
-	BaseFingerprints *[]string `json:"baseFingerprints,omitempty"`
-}
+type heartbeatRequest = apiv1.FleetHeartbeatRequest
 
 func (c Config) heartbeatLoop(ctx context.Context, every time.Duration) {
 	ticker := time.NewTicker(every)
@@ -545,9 +514,7 @@ func (c Config) pollOnce(ctx context.Context, waitFor time.Duration) (*command, 
 	if waitFor > 0 {
 		query.Set("wait", strconv.Itoa(int(waitFor.Seconds())))
 	}
-	var out struct {
-		Command *command `json:"command"`
-	}
+	var out apiv1.FleetPollResponse
 	err := c.fleet(ctx, http.MethodGet, "/v1/fleet/commands?"+query.Encode(), nil, &out, waitFor+pollGrace)
 	if err != nil {
 		return nil, err
@@ -555,23 +522,9 @@ func (c Config) pollOnce(ctx context.Context, waitFor time.Duration) (*command, 
 	return out.Command, nil
 }
 
-// command is one queued unit of work for this host.
-type command struct {
-	ID               string          `json:"id"`
-	Op               string          `json:"op"`
-	IdempotencyToken string          `json:"idempotencyToken"`
-	DeadlineMs       int64           `json:"deadlineMs"`
-	Payload          json.RawMessage `json:"payload"`
-}
+type command = apiv1.FleetCommand
 
-// resultRequest is one command outcome posted back to the control plane.
-type resultRequest struct {
-	HostID  string          `json:"hostId"`
-	Ok      bool            `json:"ok"`
-	Code    string          `json:"code,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Data    json.RawMessage `json:"data,omitempty"`
-}
+type resultRequest = apiv1.FleetResultRequest
 
 // execute relays one command to the local API and reports the docklet's own
 // answer back to the control plane.

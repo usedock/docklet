@@ -3,6 +3,8 @@
 // workflow replay never executes twice.
 package v1
 
+import "encoding/json"
+
 // APIVersion is the docklet contract version served under /v1/*.
 const APIVersion = "v1"
 
@@ -237,4 +239,68 @@ type HeartbeatRequest struct {
 type Readiness struct {
 	Ready   bool     `json:"ready"`
 	Reasons []string `json:"reasons,omitempty"`
+}
+
+// The Fleet* types are the outbound channel: the docklet is the client and
+// the control plane's /v1/fleet/* routes reject unknown fields.
+
+// FleetRegisterRequest announces this host's capacity for placement.
+type FleetRegisterRequest struct {
+	HostID         string `json:"hostId"`
+	CPUFamily      string `json:"cpuFamily"`
+	Kernel         string `json:"kernel"`
+	KernelRelease  string `json:"kernelRelease"`
+	Runtime        string `json:"runtime"`
+	VcpuTotal      int    `json:"vcpuTotal"`
+	MemTotalBytes  int64  `json:"memTotalBytes"`
+	MemBudgetBytes *int64 `json:"memBudgetBytes,omitempty"`
+	DiskTotalBytes int64  `json:"diskTotalBytes"`
+	MaxDocks       int    `json:"maxDocks"`
+	// AcceptsCredential tells the control plane this docklet stores the per-host
+	// credential, so it may issue one; older docklets stay credential-less.
+	AcceptsCredential bool `json:"acceptsCredential,omitempty"`
+}
+
+// FleetRegisterResponse carries the cadence the control plane wants from this host.
+type FleetRegisterResponse struct {
+	HostID           string `json:"hostId"`
+	HeartbeatSeconds int    `json:"heartbeatSeconds"`
+	PollWaitSeconds  int    `json:"pollWaitSeconds"`
+	// Credential is the per-host secret, returned only to the enrollment token.
+	Credential string `json:"credential,omitempty"`
+}
+
+// FleetHeartbeatRequest refreshes this host's inventory; the control plane
+// treats running as the reconciler's source of truth.
+type FleetHeartbeatRequest struct {
+	HostID    string        `json:"hostId"`
+	UsedDocks int           `json:"usedDocks"`
+	Runtime   string        `json:"runtime,omitempty"`
+	Running   []RunningVM   `json:"running"`
+	Samples   []StatsSample `json:"samples,omitempty"`
+	// BaseFingerprints is a pointer so a microvm host holding no base still reports [].
+	BaseFingerprints *[]string `json:"baseFingerprints,omitempty"`
+}
+
+// FleetPollResponse is the long-poll answer; Command is nil when none is queued.
+type FleetPollResponse struct {
+	Command *FleetCommand `json:"command"`
+}
+
+// FleetCommand is one queued unit of work for this host.
+type FleetCommand struct {
+	ID               string          `json:"id"`
+	Op               string          `json:"op"`
+	IdempotencyToken string          `json:"idempotencyToken"`
+	DeadlineMs       int64           `json:"deadlineMs"`
+	Payload          json.RawMessage `json:"payload"`
+}
+
+// FleetResultRequest is one command outcome posted back to the control plane.
+type FleetResultRequest struct {
+	HostID  string          `json:"hostId"`
+	Ok      bool            `json:"ok"`
+	Code    string          `json:"code,omitempty"`
+	Message string          `json:"message,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"`
 }
