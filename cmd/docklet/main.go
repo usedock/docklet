@@ -87,7 +87,7 @@ func main() {
 	if runtime == apiv1.RuntimeGVisor {
 		// gvisor hosts run containers from the OCI image under runsc;
 		// the SDK driver serves microvm hosts.
-		backend = &container.Driver{Image: getenv("DOCKLET_GVISOR_IMAGE", "dock-gvisor:latest")}
+		backend = &container.Driver{Image: getenv("DOCKLET_GVISOR_IMAGE", "dock-gvisor:latest"), StateDir: stateDir}
 	}
 	fleetAuth := fleetauth.Open(
 		getenv("DOCKLET_FLEET_CREDENTIAL_FILE", filepath.Join(stateDir, "fleet-credential")),
@@ -168,6 +168,7 @@ func main() {
 		EgressAllowPrivate: allowPrivate,
 		CapacityVCPU:       capVCPU,
 		CapacityMemMiB:     capMemMiB,
+		DiskFreeBytes:      func() int64 { return agent.FreeDiskBytes(stateDir) },
 		Driver:             backend,
 		Snaps:              snaps,
 		Stats:              stats.Reader{Root: "/"},

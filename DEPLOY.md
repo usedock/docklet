@@ -415,6 +415,7 @@ scheduler places nothing new on it. Running docks keep running.
 
 ```sh
 sudo systemctl disable --now docklet
+for m in /var/lib/docklet/docks/*/work; do sudo umount "$m" 2>/dev/null; done   # gvisor work disks
 sudo rm -rf /etc/docklet /var/lib/docklet
 docker rm -f $(docker ps -aq --filter name=dock-)
 docker volume rm $(docker volume ls -q --filter name=dock-)
@@ -513,6 +514,17 @@ container's own filesystem layers are not visible to `docker diff`, so writes
 outside the workspace (for example `apt-get install` inside the dock) do not
 survive stop/resume. Docker-inside is unsupported under gvisor; microvm docks
 carry those workloads.
+
+The workspace is bounded by the dock's `diskGiB`. Each gvisor dock gets a sparse
+ext4 image at `<state dir>/docks/<id>/work.img` (`truncate` to `diskGiB` GiB,
+`mkfs.ext4`), loop-mounted by the docklet on the host and bind-mounted at
+`/home/user/work`, so a dock cannot write past its size and one dock cannot fill the host
+disk. The image is unmounted on stop and removed on delete, and the docklet
+refuses a gvisor dock whose `diskGiB` exceeds the free disk of the state
+directory (`capacity_exhausted`). The docklet runs as root, and the host needs
+`e2fsprogs` (`mkfs.ext4`) and loop device support. A dock created before this
+limit has its old unbounded volume copied into the image on its next start, which
+fails if the data exceeds `diskGiB`.
 
 **microvm.** A generation is a **block delta against the base
 image** plus optional memory images, so the whole guest filesystem survives

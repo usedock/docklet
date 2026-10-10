@@ -28,6 +28,8 @@ type fakeVethDriver struct {
 	resumed    int
 	saved      int
 	applied    int
+	disks      map[string]int
+	removed    []string
 }
 
 // writeTestImage writes size bytes of a deterministic pattern.
@@ -101,20 +103,36 @@ func (f *fakeVethDriver) Terminate(_ *fc.Handle) error { f.terminated++; return 
 func (f *fakeVethDriver) UseVeth() bool                { return true }
 func (f *fakeVethDriver) DiskOnly() bool               { return true }
 
-// VolumeDir/EnsureVolume/SaveState/RestoreState fake the workspace-state
+// WorkDir/EnsureWorkDisk/SaveState/RestoreState fake the workspace-state
 // capture the container backend uses: the fake writes one workspace file into
 // the state tar and records that a restore happened.
-func (f *fakeVethDriver) WorkVolume(dockID string) string { return "vol-" + dockID }
-
-func (f *fakeVethDriver) VolumeDir(volume string) (string, error) {
-	dir := filepath.Join(f.root, "volumes", volume)
+func (f *fakeVethDriver) WorkDir(dockID string) (string, error) {
+	dir := filepath.Join(f.root, "volumes", "vol-"+dockID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
 
-func (f *fakeVethDriver) EnsureVolume(string) error { return nil }
+// EnsureWorkDisk records the size each dock's disk was created with.
+func (f *fakeVethDriver) EnsureWorkDisk(dockID string, diskGiB int) (string, error) {
+	if f.disks == nil {
+		f.disks = map[string]int{}
+	}
+	f.disks[dockID] = diskGiB
+	return f.WorkDir(dockID)
+}
+
+func (f *fakeVethDriver) WorkDiskExists(dockID string) bool {
+	_, ok := f.disks[dockID]
+	return ok
+}
+
+func (f *fakeVethDriver) RemoveWorkDisk(dockID string) error {
+	delete(f.disks, dockID)
+	f.removed = append(f.removed, dockID)
+	return nil
+}
 
 func (f *fakeVethDriver) SaveState(dir, dest string) error {
 	f.saved++
@@ -247,7 +265,7 @@ func TestContainerDiskUsedIsWorkspaceVolumeAndCached(t *testing.T) {
 	if _, err := h.Provision(ctx, "dock-1", resSmall, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	vol, _ := driver.VolumeDir("vol-dock-1")
+	vol, _ := driver.WorkDir("dock-1")
 	if err := os.WriteFile(filepath.Join(vol, "data"), make([]byte, 1<<20), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -462,5 +480,100 @@ func TestContainerGenerationTreeListsWorkspaceRoot(t *testing.T) {
 	raw, err := h.GenerationFile(ctx, "s10", entries[0].Path)
 	if err != nil || string(raw) != "hi" {
 		t.Fatalf("file = %q,%v", raw, err)
+	}
+}
+
+const gib = int64(1) << 30
+
+func TestContainerDiskAdmissionRefusesOversizedDisk(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	h.cfg.DiskFreeBytes = func() int64 { return 5 * gib }
+	_, err := h.Provision(context.Background(), "big", resSmall, "", "")
+	if !errors.Is(err, ErrCapacityExhausted) {
+		t.Fatalf("err = %v, want capacity_exhausted for a 10 GiB disk on 5 GiB free", err)
+	}
+	if driver.boots != 0 || len(driver.disks) != 0 {
+		t.Fatalf("boots=%d disks=%v, refused provision must not allocate", driver.boots, driver.disks)
+	}
+}
+
+func TestContainerDiskAdmissionAdmitsWhatFits(t *testing.T) {
+	h, _, _, _ := testContainerHost(t)
+	h.cfg.DiskFreeBytes = func() int64 { return 10 * gib }
+	if _, err := h.Provision(context.Background(), "ok", resSmall, "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestContainerDiskAdmissionCountsBootsInFlight(t *testing.T) {
+	h, _, _, _ := testContainerHost(t)
+	h.cfg.DiskFreeBytes = func() int64 { return 15 * gib }
+	release, err := h.reserve("a", resSmall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.reserve("b", resSmall); !errors.Is(err, ErrCapacityExhausted) {
+		t.Fatalf("err = %v, want the second 10 GiB boot refused on 15 GiB free", err)
+	}
+	release()
+	if _, err := h.reserve("b", resSmall); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}
+
+func TestContainerDiskAdmissionSkipsDocksThatOwnTheirDisk(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	h.cfg.DiskFreeBytes = func() int64 { return 0 }
+	driver.disks = map[string]int{"back": 10}
+	if _, err := h.reserve("back", resSmall); err != nil {
+		t.Fatalf("a resume of an existing disk allocates nothing: %v", err)
+	}
+}
+
+func TestContainerDiskAdmissionOffWithoutProbe(t *testing.T) {
+	h, _, _, _ := testContainerHost(t)
+	if _, err := h.Provision(context.Background(), "any", resXLarge, "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestContainerDiskAdmissionDoesNotApplyToMicroVMs(t *testing.T) {
+	h, _, _ := testHost(t)
+	h.cfg.DiskFreeBytes = func() int64 { return 0 }
+	if _, err := h.Provision(context.Background(), "mvm", resSmall, "", ""); err != nil {
+		t.Fatalf("microvm rootfs is not a work disk: %v", err)
+	}
+}
+
+func TestContainerBootsCreateTheDiskAtTheDockSize(t *testing.T) {
+	ctx := context.Background()
+	h, driver, _, _ := testContainerHost(t)
+	if _, err := h.Provision(ctx, "src", resSmall, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	snap, _, _, err := h.SnapshotCreate(ctx, "src", nil, "full", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fork restores onto its own disk sized by the fork's resources.
+	if _, err := h.Provision(ctx, "fork", resLarge, "", snap); err != nil {
+		t.Fatal(err)
+	}
+	if driver.disks["fork"] != resLarge.DiskGiB {
+		t.Fatalf("fork disk = %d GiB, want %d", driver.disks["fork"], resLarge.DiskGiB)
+	}
+}
+
+func TestContainerDestroyRemovesTheWorkDisk(t *testing.T) {
+	ctx := context.Background()
+	h, driver, _, _ := testContainerHost(t)
+	if _, err := h.Provision(ctx, "dock-1", resSmall, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(driver.removed) != 1 || driver.removed[0] != "dock-1" {
+		t.Fatalf("removed = %v, want the dock's work disk", driver.removed)
 	}
 }
