@@ -18,6 +18,12 @@ jobs:
         include:
           - { name: docklet, pkg: ./cmd/docklet, goos: linux, goarch: amd64 }
           - { name: docklet, pkg: ./cmd/docklet, goos: linux, goarch: arm64 }
+          - { name: dock, pkg: ./cmd/dock, goos: linux, goarch: amd64 }
+          - { name: dock, pkg: ./cmd/dock, goos: linux, goarch: arm64 }
+          - { name: dock, pkg: ./cmd/dock, goos: darwin, goarch: amd64 }
+          - { name: dock, pkg: ./cmd/dock, goos: darwin, goarch: arm64 }
+          - { name: dock, pkg: ./cmd/dock, goos: windows, goarch: amd64 }
+          - { name: dock, pkg: ./cmd/dock, goos: windows, goarch: arm64 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -33,7 +39,7 @@ jobs:
           PKG: ${{ matrix.pkg }}
         run: |
           out="${NAME}-${GOOS}-${GOARCH}"
-          [ "$GOOS" = windows ] && out="${out}.exe"
+          if [ "$GOOS" = windows ]; then out="${out}.exe"; fi
           mkdir -p dist
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${out}" "$PKG"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

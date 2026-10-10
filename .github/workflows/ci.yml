@@ -33,5 +33,23 @@ jobs:
         run: for f in scripts/*.sh; do bash -n "$f"; done
       - name: verify tests
         run: bash scripts/test-verify.sh
+      - name: install script tests
+        run: bash scripts/test-install.sh
+      - name: dock version ldflag
+        run: |
+          go build -ldflags "-X main.version=v0.0.0-ci" -o "$RUNNER_TEMP/dock" ./cmd/dock
+          test "$("$RUNNER_TEMP/dock" version)" = v0.0.0-ci
+      - name: powershell parse check
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem scripts -Filter *.ps1) {
+            $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs)
+            if ($errs) { $errs | ForEach-Object { Write-Error "$($f.Name): $($_.Message)" }; exit 1 }
+            Write-Host "parsed $($f.Name)"
+          }
+      - name: install.ps1 smoke test
+        shell: pwsh
+        run: ./scripts/test-install.ps1
       - name: gitleaks
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --no-banner --redact
