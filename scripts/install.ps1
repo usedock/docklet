@@ -2,6 +2,7 @@
 #   irm https://raw.githubusercontent.com/usedock/docklet/main/scripts/install.ps1 | iex
 # Env: DOCK_VERSION (default: latest release), DOCK_INSTALL_DIR (default: %LOCALAPPDATA%\dock\bin),
 #      DOCK_NO_MODIFY_PATH=1 to leave the user PATH alone.
+#      Test hooks only (CI fakes): DOCK_RELEASE_BASE_URL, DOCK_LATEST_URL, DOCK_ARCH; downloads still need the pinned signature.
 # Self-contained on purpose: the verify logic mirrors scripts/lib-verify.sh. Windows PowerShell 5.1 compatible.
 
 function Install-Dock {
@@ -17,7 +18,8 @@ function Install-Dock {
 
   function Fail($msg) { throw "install: $msg" }
   function Test-Version($v) {
-    return ($v -cmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?\z')
+    # -cmatch on an array filters it, so a non-string (e.g. a JSON array's tag_name) must be rejected first.
+    return ($v -is [string]) -and ($v -cmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?\z')
   }
   function Get-Sha256($path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() }
   function Get-RecordedChecksum($sums, $name) {
@@ -67,6 +69,20 @@ function Install-Dock {
     if ((Get-Sha256 $dest) -ne $cosignSha256) { Fail "cosign $cosignVersion checksum mismatch; refusing to run it" }
     return $dest
   }
+  # Add-UserPath <RegistryKey> <dir>: appends dir to the key's Path unless present; keeps %VAR% entries unexpanded
+  # and the value REG_EXPAND_SZ ([Environment]::Get/SetEnvironmentVariable would expand them and write REG_SZ).
+  function Add-UserPath($key, $dir) {
+    $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $entries = @($raw -split ';' | Where-Object { $_ })
+    $want = $dir.TrimEnd('\')
+    foreach ($e in $entries) {
+      if ([Environment]::ExpandEnvironmentVariables($e).TrimEnd('\') -eq $want) { return $false }
+    }
+    $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+    if ($key.GetValueNames() -contains 'Path') { $kind = $key.GetValueKind('Path') }
+    $key.SetValue('Path', (@($entries) + $dir) -join ';', $kind)
+    return $true
+  }
 
   $archRaw = $env:DOCK_ARCH
   if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITEW6432 }
@@ -111,14 +127,15 @@ function Install-Dock {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
   }
 
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $entries = @()
-  if ($userPath) { $entries = $userPath -split ';' | Where-Object { $_ } }
-  if ($entries -notcontains $dest) {
-    if ($env:DOCK_NO_MODIFY_PATH -eq '1') {
-      Write-Host "install: $dest is not on your PATH; add it to use 'dock' from any shell"
-    } else {
-      [Environment]::SetEnvironmentVariable('Path', ((@($entries) + $dest) -join ';'), 'User')
+  if ($env:DOCK_NO_MODIFY_PATH -eq '1') {
+    Write-Host "install: DOCK_NO_MODIFY_PATH=1, user PATH left unchanged; make sure $dest is on it"
+  } else {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try { $added = Add-UserPath $key $dest } finally { $key.Close() }
+    if ($added) {
+      # A direct registry write does not notify Explorer; setting and clearing a variable broadcasts WM_SETTINGCHANGE.
+      [Environment]::SetEnvironmentVariable('DOCK_INSTALL_REFRESH', '1', 'User')
+      [Environment]::SetEnvironmentVariable('DOCK_INSTALL_REFRESH', $null, 'User')
       Write-Host "install: added $dest to your user PATH; open a new terminal to use 'dock'"
     }
   }

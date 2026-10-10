@@ -128,6 +128,36 @@ Expect-Refuse 'missing checksums.txt' 'ok' 'could not download'
 Write-Sums $asset
 Expect-Install 'good install again' 'ok'
 
+# Latest release is resolved from the API response and must be a single valid tag.
+Write-Lf (Join-Path $tmp 'rel/latest.json') "{`"tag_name`": `"v0.0.1`"}"
+Write-Lf (Join-Path $tmp 'rel/latest-array.json') "[{`"tag_name`": `"junk`"}, {`"tag_name`": `"v0.0.1`"}]"
+Expect-Install 'latest release' 'ok' @{ DOCK_VERSION = ''; DOCK_LATEST_URL = "$relUrl/latest.json" }
+Expect-Refuse 'latest as array' 'ok' 'invalid release version' @{ DOCK_VERSION = ''; DOCK_LATEST_URL = "$relUrl/latest-array.json" }
+
+# Add-UserPath keeps %VAR% entries and REG_EXPAND_SZ, and is idempotent (scratch key, never the real PATH).
+if ($onWindows) {
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($installer, [ref]$null, [ref]$null)
+  $fn = $ast.Find({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'Add-UserPath' }, $true)
+  . ([scriptblock]::Create($fn.Extent.Text))
+  $scratch = 'Software\DockInstallTest-' + [Guid]::NewGuid().ToString('N')
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($scratch)
+  try {
+    $key.SetValue('Path', '%USERPROFILE%\go\bin;%DOCK_UNDEFINED_VAR%\bin', [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    $first = Add-UserPath $key 'C:\dock\bin'
+    $second = Add-UserPath $key 'C:\dock\bin\'
+    $third = Add-UserPath $key ([Environment]::ExpandEnvironmentVariables('%USERPROFILE%\go\bin'))
+    $raw = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $script:out = "raw=$raw kind=$($key.GetValueKind('Path')) first=$first second=$second third=$third"
+    Expect 'user PATH keeps %VAR% entries and type' (($raw -ceq '%USERPROFILE%\go\bin;%DOCK_UNDEFINED_VAR%\bin;C:\dock\bin') -and ($key.GetValueKind('Path') -eq 'ExpandString'))
+    Expect 'user PATH update is idempotent' ($first -and -not $second -and -not $third)
+    $key.DeleteValue('Path')
+    Expect 'user PATH created when missing' ((Add-UserPath $key 'C:\dock\bin') -and ($key.GetValue('Path') -ceq 'C:\dock\bin'))
+  } finally {
+    $key.Close()
+    [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($scratch, $false)
+  }
+}
+
 Stop-Job $server -ErrorAction SilentlyContinue
 Remove-Job $server -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

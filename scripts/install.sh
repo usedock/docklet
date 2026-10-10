@@ -2,6 +2,8 @@
 # Installs the dock CLI (macOS, Linux) after verifying its checksum and cosign signature.
 #   curl -fsSL https://raw.githubusercontent.com/usedock/docklet/main/scripts/install.sh | sh
 # Env: DOCK_VERSION (default: latest release), DOCK_INSTALL_DIR (default: $HOME/.local/bin).
+# Test hooks only (CI fakes): DOCK_RELEASE_BASE_URL, DOCK_LATEST_URL, DOCK_OS, DOCK_ARCH. Whatever they point at must
+# still pass the pinned cosign identity check, so they cannot bypass verification.
 # Self-contained on purpose: the verify logic mirrors scripts/lib-verify.sh.
 set -eu
 
