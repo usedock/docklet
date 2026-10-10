@@ -350,16 +350,16 @@ build from the checkout for development, pass `--build-from-source`; that is als
 unverified.
 
 **Release verification.** Every release carries `checksums.txt` and a cosign
-keyless bundle (`<file>.sigstore.json`) for each binary and for `checksums.txt`,
-signed by the `release.yml` workflow of this repository. Bootstrap downloads the
+keyless bundle (`<file>.bundle`) for each binary and for `checksums.txt`,
+signed by the `release.yml` workflow of this repository at the exact release tag. Bootstrap downloads the
 binary for the host arch, then stops with an error unless the signature of
-`checksums.txt` and of the binary verify and the sha256 matches. If `cosign` is
-missing it installs a pinned cosign release after checking its sha256. To verify
+`checksums.txt` and of the binary verify and the sha256 matches. A preinstalled `cosign` is used only if it is exactly v2.4.1;
+otherwise it installs the pinned cosign release after checking its sha256. To verify
 by hand:
 
 ```sh
-cosign verify-blob --bundle docklet-linux-amd64.sigstore.json \
-  --certificate-identity-regexp '^https://github.com/usedock/docklet/\.github/workflows/release\.yml@refs/tags/v' \
+cosign verify-blob --bundle docklet-linux-amd64.bundle \
+  --certificate-identity 'https://github.com/usedock/docklet/.github/workflows/release.yml@refs/tags/<version>' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   docklet-linux-amd64
 sha256sum -c --ignore-missing checksums.txt

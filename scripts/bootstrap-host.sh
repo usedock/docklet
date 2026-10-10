@@ -819,7 +819,10 @@ summary() {
 }
 
 # 1. Base packages the rest of the script relies on.
-ensure_packages curl ca-certificates iproute2 iptables bzip2 jq python3
+ensure_packages curl ca-certificates iproute2 iptables bzip2 jq python3 e2fsprogs util-linux mount
+for tool in mkfs.ext4 mountpoint losetup mount umount; do
+  command -v "$tool" >/dev/null 2>&1 || die "${tool} is missing after installing e2fsprogs, util-linux and mount; install them and re-run"
+done
 
 # 2. Runtime setup for the chosen runtime.
 if [ "$RUNTIME" = "gvisor" ]; then
