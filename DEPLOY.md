@@ -124,8 +124,8 @@ time to install an update, change a setting, or repair a host.
    object-store endpoint, bucket, or credential is returned — hosts never hold store
    secrets. A re-run on an enrolled host keeps its identity and credential.
 4. Writes `/etc/docklet/docklet.env` (mode `0600`) without the shared fleet token.
-5. Builds the docklet from the checkout (`go build ./cmd/docklet`) or installs a
-   prebuilt binary, then installs it to `/usr/local/bin/docklet`.
+5. Downloads the `DOCKLET_VERSION` release, verifies its checksum and cosign
+   signature, and installs it to `/usr/local/bin/docklet` (see Release verification).
 6. Builds the image its docks boot from, if absent:
    - `gvisor` → the OCI image `dock-gvisor:latest` from
      `scripts/Dockerfile.gvisor`, rebuilt when its guest agent, entrypoint, or
@@ -168,10 +168,9 @@ sudo bash scripts/bootstrap-host.sh \
 ```
 
 Registers with `runtime: gvisor` and only ever receives gVisor
-placements. The installer needs only Docker: it builds docklet with your own `go`
-when present (as the user who ran
-sudo, so the checkout stays theirs), and in `golang` containers
-otherwise.
+placements. The installer needs only Docker. With `--build-from-source` it builds docklet
+with your own `go` when present (as the user who ran sudo), and in `golang`
+containers otherwise.
 
 ### microvm host
 
@@ -344,15 +343,27 @@ sudo bash scripts/bootstrap-host.sh --fleet-url … --fleet-token …
 
 An old untracked `versions.env` in the docklet directory is unused and can be deleted.
 
-Or ship a binary only, skipping the Go toolchain requirement:
+Bootstrap installs the release named by `DOCKLET_VERSION` (pinned in the script;
+override it to move a host to another release). To ship your own binary, set
+`DOCKLET_BIN=/tmp/docklet`; that path is **not** verified and bootstrap warns. To
+build from the checkout for development, pass `--build-from-source`; that is also
+unverified.
+
+**Release verification.** Every release carries `checksums.txt` and a cosign
+keyless bundle (`<file>.sigstore.json`) for each binary and for `checksums.txt`,
+signed by the `release.yml` workflow of this repository. Bootstrap downloads the
+binary for the host arch, then stops with an error unless the signature of
+`checksums.txt` and of the binary verify and the sha256 matches. If `cosign` is
+missing it installs a pinned cosign release after checking its sha256. To verify
+by hand:
 
 ```sh
-sudo DOCKLET_BIN=/tmp/docklet bash scripts/bootstrap-host.sh …
+cosign verify-blob --bundle docklet-linux-amd64.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/usedock/docklet/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  docklet-linux-amd64
+sha256sum -c --ignore-missing checksums.txt
 ```
-
-Bootstrap keeps an already-installed `/usr/local/bin/docklet` when there is no
-checkout *and* no Go on `PATH`, so verify the binary timestamp after an upgrade
-if you rely on building from source.
 
 **After a kernel upgrade** on a microvm host, the base image still boots its own
 kernel, so a running host keeps working; rebuild when you want the image to match

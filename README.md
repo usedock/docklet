@@ -34,10 +34,13 @@ A snapshot moves only between hosts with the same engine and CPU architecture.
 
 ## Add a host
 
-One command per machine, run as root on Ubuntu from a checkout of this repo. It installs the runtime, the docklet and a systemd unit, then enrolls the host with your control plane ([usedock/dock](https://github.com/usedock/dock)):
+One command per machine, run as root on Ubuntu from a checkout of this repo. It installs the runtime, the signature-verified docklet release and a systemd unit, then enrolls the host with your control plane ([usedock/dock](https://github.com/usedock/dock)):
 
 ```sh
-sudo bash scripts/bootstrap-host.sh \n  --fleet-url https://dock.example.com \n  --fleet-token "$FLEET_TOKEN" \n  --runtime microvm    # or gvisor
+sudo bash scripts/bootstrap-host.sh \
+  --fleet-url https://dock.example.com \
+  --fleet-token "$FLEET_TOKEN" \
+  --runtime microvm    # or gvisor
 ```
 
 Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The script is re-runnable. See [DEPLOY.md](DEPLOY.md) for flags, base images and troubleshooting.
@@ -61,7 +64,7 @@ Contributions are welcome. Every contributor signs the CLA; the CLA bot asks on 
 
 ## Security
 
-Report vulnerabilities to [security@usedock.io](mailto:security@usedock.io), not in public issues. See `SECURITY.md`. Releases will be signed with cosign (planned), and the install script will stop if verification fails.
+Report vulnerabilities to [security@usedock.io](mailto:security@usedock.io), not in public issues. See `SECURITY.md`. Releases are signed with cosign (keyless, GitHub OIDC) and ship `checksums.txt`; the install script stops if the checksum or signature is missing or bad. See the release verification section of [DEPLOY.md](DEPLOY.md).
 
 ## License
 

@@ -1,0 +1,78 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        # Add a binary with one line: name, package under cmd/, target os and arch.
+        include:
+          - { name: docklet, pkg: ./cmd/docklet, goos: linux, goarch: amd64 }
+          - { name: docklet, pkg: ./cmd/docklet, goos: linux, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          NAME: ${{ matrix.name }}
+          PKG: ${{ matrix.pkg }}
+        run: |
+          out="${NAME}-${GOOS}-${GOARCH}"
+          [ "$GOOS" = windows ] && out="${out}.exe"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${out}" "$PKG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: bin-*
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+      - name: checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > ../checksums.txt
+          mv ../checksums.txt checksums.txt
+          cat checksums.txt
+      - name: sign
+        working-directory: dist
+        run: |
+          for f in *; do
+            case "$f" in *.sigstore.json) continue ;; esac
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
+          done
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag

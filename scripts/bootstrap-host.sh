@@ -41,6 +41,9 @@ POOL_SIZE="${DOCKLET_POOL_SIZE:-}"
 EGRESS_ALLOW_PRIVATE="${DOCKLET_EGRESS_ALLOW_PRIVATE:-}"
 ALLOW_VULNERABLE="${DOCKLET_ALLOW_VULNERABLE:-}"
 PREBUILT_BIN="${DOCKLET_BIN:-}"
+# Release to install; bump with each docklet release. Verified by checksum and cosign.
+DOCKLET_VERSION="${DOCKLET_VERSION:-v0.1.0}"
+BUILD_FROM_SOURCE="${DOCKLET_BUILD_FROM_SOURCE:-0}"
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-60}"
 # Enrollment retries: a control-plane restart during install is transient.
 ENROLL_ATTEMPTS="${ENROLL_ATTEMPTS:-10}"
@@ -67,6 +70,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# shellcheck source=lib-verify.sh
+. "${SCRIPT_DIR}/lib-verify.sh"
+
 log() { printf '[%s] bootstrap-host: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 warn() { printf '[%s] bootstrap-host: WARNING: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
 die() {
@@ -81,6 +87,12 @@ Usage: bootstrap-host.sh --fleet-url <url> --fleet-token <token>
                          [--pool-size N] [--egress-allow-private CIDRS]
                          [--allow-vulnerable NAMES]
                          [--base-image PATH|URL --base-image-sha256 HEX]
+                         [--build-from-source]
+
+  The docklet binary is downloaded from the GitHub release DOCKLET_VERSION, and the
+  install stops unless its sha256 matches checksums.txt AND the cosign signature of
+  both files verifies (cosign is installed from a pinned, checksum-checked release if missing).
+  --build-from-source  DEVELOPMENT ONLY: build from this checkout instead; nothing is verified
 
   --fleet-url    control plane base URL, e.g. https://api.example.com
   --fleet-token  shared token used to enroll and register (used once; not stored on the host);
@@ -106,7 +118,7 @@ Usage: bootstrap-host.sh --fleet-url <url> --fleet-token <token>
 Env equivalents: DOCKLET_FLEET_URL, DOCKLET_FLEET_TOKEN, DOCKLET_HOST_ID,
 DOCKLET_RUNTIME, DOCKLET_POOL_SIZE, DOCKLET_EGRESS_ALLOW_PRIVATE,
 DOCKLET_ALLOW_VULNERABLE, DOCKLET_BASE_IMAGE, DOCKLET_BASE_IMAGE_SHA256.
-Installer knobs: DOCKLET_BIN (prebuilt docklet binary), DOCKLET_GVISOR_IMAGE,
+Installer knobs: DOCKLET_VERSION (release to install), DOCKLET_BIN (prebuilt binary, NOT verified), DOCKLET_GVISOR_IMAGE,
 DOCKLET_GO_IMAGE (toolchain container used when go is missing),
 DOCKLET_IMAGE_DIR, DOCKLET_JAIL_BASE, FC_VERSION, RUNSC_VERSION (overriding either requires the
 matching FC_SHA256_X86_64/FC_SHA256_AARCH64/RUNSC_SHA256_X86_64),
@@ -200,6 +212,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --base-image-sha256=*)
       BASE_IMAGE_SHA256="${1#*=}"
+      shift
+      ;;
+    --build-from-source)
+      BUILD_FROM_SOURCE=1
       shift
       ;;
     -h|--help)
@@ -568,14 +584,18 @@ write_env_file() {
 }
 
 install_docklet_binary() {
-  local out
+  local out asset arch
   if [ -n "$PREBUILT_BIN" ]; then
     [ -f "$PREBUILT_BIN" ] || die "DOCKLET_BIN=${PREBUILT_BIN} not found"
+    warn "installing DOCKLET_BIN without signature verification"
     install -D -m 0755 "$PREBUILT_BIN" "$DOCKLET_DEST"
     log "installed ${DOCKLET_DEST} from ${PREBUILT_BIN}"
     return 0
   fi
-  if [ -f "${DOCKLET_DIR}/go.mod" ] && [ -f "${DOCKLET_DIR}/cmd/docklet/main.go" ]; then
+  if [ "$BUILD_FROM_SOURCE" = "1" ]; then
+    warn "building from source: the binary is NOT signature-verified (development only)"
+    [ -f "${DOCKLET_DIR}/go.mod" ] && [ -f "${DOCKLET_DIR}/cmd/docklet/main.go" ] \
+      || die "--build-from-source needs a checkout of this repo"
     out="$(mktemp -d)"
     TMP_FILES+=("$out")
     if as_invoker sh -c 'command -v go' >/dev/null 2>&1; then
@@ -589,17 +609,24 @@ install_docklet_binary() {
       docker run --rm -v "${DOCKLET_DIR}:/src:ro" -v "${out}:/out" -w /src \
         -e GOFLAGS=-buildvcs=false "$GO_IMAGE" go build -o /out/docklet ./cmd/docklet
     else
-      die "building docklet needs Go or Docker; install one, or set DOCKLET_BIN to a prebuilt binary"
+      die "building docklet needs Go or Docker; install one, or drop --build-from-source"
     fi
     install -D -m 0755 "${out}/docklet" "$DOCKLET_DEST"
     log "installed ${DOCKLET_DEST} (built from checkout)"
     return 0
   fi
-  if [ -x "$DOCKLET_DEST" ]; then
-    log "no checkout to build from; keeping ${DOCKLET_DEST}"
-    return 0
-  fi
-  die "no docklet binary: set DOCKLET_BIN to a prebuilt binary or run from a checkout with Go installed"
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) die "unsupported architecture: $(uname -m)" ;;
+  esac
+  asset="docklet-linux-${arch}"
+  out="$(mktemp -d)"
+  TMP_FILES+=("$out")
+  log "downloading and verifying docklet ${DOCKLET_VERSION} (${asset})"
+  fetch_release "$DOCKLET_VERSION" "$out" "$asset"
+  install -D -m 0755 "${out}/${asset}" "$DOCKLET_DEST"
+  log "installed ${DOCKLET_DEST} (${DOCKLET_VERSION}, signature verified)"
 }
 
 install_unit() {
