@@ -41,7 +41,27 @@ function Write-Sums($name) {
 }
 Write-Sums $asset
 foreach ($b in @('checksums.txt.bundle', "$asset.bundle")) { [IO.File]::WriteAllText((Join-Path $rel $b), '') }
-$relUrl = ([Uri](Join-Path $tmp 'rel')).AbsoluteUri
+# Serve the fake release over loopback http (pwsh on Linux cannot fetch file:// URLs).
+$port = Get-Random -Minimum 20000 -Maximum 40000
+$relUrl = "http://127.0.0.1:$port"
+$server = Start-Job -ArgumentList (Join-Path $tmp 'rel'), $port -ScriptBlock {
+  param($root, $port)
+  $l = New-Object System.Net.HttpListener
+  $l.Prefixes.Add("http://127.0.0.1:$port/")
+  $l.Start()
+  while ($l.IsListening) {
+    $c = $l.GetContext()
+    $f = Join-Path $root ($c.Request.Url.AbsolutePath.TrimStart('/') -replace '/', [IO.Path]::DirectorySeparatorChar)
+    if ((Test-Path -LiteralPath $f -PathType Leaf) -and $f.StartsWith($root)) {
+      $b = [IO.File]::ReadAllBytes($f)
+      $c.Response.OutputStream.Write($b, 0, $b.Length)
+    } else { $c.Response.StatusCode = 404 }
+    $c.Response.Close()
+  }
+}
+for ($i = 0; $i -lt 50; $i++) {
+  try { [void](New-Object Net.Sockets.TcpClient('127.0.0.1', $port)).Close(); break } catch { Start-Sleep -Milliseconds 200 }
+}
 
 $script:n = 0
 # Runs install.ps1 in a child process; returns the exit code and sets $script:dest and $script:out.
@@ -108,5 +128,7 @@ Expect-Refuse 'missing checksums.txt' 'ok' 'could not download'
 Write-Sums $asset
 Expect-Install 'good install again' 'ok'
 
+Stop-Job $server -ErrorAction SilentlyContinue
+Remove-Job $server -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 exit $script:fail
