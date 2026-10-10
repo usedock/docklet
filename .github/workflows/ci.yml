@@ -27,5 +27,7 @@ jobs:
         run: go test -timeout 8m ./...
       - name: shell syntax
         run: for f in scripts/*.sh; do bash -n "$f"; done
+      - name: verify tests
+        run: bash scripts/test-verify.sh
       - name: gitleaks
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --no-banner --redact
