@@ -25,6 +25,8 @@ var contextNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 type Context struct {
 	URL    string `toml:"url,omitempty"`
 	APIKey string `toml:"api_key,omitempty"`
+	// Workspace is the default workspace id for dock new.
+	Workspace string `toml:"workspace,omitempty"`
 }
 
 // Config is the on-disk CLI config.

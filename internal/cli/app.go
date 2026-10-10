@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // App is one CLI invocation environment; tests replace its fields.
@@ -26,15 +28,21 @@ type App struct {
 	HTTP       *http.Client
 	// RunSSH runs the ssh client; nil uses os/exec.
 	RunSSH func(ctx context.Context, argv []string) error
+	// ReadSecret reads a line without echo from the terminal; nil reads a line from Stdin.
+	ReadSecret func() (string, error)
 }
 
 // NewApp returns an App wired to the process streams.
 func NewApp() *App {
-	tty := false
-	if fi, err := os.Stdin.Stat(); err == nil {
-		tty = fi.Mode()&os.ModeCharDevice != 0
+	fd := int(os.Stdin.Fd())
+	a := &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, StdinIsTTY: term.IsTerminal(fd), Getenv: os.Getenv}
+	if a.StdinIsTTY {
+		a.ReadSecret = func() (string, error) {
+			b, err := term.ReadPassword(fd)
+			return string(b), err
+		}
 	}
-	return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, StdinIsTTY: tty, Getenv: os.Getenv}
+	return a
 }
 
 const usageText = `dock - command line client for Dock (early, not released yet)
@@ -52,10 +60,10 @@ Commands:
   branch <dock>         start independent docks from a dock's state
   rm <dock>             delete a dock
   login                 store an API key for a context (read from stdin)
-  context add|use|ls|rm manage control plane contexts
+  context add|use|ls|rm manage control plane contexts (and a default workspace)
 
 Every command accepts --json. <dock> is a dock name or id.
-Environment: DOCK_API_URL and DOCK_API_KEY override the active context.
+Environment: DOCK_API_URL, DOCK_API_KEY and DOCK_WORKSPACE override the active context.
 `
 
 // Run executes args (without the program name) and returns the exit code.
@@ -218,7 +226,11 @@ func (a *App) client() (*Client, error) {
 	if key == "" {
 		return nil, newError("no_api_key", "no API key; run 'dock login' or set DOCK_API_KEY")
 	}
-	return &Client{BaseURL: base, Key: key, HTTP: a.HTTP}, nil
+	ws := cx.Workspace
+	if v := a.env("DOCK_WORKSPACE"); v != "" {
+		ws = strings.TrimSpace(v)
+	}
+	return &Client{BaseURL: base, Key: key, HTTP: a.HTTP, Workspace: ws}, nil
 }
 
 func (a *App) printJSON(raw json.RawMessage) error {

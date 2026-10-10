@@ -26,12 +26,12 @@ func jsonOut(t *testing.T, te *testEnv) any {
 
 func TestNew(t *testing.T) {
 	te := newEnv(t)
-	mustExit(t, te, 0, "new", "box", "--cpus", "4", "--memory", "8gb", "--disk", "40gb", "--image", "ubuntu-24.04", "--env", "prod")
+	mustExit(t, te, 0, "new", "api", "--cpus", "4", "--memory", "8gb", "--disk", "40gb", "--image", "ubuntu-24.04", "--env", "prod")
 	r := te.api.last()
 	if r.Method != "POST" || r.URI != "/v1/docks" || r.Auth != "Bearer dock_testkey" {
 		t.Fatalf("request %+v", r)
 	}
-	want := map[string]any{"name": "box", "cpus": 4.0, "memoryMiB": 8192.0, "diskGiB": 40.0, "image": "ubuntu-24.04", "environment": "prod", "workspaceId": wsID}
+	want := map[string]any{"name": "api", "cpus": 4.0, "memoryMiB": 8192.0, "diskGiB": 40.0, "image": "ubuntu-24.04", "environment": "prod", "workspaceId": wsID}
 	if len(r.Body) != len(want) {
 		t.Fatalf("body %v", r.Body)
 	}
@@ -40,7 +40,7 @@ func TestNew(t *testing.T) {
 			t.Errorf("body[%s] = %v, want %v", k, r.Body[k], v)
 		}
 	}
-	if !strings.Contains(te.out.String(), "created box ("+dockA+")") {
+	if !strings.Contains(te.out.String(), "created api ("+dockA+")") {
 		t.Fatalf("out %q", te.out)
 	}
 	// flags may follow the name or precede it, and --workspace skips discovery
@@ -236,7 +236,7 @@ func TestErrorEnvelope(t *testing.T) {
 	te.api.routes["POST /v1/docks"] = func(map[string]any) (int, any) {
 		return 409, apiErr{"dock_name_taken", "Dock name already in use"}
 	}
-	mustExit(t, te, 1, "new", "web")
+	mustExit(t, te, 1, "new", "web", "--workspace", wsID)
 	if te.errb.String() != "error: dock_name_taken: Dock name already in use\n" {
 		t.Fatalf("err %q", te.errb)
 	}

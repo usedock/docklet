@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -81,32 +82,55 @@ func (s *specFlags) overlay(c *cmdFlags, spec *dockSpec) error {
 	return nil
 }
 
-// resolveWorkspace picks the given workspace or the first one of the first organization.
-func (a *App) resolveWorkspace(ctx context.Context, cl *Client, given string) (string, error) {
+// resolveWorkspace returns the given workspace, the context default, or the caller's only workspace.
+// It never picks one of several: the API's organization order is not stable.
+func (a *App) resolveWorkspace(ctx context.Context, cl *Client, given string, quiet bool) (string, error) {
+	if given == "" {
+		given = cl.Workspace
+	}
 	if given != "" {
 		return given, nil
 	}
-	var orgs []struct {
-		ID string `json:"id"`
+	type named struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
 	}
+	var orgs []named
 	raw, err := cl.Do(ctx, "GET", "/organizations", nil, nil)
 	if err != nil {
 		return "", err
 	}
-	if err := json.Unmarshal(raw, &orgs); err != nil || len(orgs) == 0 {
-		return "", newError("no_workspace", "no organization found; pass --workspace <id>")
+	if err := json.Unmarshal(raw, &orgs); err != nil {
+		return "", newError("bad_response", "unexpected organization list")
 	}
-	var wss []struct {
-		ID string `json:"id"`
+	var found []string
+	var only string
+	for _, o := range orgs {
+		var wss []named
+		raw, err := cl.Do(ctx, "GET", "/organizations/"+url.PathEscape(o.ID)+"/workspaces", nil, nil)
+		if err != nil {
+			return "", err
+		}
+		if err := json.Unmarshal(raw, &wss); err != nil {
+			return "", newError("bad_response", "unexpected workspace list")
+		}
+		for _, w := range wss {
+			only = w.ID
+			found = append(found, fmt.Sprintf("%s/%s (%s)", o.Name, w.Name, w.ID))
+		}
 	}
-	raw, err = cl.Do(ctx, "GET", "/organizations/"+orgs[0].ID+"/workspaces", nil, nil)
-	if err != nil {
-		return "", err
-	}
-	if err := json.Unmarshal(raw, &wss); err != nil || len(wss) == 0 {
+	switch len(found) {
+	case 0:
 		return "", newError("no_workspace", "no workspace found; pass --workspace <id>")
+	case 1:
+		if !quiet {
+			fmt.Fprintf(a.Stderr, "using workspace %s\n", found[0])
+		}
+		return only, nil
+	default:
+		return "", newError("workspace_required", fmt.Sprintf("you have %d workspaces: %s; pass --workspace <id> or set a default with 'dock context use <context> --workspace <id>'",
+			len(found), strings.Join(found, ", ")))
 	}
-	return wss[0].ID, nil
 }
 
 // resolveDock turns a name or id into a dock id.
@@ -141,7 +165,7 @@ func (a *App) resolveDock(ctx context.Context, cl *Client, ref string) (string, 
 func (a *App) cmdNew(ctx context.Context, args []string) error {
 	c := a.flags("new", "new [name] [--cpus N] [--memory 8gb] [--disk 40gb] [--image X] [--env E] [--workspace ID]")
 	sf := registerSpecFlags(c)
-	ws := c.fs.String("workspace", "", "workspace id (default: first workspace)")
+	ws := c.fs.String("workspace", "", "workspace id (default: the context's, else your only workspace)")
 	pos, err := c.parse(args, 0, 1)
 	if err != nil {
 		return err
@@ -164,7 +188,7 @@ func (a *App) cmdNew(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	wsID, err := a.resolveWorkspace(ctx, cl, *ws)
+	wsID, err := a.resolveWorkspace(ctx, cl, *ws, *c.json)
 	if err != nil {
 		return err
 	}
@@ -295,6 +319,10 @@ func (a *App) cmdExec(ctx context.Context, args []string) error {
 		if res.Truncated {
 			fmt.Fprintln(a.Stderr, "warning: output was truncated to 1 MiB per stream")
 		}
+	}
+	if res.ExitCode < 0 {
+		// The guest reports death by signal N as -N; shells report it as 128+N.
+		return &exitError{code: 128 - res.ExitCode}
 	}
 	if res.ExitCode != 0 {
 		return &exitError{code: res.ExitCode}

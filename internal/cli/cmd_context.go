@@ -8,7 +8,7 @@ import (
 )
 
 func (a *App) cmdContext(args []string) error {
-	const use = "context add <name> --url <url> | use <name> | ls | rm <name>"
+	const use = "context add <name> --url <url> [--workspace ID] | use <name> [--workspace ID] | ls | rm <name>"
 	if len(args) == 0 {
 		return usagef("usage: dock %s", use)
 	}
@@ -19,8 +19,9 @@ func (a *App) cmdContext(args []string) error {
 	}
 	switch sub {
 	case "add":
-		c := a.flags("context add", "context add <name> --url <url>")
+		c := a.flags("context add", "context add <name> --url <url> [--workspace ID]")
 		u := c.fs.String("url", "", "control plane URL")
+		ws := c.fs.String("workspace", "", "default workspace id for dock new")
 		pos, err := c.parse(rest, 1, 1)
 		if err != nil {
 			return err
@@ -45,6 +46,9 @@ func (a *App) cmdContext(args []string) error {
 		}
 		cx := cfg.Contexts[name]
 		cx.URL = norm
+		if c.isSet("workspace") {
+			cx.Workspace = strings.TrimSpace(*ws)
+		}
 		cfg.Contexts[name] = cx
 		if err := cfg.Save(path); err != nil {
 			return err
@@ -55,7 +59,8 @@ func (a *App) cmdContext(args []string) error {
 		fmt.Fprintf(a.Stdout, "added context %s (%s)\n", name, norm)
 		return nil
 	case "use":
-		c := a.flags("context use", "context use <name>")
+		c := a.flags("context use", "context use <name> [--workspace ID]")
+		ws := c.fs.String("workspace", "", "default workspace id for dock new (empty clears it)")
 		pos, err := c.parse(rest, 1, 1)
 		if err != nil {
 			return err
@@ -68,6 +73,11 @@ func (a *App) cmdContext(args []string) error {
 			return newError("context_not_found", fmt.Sprintf("context %q does not exist", pos[0]))
 		}
 		cfg.Current = pos[0]
+		if c.isSet("workspace") {
+			cx := cfg.Contexts[pos[0]]
+			cx.Workspace = strings.TrimSpace(*ws)
+			cfg.Contexts[pos[0]] = cx
+		}
 		if err := cfg.Save(path); err != nil {
 			return err
 		}
@@ -86,21 +96,22 @@ func (a *App) cmdContext(args []string) error {
 			return err
 		}
 		type row struct {
-			Name    string `json:"name"`
-			URL     string `json:"url"`
-			Current bool   `json:"current"`
-			HasKey  bool   `json:"hasKey"`
+			Name      string `json:"name"`
+			URL       string `json:"url"`
+			Workspace string `json:"workspace,omitempty"`
+			Current   bool   `json:"current"`
+			HasKey    bool   `json:"hasKey"`
 		}
 		var rows []row
 		for _, n := range cfg.names() {
 			cx, _ := cfg.lookup(n)
-			rows = append(rows, row{n, cx.URL, n == cfg.current(), cx.APIKey != ""})
+			rows = append(rows, row{n, cx.URL, cx.Workspace, n == cfg.current(), cx.APIKey != ""})
 		}
 		if *c.json {
 			return a.printValue(rows)
 		}
 		tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tAPI KEY")
+		fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tWORKSPACE\tAPI KEY")
 		for _, r := range rows {
 			cur, key := "", "none"
 			if r.Current {
@@ -109,7 +120,7 @@ func (a *App) cmdContext(args []string) error {
 			if r.HasKey {
 				key = "set"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", cur, r.Name, r.URL, key)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", cur, r.Name, r.URL, r.Workspace, key)
 		}
 		return tw.Flush()
 	case "rm", "remove":
@@ -146,7 +157,7 @@ func (a *App) cmdContext(args []string) error {
 	}
 }
 
-// cmdLogin stores an API key read from stdin; input is echoed on a terminal (no term dependency).
+// cmdLogin stores an API key read from stdin; a terminal reads it without echo.
 func (a *App) cmdLogin(args []string) error {
 	c := a.flags("login", "login [--context NAME]  (API key is read from stdin)")
 	target := c.fs.String("context", "", "context to store the key in (default: current)")
@@ -168,11 +179,15 @@ func (a *App) cmdLogin(args []string) error {
 	if _, ok := cfg.lookup(name); !ok {
 		return newError("context_not_found", fmt.Sprintf("context %q does not exist", name))
 	}
-	if a.StdinIsTTY {
-		fmt.Fprintln(a.Stderr, "note: input is echoed on a terminal; pipe the key instead, e.g. echo $KEY | dock login")
+	var line string
+	var rerr error
+	if a.StdinIsTTY && a.ReadSecret != nil {
 		fmt.Fprint(a.Stderr, "API key: ")
+		line, rerr = a.ReadSecret()
+		fmt.Fprintln(a.Stderr)
+	} else {
+		line, rerr = bufio.NewReader(a.Stdin).ReadString('\n')
 	}
-	line, rerr := bufio.NewReader(a.Stdin).ReadString('\n')
 	key := strings.TrimSpace(line)
 	if key == "" || strings.ContainsAny(key, " \t") {
 		if rerr != nil && key == "" {

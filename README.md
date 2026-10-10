@@ -51,8 +51,8 @@ Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The scrip
 
 ```sh
 go build -o dock ./cmd/dock
-echo "$DOCK_API_KEY" | dock login        # stores the key; input is echoed on a terminal, so pipe it
-dock new web --cpus 4 --memory 8gb --disk 40gb --env staging
+dock login                               # prompts without echo; or: echo "$DOCK_API_KEY" | dock login
+dock new web --cpus 4 --memory 8gb --disk 40gb --env staging   # returns once the dock is ready
 dock ls
 dock exec web -- uname -a                # exits with the command's exit code
 dock ssh web                             # runs ssh against the Dock SSH gateway (--print to show it)
@@ -64,7 +64,8 @@ dock stop web && dock resume web && dock rm web
 - Every command accepts `--json` and prints the API data. Errors print `error: <code>: <message>` to stderr and exit 1; usage errors exit 2.
 - Sizes: `8gb`, `8g`, `8192mb`; a plain number is MiB for memory and GiB for disk.
 - `<dock>` is a name or id. `dock new` reads `./dock.toml` (`name`, `image`, `cpus`, `memory`, `disk`, `environment`); flags override it and unknown keys are an error.
-- Contexts: `dock context add|use|ls|rm`. The built-in `cloud` context points at `https://api.usedock.io`. Config lives in `os.UserConfigDir()/dock/config.toml` (mode 0600). `DOCK_API_URL` and `DOCK_API_KEY` override the active context.
+- Contexts: `dock context add|use|ls|rm`. The built-in `cloud` context points at `https://api.usedock.io`. Config lives in `os.UserConfigDir()/dock/config.toml` (mode 0600). `DOCK_API_URL`, `DOCK_API_KEY` and `DOCK_WORKSPACE` override the active context.
+- Workspace for `dock new`: `--workspace`, then `DOCK_WORKSPACE`, then the context default (`dock context use <name> --workspace <id>`), then your only workspace. With several workspaces and none chosen, `dock new` fails and lists them.
 - Not yet: `dock cp` (the API has no file endpoint for live docks) and streaming `exec` output (the exec API returns the bounded result when the command ends).
 
 ## Development
