@@ -61,6 +61,10 @@ type Config struct {
 	// CapacityVCPU and CapacityMemMiB budget the summed requested resources of live docks; 0 leaves that resource unbounded.
 	CapacityVCPU   int64
 	CapacityMemMiB int64
+	// DiskTotalBytes reports host disk capacity for allocated-disk admission; nil leaves it off.
+	DiskTotalBytes func() int64
+	// DiskOvercommit scales DiskTotalBytes into the allocatable disk budget; 0 means 1.0.
+	DiskOvercommit float64
 	// DiskFreeBytes reports free host disk for gvisor work disks; nil leaves disk admission off.
 	DiskFreeBytes func() int64
 	// AgentCall overrides guest-agent calls (tests only).
@@ -79,6 +83,8 @@ type vm struct {
 	running       bool
 	fastToken     string
 	fastWorkspace string
+	// backing is the pool slot id a claimed dock still runs under; empty when the dock id is its own.
+	backing string
 	// ephemeral marks Fast Run runtimes and pool slots, which the docks table never tracks.
 	ephemeral bool
 	// egressGateway is set while the guest is confined to its allowlist.
@@ -152,13 +158,21 @@ func (h *Host) Rescan() []string {
 			continue
 		}
 		dockID := entry.Name()
+		jail := filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
+		// A claimed pool slot is tracked under its runtime id, never as the slot itself.
+		owner := readClaim(jail)
+		if owner == "" {
+			owner = dockID
+		}
 		h.mu.Lock()
-		_, tracked := h.vms[dockID]
+		_, tracked := h.vms[owner]
+		for _, v := range h.vms {
+			tracked = tracked || v.backing == dockID
+		}
 		h.mu.Unlock()
 		if tracked {
 			continue
 		}
-		jail := filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
 		iface := TapFor(dockID)
 		if h.usesVeth() {
 			iface = net.VethFor(dockID)
@@ -179,10 +193,33 @@ func (h *Host) Rescan() []string {
 			continue
 		}
 		token, workspace := readExecAgent(jail)
-		h.vms[dockID] = &vm{res: res, tap: iface, guestIP: assigned[dockID], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
-		adopted = append(adopted, dockID)
+		live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
+		if owner != dockID {
+			live.backing = dockID
+			live.ephemeral = true
+		}
+		h.mu.Lock()
+		h.vms[owner] = live
+		h.mu.Unlock()
+		adopted = append(adopted, owner)
 	}
 	return adopted
+}
+
+// claimSidecar names the runtime id a claimed pool slot serves, so a restart re-tracks it under that id.
+const claimSidecar = "claimed-by"
+
+// readClaim returns the runtime id a slot jail was claimed by, or empty.
+func readClaim(jail string) string {
+	raw, err := os.ReadFile(filepath.Join(jail, claimSidecar))
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(raw))
+	if checkIDs(id) != nil {
+		return ""
+	}
+	return id
 }
 
 // TapFor derives a stable <=15 char TAP name per dock.
@@ -278,6 +315,16 @@ func checkSnapshotRef(snapshotID string) error {
 // jailRoot is the per-dock jail staging dir; firecracker paths are relative to it.
 func (h *Host) jailRoot(dockID string) string {
 	return filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
+}
+
+// backingID is the id the dock's runtime resources are named by.
+func (h *Host) backingID(dockID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if v, ok := h.vms[dockID]; ok && v.backing != "" {
+		return v.backing
+	}
+	return dockID
 }
 
 func (h *Host) handle(dockID string) *fc.Handle {
@@ -991,12 +1038,14 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	if err := checkIDs(dockID); err != nil {
 		return err
 	}
-	_ = h.cfg.Driver.Terminate(h.handle(dockID))
-	cleanupCgroup(h.cfg.CgroupBase, dockID)
+	// A claimed pool dock runs under its slot id: that names the container, jail and work disk.
+	backing := h.backingID(dockID)
+	_ = h.cfg.Driver.Terminate(h.handle(backing))
+	cleanupCgroup(h.cfg.CgroupBase, backing)
 	h.releaseEgress(dockID)
 	_ = h.alloc.Release(dockID)
 	// Claimed pool VMs keep their slot TAP, so delete the tracked one.
-	tap := h.ifaceFor(dockID)
+	tap := h.ifaceFor(backing)
 	h.mu.Lock()
 	if v, ok := h.vms[dockID]; ok && v.tap != "" {
 		tap = v.tap
@@ -1004,11 +1053,11 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	delete(h.vms, dockID)
 	h.mu.Unlock()
 	_ = h.deleteIface(tap)
-	_ = os.RemoveAll(h.jailRoot(dockID))
-	_ = os.RemoveAll(filepath.Join(h.cfg.VMsDir, dockID))
+	_ = os.RemoveAll(h.jailRoot(backing))
+	_ = os.RemoveAll(filepath.Join(h.cfg.VMsDir, backing))
 	// A gvisor dock owns a loop-mounted work disk that must be unmounted before it is removed.
 	if w, ok := h.cfg.Driver.(interface{ RemoveWorkDisk(dockID string) error }); ok {
-		return w.RemoveWorkDisk(dockID)
+		return w.RemoveWorkDisk(backing)
 	}
 	return nil
 }
@@ -1126,15 +1175,17 @@ func (h *Host) diskUsed(dockID string, v *vm) int64 {
 	if !last.at.IsZero() && time.Since(last.at) < diskUsageTTL {
 		return last.bytes
 	}
-	path := filepath.Join(h.jailRoot(dockID), fc.RootfsName)
+	backing := h.backingID(dockID)
+	path := filepath.Join(h.jailRoot(backing), fc.RootfsName)
 	if h.usesVeth() {
+		// Never WorkDir here: it mounts, and a sample racing a stop would remount the disk.
 		vols, ok := h.cfg.Driver.(interface {
-			WorkDir(dockID string) (string, error)
+			WorkDiskPath(dockID string) (string, error)
 		})
 		if !ok {
 			return last.bytes
 		}
-		dir, err := vols.WorkDir(dockID)
+		dir, err := vols.WorkDiskPath(backing)
 		if err != nil {
 			return last.bytes
 		}

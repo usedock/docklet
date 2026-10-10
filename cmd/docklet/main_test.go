@@ -29,3 +29,16 @@ func TestTunnelErrorCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestParseOvercommit(t *testing.T) {
+	for raw, want := range map[string]float64{"": 1, "1.5": 1.5, "0.5": 0.5} {
+		if got, err := parseOvercommit(raw); err != nil || got != want {
+			t.Errorf("%q: got %v, %v, want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"0", "-1", "abc", "NaN", "Inf", "+Inf"} {
+		if _, err := parseOvercommit(raw); err == nil {
+			t.Errorf("%q must be refused", raw)
+		}
+	}
+}

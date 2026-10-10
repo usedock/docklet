@@ -445,6 +445,15 @@ func (d *Driver) WorkDir(dockID string) (string, error) {
 	return d.legacyVolumeDir(WorkVolume(dockID))
 }
 
+// WorkDiskPath returns what holds the dock's work disk blocks without mounting
+// anything: the sparse image, or a legacy volume directory.
+func (d *Driver) WorkDiskPath(dockID string) (string, error) {
+	if d.WorkDiskExists(dockID) {
+		return d.workImage(dockID), nil
+	}
+	return d.legacyVolumeDir(WorkVolume(dockID))
+}
+
 // legacyVolumeDir resolves a docker volume's host directory through the daemon.
 func (d *Driver) legacyVolumeDir(volume string) (string, error) {
 	out, err := d.execOut("volume", "inspect", "-f", "{{.Mountpoint}}", volume)

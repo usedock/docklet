@@ -459,6 +459,7 @@ logs that the credential needs an admin reset.
 | `DOCKLET_GVISOR_IMAGE` | gVisor OCI image tag (gvisor runtime only) |
 | `DOCKLET_POOL_SIZE` | warm pool target (present only when set) |
 | `DOCKLET_MEMORY_RESERVE_MIB` | RAM held back from guests for the host itself (default: the larger of 1 GiB and 10% of RAM). The docklet registers the remainder as its guest memory budget, the backend places against it, and the docklet refuses a provision with `capacity_exhausted` when the summed requested vCPUs and memory would exceed it |
+| `DOCKLET_DISK_OVERCOMMIT` | multiplier on host disk capacity that bounds the summed allocated `diskGiB` of all docks (both runtimes); a positive number, default `1.0`. Sparse disks can overcommit above `1.0`; see "Disk overcommit" below |
 | `DOCKLET_EGRESS_PORT` | egress proxy port on the guest gateway address, default `3128` |
 | `DOCKLET_EGRESS_ALLOW_PRIVATE` | comma-separated CIDRs that are reachable despite being private, e.g. `10.0.0.0/24`: the egress proxy may dial them and every dock may forward to them (see Guest network isolation); empty refuses every private address |
 | `DOCKLET_IDEM_TTL` | how long an idempotency token stays deduplicated, a Go duration (default `168h`, 7 days; Go has no `d` unit); expired journal entries are dropped when docklet starts and as the journal grows. Responses over 64 KiB and all `fast-run` read results are never written to disk, only a hash marker: a retried token gets `409 result_not_retained` instead of re-executing (the control plane surfaces it as `exec_result_expired` for exec, and re-reads with a fresh token for reads) |
@@ -518,13 +519,27 @@ carry those workloads.
 The workspace is bounded by the dock's `diskGiB`. Each gvisor dock gets a sparse
 ext4 image at `<state dir>/docks/<id>/work.img` (`truncate` to `diskGiB` GiB,
 `mkfs.ext4`), loop-mounted by the docklet on the host and bind-mounted at
-`/home/user/work`, so a dock cannot write past its size and one dock cannot fill the host
-disk. The image is unmounted on stop and removed on delete, and the docklet
+`/home/user/work`, so a dock cannot write past its own size. The image is
+unmounted on stop and removed on delete, and the docklet
 refuses a gvisor dock whose `diskGiB` exceeds the free disk of the state
 directory (`capacity_exhausted`). The docklet runs as root, and the host needs
 `e2fsprogs` (`mkfs.ext4`) and loop device support. A dock created before this
 limit has its old unbounded volume copied into the image on its next start, which
 fails if the data exceeds `diskGiB`.
+
+**Disk overcommit.** Work disks (gvisor) and rootfs images (microvm) are sparse
+files, so the host only spends blocks a dock actually writes. That also means
+many docks can together promise more disk than the host has, and a host whose
+docks all fill their disks will run out of space. The docklet bounds this at
+admission: it sums the allocated `diskGiB` of every dock on the host on both
+runtimes, running or stopped, plus boots still in flight, and refuses a new dock with
+`capacity_exhausted` when the total would exceed the disk capacity times
+`DOCKLET_DISK_OVERCOMMIT` (default `1.0`, no overcommit). Capacity is the
+filesystem of the state directory on gvisor hosts and of `DOCKLET_JAIL_BASE` on
+microvm hosts. Resuming a stopped dock is never refused for disk it already
+holds, so a host over its budget still resumes its docks. Raise it, for example to `1.5`, only if your docks rarely fill
+their disks; at `1.0` the allocated total never exceeds the disk, though
+other data on the same filesystem still counts against free space.
 
 **microvm.** A generation is a **block delta against the base
 image** plus optional memory images, so the whole guest filesystem survives

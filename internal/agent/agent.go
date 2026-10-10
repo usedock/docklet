@@ -1001,3 +1001,6 @@ func Capacity(root string, memoryReserveMiB int64) (vcpu, memMiB int64) {
 	}
 	return int64(vcpuTotal(root)), mib
 }
+
+// TotalDiskBytes reports the capacity of the filesystem holding path; 0 when unknown.
+func TotalDiskBytes(path string) int64 { return diskTotalBytes(path) }
