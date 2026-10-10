@@ -25,17 +25,50 @@ expect_refuse verify_checksum "$tmp/docklet-linux-amd64" "$tmp/missing.txt" dock
 expect_refuse verify_checksum "$tmp/docklet-linux-amd64" "$tmp/nope.txt" docklet-linux-amd64
 
 # A fake cosign that rejects everything must make verify_signature refuse.
-printf '#!/bin/sh\nexit 1\n' > "$tmp/cosign-bad"; chmod +x "$tmp/cosign-bad"
-printf '#!/bin/sh\nexit 0\n' > "$tmp/cosign-ok"; chmod +x "$tmp/cosign-ok"
+# Fake cosigns report the pinned version so ensure_cosign accepts them.
+ver='[ "$1" = version ] && { echo "GitVersion:    v2.4.1"; exit 0; }'
+printf '#!/bin/sh\n%s\nexit 1\n' "$ver" > "$tmp/cosign-bad"; chmod +x "$tmp/cosign-bad"
+printf '#!/bin/sh\n%s\nexit 0\n' "$ver" > "$tmp/cosign-ok"; chmod +x "$tmp/cosign-ok"
 : > "$tmp/bundle.json"
-expect_refuse verify_signature "$tmp/cosign-bad" "$tmp/docklet-linux-amd64" "$tmp/bundle.json"
-expect_refuse verify_signature "$tmp/cosign-ok" "$tmp/docklet-linux-amd64" "$tmp/no-bundle.json"
-expect_refuse verify_signature "" "$tmp/docklet-linux-amd64" "$tmp/bundle.json"
-expect_ok verify_signature "$tmp/cosign-ok" "$tmp/docklet-linux-amd64" "$tmp/bundle.json"
+expect_refuse verify_signature "$tmp/cosign-bad" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" v0.0.1
+expect_refuse verify_signature "$tmp/cosign-ok" "$tmp/docklet-linux-amd64" "$tmp/no-bundle.json" v0.0.1
+expect_refuse verify_signature "" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" v0.0.1
+expect_ok verify_signature "$tmp/cosign-ok" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" v0.0.1
+
+# A recording fake cosign accepts only the identity for EXPECT_TAG and logs its args.
+cat > "$tmp/cosign-rec" <<'SH'
+#!/bin/sh
+[ "$1" = version ] && { echo "GitVersion:    v2.4.1"; exit 0; }
+echo "$@" >> "$COSIGN_LOG"
+want="https://github.com/usedock/docklet/.github/workflows/release.yml@refs/tags/${EXPECT_TAG}"
+id=""; issuer=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --certificate-identity) id="$2" ;;
+    --certificate-oidc-issuer) issuer="$2" ;;
+  esac
+  shift
+done
+[ "$id" = "$want" ] && [ "$issuer" = "https://token.actions.githubusercontent.com" ] && exit 0
+echo "no matching certificate identity" >&2
+exit 1
+SH
+chmod +x "$tmp/cosign-rec"
+export COSIGN_LOG="$tmp/cosign.log"
+: > "$COSIGN_LOG"
+EXPECT_TAG=v1.2.3 expect_ok verify_signature "$tmp/cosign-rec" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" v1.2.3
+grep -q -- '--certificate-identity https://github.com/usedock/docklet/.github/workflows/release.yml@refs/tags/v1.2.3 ' "$COSIGN_LOG" \
+  && echo "ok: exact identity passed" || { echo "FAIL: exact identity not passed"; fail=1; }
+grep -q -- 'identity-regexp' "$COSIGN_LOG" && { echo "FAIL: regexp identity used"; fail=1; }
+EXPECT_TAG=v1.2.3 expect_refuse verify_signature "$tmp/cosign-rec" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" v1.2.4
+expect_refuse verify_signature "$tmp/cosign-rec" "$tmp/docklet-linux-amd64" "$tmp/bundle.json"
+# cosign's stderr must be shown on failure.
+shows_stderr() { local out; if out="$(EXPECT_TAG=v1.2.3 verify_signature "$tmp/cosign-rec" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" v9.9.9 2>&1)"; then return 1; fi; grep -q 'no matching certificate identity' <<< "$out"; }
+expect_ok shows_stderr
 
 # Only the exact file name matches; look-alike names and other columns must not.
 {
-  printf '%s  docklet-linux-amd64.sigstore.json\n' "$(printf 'a%.0s' {1..64})"
+  printf '%s  docklet-linux-amd64.bundle\n' "$(printf 'a%.0s' {1..64})"
   printf '%s  xdocklet-linux-amd64\n' "$(printf 'b%.0s' {1..64})"
   printf '%s  docklet-linux-amd64-old\n' "$(printf 'c%.0s' {1..64})"
 } > "$tmp/decoys.txt"
@@ -60,14 +93,25 @@ refuses_with_mismatch() { local out; if out="$(fake_curl_ensure 2>&1)"; then ret
 expect_ok refuses_with_mismatch
 pinned_ensure() { COSIGN_SHA256_AMD64="$evil"; [ "$(fake_curl_ensure)" = "$tmp/cosign-dl/cosign" ]; }
 expect_ok pinned_ensure
+# A preinstalled cosign of another version is ignored in favour of the pinned download.
+old_cosign_ignored() {
+  mkdir -p "$tmp/oldbin"
+  printf '#!/bin/sh\necho "GitVersion:    v2.3.0"\n' > "$tmp/oldbin/cosign"; chmod +x "$tmp/oldbin/cosign"
+  COSIGN_SHA256_AMD64="$evil"
+  uname() { echo x86_64; }
+  curl() { while [ "$#" -gt 0 ]; do [ "$1" = -o ] && { printf 'evil-cosign' > "$2"; return 0; }; shift; done; }
+  mkdir -p "$tmp/cosign-dl2"
+  [ "$(PATH="$tmp/oldbin:$PATH" ensure_cosign "$tmp/cosign-dl2")" = "$tmp/cosign-dl2/cosign" ]
+}
+expect_ok old_cosign_ignored
 
 # fetch_release end to end against a local release directory and a fake cosign on PATH.
 rel="$tmp/rel/v0.0.1"
 mkdir -p "$rel" "$tmp/fakebin"
 cp "$tmp/docklet-linux-amd64" "$rel/"
 (cd "$rel" && sha256sum docklet-linux-amd64 > checksums.txt)
-: > "$rel/checksums.txt.sigstore.json"
-: > "$rel/docklet-linux-amd64.sigstore.json"
+: > "$rel/checksums.txt.bundle"
+: > "$rel/docklet-linux-amd64.bundle"
 fetch_with() {
   cp "$1" "$tmp/fakebin/cosign"
   local out
@@ -80,11 +124,13 @@ fetch_with() {
 printf '#!/bin/sh\nfor a; do last="$a"; done\ncase "$last" in *docklet-linux-amd64) exit 1 ;; esac\nexit 0\n' > "$tmp/cosign-binbad"
 chmod +x "$tmp/cosign-binbad"
 expect_ok fetch_with "$tmp/cosign-ok"
+EXPECT_TAG=v0.0.1 expect_ok fetch_with "$tmp/cosign-rec"
+EXPECT_TAG=v0.0.2 expect_refuse fetch_with "$tmp/cosign-rec"
 expect_refuse fetch_with "$tmp/cosign-bad"
 expect_refuse fetch_with "$tmp/cosign-binbad"
 printf 'tampered' > "$tmp/tampered"; cp "$rel/docklet-linux-amd64" "$tmp/orig"; cp "$tmp/tampered" "$rel/docklet-linux-amd64"
 expect_refuse fetch_with "$tmp/cosign-ok"
-cp "$tmp/orig" "$rel/docklet-linux-amd64"; rm "$rel/docklet-linux-amd64.sigstore.json"
+cp "$tmp/orig" "$rel/docklet-linux-amd64"; rm "$rel/docklet-linux-amd64.bundle"
 expect_refuse fetch_with "$tmp/cosign-ok"
 
 exit "$fail"
