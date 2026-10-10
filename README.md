@@ -32,6 +32,20 @@ A snapshot moves only between hosts with the same engine and CPU architecture.
 - `scripts/` - host bootstrap, image and kernel builders.
 - `DEPLOY.md` - the full host deploy guide.
 
+## Install the CLI
+
+Available once the first release that includes the `dock` CLI is cut. Both installers download the release, verify `checksums.txt` and the cosign signatures, and stop on any missing or bad checksum or signature.
+
+```sh
+# macOS and Linux (installs to ~/.local/bin; set DOCK_INSTALL_DIR or DOCK_VERSION to change)
+curl -fsSL https://raw.githubusercontent.com/usedock/docklet/main/scripts/install.sh | sh
+```
+
+```powershell
+# Windows PowerShell (installs to %LOCALAPPDATA%\dock\bin and adds it to your user PATH)
+irm https://raw.githubusercontent.com/usedock/docklet/main/scripts/install.ps1 | iex
+```
+
 ## Add a host
 
 One command per machine, run as root on Ubuntu from a checkout of this repo. It installs the runtime, the signature-verified docklet release and a systemd unit, then enrolls the host with your control plane ([usedock/dock](https://github.com/usedock/dock)):

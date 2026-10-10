@@ -365,6 +365,10 @@ cosign verify-blob --bundle docklet-linux-amd64.bundle \
 sha256sum -c --ignore-missing checksums.txt
 ```
 
+The `dock` CLI installers (`scripts/install.sh`, `scripts/install.ps1`) apply the
+same checks to the `dock-<os>-<arch>` assets and install to `~/.local/bin` or
+`%LOCALAPPDATA%\dock\bin`.
+
 **After a kernel upgrade** on a microvm host, the base image still boots its own
 kernel, so a running host keeps working; rebuild when you want the image to match
 the new kernel (`DOCKLET_REBUILD_IMAGE=1`, above). Bootstrap reports the mismatch
