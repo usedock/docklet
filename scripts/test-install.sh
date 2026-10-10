@@ -54,7 +54,13 @@ install_with() {
 # Windows file systems have no exec bit, so the mode check is skipped under Git Bash.
 is_exec() { [ -x "$1" ] || case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; }
 installs() { install_with "$@" && is_exec "$dest/dock" && [ "$(cat "$dest/dock")" = dock-cli-bytes ]; }
-refuses_clean() { ! install_with "$@" && [ ! -e "$dest/dock" ]; }
+# A refusal must not come from a failed download unless the case removes a release file (ALLOW_DL=1).
+refuses_clean() {
+  local out
+  if out="$(install_with "$@" 2>&1)"; then return 1; fi
+  [ ! -e "$dest/dock" ] || return 1
+  [ -n "${ALLOW_DL:-}" ] || ! grep -q 'could not download' <<< "$out"
+}
 
 expect_ok installs "$tmp/cosign-ok"
 EXPECT_TAG=v0.0.1 expect_ok installs "$tmp/cosign-rec"
@@ -95,9 +101,9 @@ printf '%s  other-file\n' "$(sha256sum "$tmp/orig" | awk '{print $1}')" > "$rel/
 expect_refuse refuses_clean "$tmp/cosign-ok"
 cp "$tmp/sums" "$rel/checksums.txt"
 # Missing bundles and checksums.
-rm "$rel/dock-linux-amd64.bundle"; expect_refuse refuses_clean "$tmp/cosign-ok"; : > "$rel/dock-linux-amd64.bundle"
-rm "$rel/checksums.txt.bundle"; expect_refuse refuses_clean "$tmp/cosign-ok"; : > "$rel/checksums.txt.bundle"
-rm "$rel/checksums.txt"; expect_refuse refuses_clean "$tmp/cosign-ok"
+rm "$rel/dock-linux-amd64.bundle"; ALLOW_DL=1 expect_refuse refuses_clean "$tmp/cosign-ok"; : > "$rel/dock-linux-amd64.bundle"
+rm "$rel/checksums.txt.bundle"; ALLOW_DL=1 expect_refuse refuses_clean "$tmp/cosign-ok"; : > "$rel/checksums.txt.bundle"
+rm "$rel/checksums.txt"; ALLOW_DL=1 expect_refuse refuses_clean "$tmp/cosign-ok"
 cp "$tmp/sums" "$rel/checksums.txt"
 expect_ok installs "$tmp/cosign-ok"
 

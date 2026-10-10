@@ -55,7 +55,7 @@ function Invoke-Install($mode, $extra = @{}) {
     DOCK_INSTALL_DIR = $script:dest; DOCK_NO_MODIFY_PATH = '1'; COSIGN_EXPECT_TAG = 'v0.0.1'
   }
   foreach ($k in $extra.Keys) { $vars[$k] = $extra[$k] }
-  foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
+  foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); Set-Item -Path "env:$k" -Value $vars[$k] }
   $oldPath = $env:PATH
   $env:PATH = $bin + [IO.Path]::PathSeparator + $env:PATH
   $ErrorActionPreference = 'Continue'
@@ -65,7 +65,7 @@ function Invoke-Install($mode, $extra = @{}) {
   } finally {
     $ErrorActionPreference = 'Stop'
     $env:PATH = $oldPath
-    foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    foreach ($k in $saved.Keys) { if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue } else { Set-Item -Path "env:$k" -Value $saved[$k] } }
   }
 }
 function Expect($name, $cond) {
@@ -76,34 +76,35 @@ function Expect-Install($name, $mode, $extra = @{}) {
   $exe = Join-Path $script:dest 'dock.exe'
   Expect $name (($rc -eq 0) -and (Test-Path $exe) -and ([IO.File]::ReadAllText($exe) -eq 'dock-cli-bytes'))
 }
-function Expect-Refuse($name, $mode, $extra = @{}) {
+# $reason is a regex the refusal message must match, so a refusal cannot pass for the wrong cause.
+function Expect-Refuse($name, $mode, $reason, $extra = @{}) {
   $rc = Invoke-Install $mode $extra
-  Expect "$name (refused)" (($rc -ne 0) -and -not (Test-Path (Join-Path $script:dest 'dock.exe')))
+  Expect "$name (refused)" (($rc -ne 0) -and ($script:out -match $reason) -and -not (Test-Path (Join-Path $script:dest 'dock.exe')))
 }
 
 Expect-Install 'good install' 'ok'
 Expect-Install 'good install, exact identity' 'tag'
-Expect-Refuse 'wrong tag' 'tag' @{ COSIGN_EXPECT_TAG = 'v0.0.2' }
-Expect-Refuse 'bad signature' 'bad'
-Expect-Refuse 'invalid version' 'ok' @{ DOCK_VERSION = 'v0.0.1/../x' }
-Expect-Refuse 'unprefixed version' 'ok' @{ DOCK_VERSION = '0.0.1' }
-Expect-Refuse 'unsupported arch' 'ok' @{ DOCK_ARCH = 'riscv64' }
+Expect-Refuse 'wrong tag' 'tag' 'signature verification FAILED' @{ COSIGN_EXPECT_TAG = 'v0.0.2' }
+Expect-Refuse 'bad signature' 'bad' 'signature verification FAILED'
+Expect-Refuse 'invalid version' 'ok' 'invalid release version' @{ DOCK_VERSION = 'v0.0.1/../x' }
+Expect-Refuse 'unprefixed version' 'ok' 'invalid release version' @{ DOCK_VERSION = '0.0.1' }
+Expect-Refuse 'unsupported arch' 'ok' 'unsupported architecture' @{ DOCK_ARCH = 'riscv64' }
 
 $orig = [IO.File]::ReadAllBytes((Join-Path $rel $asset))
 [IO.File]::WriteAllText((Join-Path $rel $asset), 'tampered')
-Expect-Refuse 'tampered binary' 'ok'
+Expect-Refuse 'tampered binary' 'ok' 'checksum mismatch'
 [IO.File]::WriteAllBytes((Join-Path $rel $asset), $orig)
 Write-Sums 'other-file'
-Expect-Refuse 'no checksum entry' 'ok'
+Expect-Refuse 'no checksum entry' 'ok' 'no checksum for'
 Write-Sums $asset
 Remove-Item (Join-Path $rel "$asset.bundle")
-Expect-Refuse 'missing binary bundle' 'ok'
+Expect-Refuse 'missing binary bundle' 'ok' 'could not download'
 [IO.File]::WriteAllText((Join-Path $rel "$asset.bundle"), '')
 Remove-Item (Join-Path $rel 'checksums.txt.bundle')
-Expect-Refuse 'missing checksums bundle' 'ok'
+Expect-Refuse 'missing checksums bundle' 'ok' 'could not download'
 [IO.File]::WriteAllText((Join-Path $rel 'checksums.txt.bundle'), '')
 Remove-Item (Join-Path $rel 'checksums.txt')
-Expect-Refuse 'missing checksums.txt' 'ok'
+Expect-Refuse 'missing checksums.txt' 'ok' 'could not download'
 Write-Sums $asset
 Expect-Install 'good install again' 'ok'
 
