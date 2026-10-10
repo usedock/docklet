@@ -1,0 +1,41 @@
+# Test-host stack: single-node Restate (persistent volume required) plus
+# MinIO as the S3-compatible snapshot store. The docklet binary and the
+# control plane (usedock/dock) run outside compose (provision-host.sh + RUNTIME_DRIVER=restate).
+name: dock-runtime-test
+
+services:
+  restate:
+    image: docker.restate.dev/restatedev/restate:latest
+    command: ["--node-name", "restate-1"]
+    ports:
+      - "8080:8080" # ingress (RESTATE_INGRESS_URL)
+      - "9070:9070" # admin + UI
+      - "5122:5122" # node-to-node
+    volumes:
+      - restate-data:/restate-data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9070/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "9000:9000" # S3 endpoint (SNAPSHOT_STORE_ENDPOINT)
+      - "9001:9001" # console
+    environment:
+      MINIO_ROOT_USER: "${SNAPSHOT_STORE_ACCESS_KEY:-docklet}"
+      MINIO_ROOT_PASSWORD: "${SNAPSHOT_STORE_SECRET_KEY:-dockletdocklet}"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  restate-data:
+  minio-data:

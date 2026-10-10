@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+# Minimal gvisor OCI image: Ubuntu 24.04 with git, curl and python3 (the
+# fast-agent sidecar). No systemd, sshd or nested Docker (unsupported under runsc).
+# Build from the docklet root:
+#   docker build -f scripts/Dockerfile.gvisor -t dock-gvisor:latest .
+
+ARG UBUNTU_RELEASE=noble
+
+# Codegen stage: render the fast-agent sidecar from the Go source of truth
+# so the container protocol can never drift from the microvm unit.
+FROM golang:1.25-bookworm AS gen
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY api ./api
+COPY internal ./internal
+COPY cmd/gen-fast-agent ./cmd/gen-fast-agent
+RUN go mod download && \
+    go run ./cmd/gen-fast-agent > /out-fast-agent.py && test -s /out-fast-agent.py
+
+FROM ubuntu:${UBUNTU_RELEASE} AS runtime
+COPY --from=gen /out-fast-agent.py /usr/local/libexec/dock-fast-agent.py
+COPY scripts/dock-container-entrypoint.sh /usr/local/bin/dock-entrypoint
+
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3; \
+    chmod 0755 /usr/local/bin/dock-entrypoint /usr/local/libexec/dock-fast-agent.py; \
+    useradd -m -s /bin/bash -G sudo user || true; \
+    echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user; \
+    chmod 0440 /etc/sudoers.d/user; \
+    mkdir -p /home/user/work /run/dock-fast; \
+    chown user:user /home/user/work /run/dock-fast; \
+    apt-get purge -y snapd 2>/dev/null || true; \
+    apt-get autoremove -y --purge || true; \
+    apt-get clean; \
+    rm -rf /usr/share/doc /usr/share/man /var/cache/apt/archives \
+      /var/lib/apt/lists /tmp/* /var/tmp/* /root/.cache /var/log/*
+
+USER root
+WORKDIR /home/user/work
+ENTRYPOINT ["/usr/local/bin/dock-entrypoint"]
