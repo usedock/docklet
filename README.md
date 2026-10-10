@@ -2,13 +2,13 @@
 
 The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on each machine that hosts docks. It boots, pauses, snapshots, resumes and destroys docks, and reports what the host actually has.
 
-> **Status:** this repo is being set up. The code arrives as a fresh first commit when the private monorepo is split. The `dock` CLI and its local engine will live here too; they are not built yet.
+> **Status:** the docklet is here. The `dock` CLI and its local engine will live in this repo too; they are not built yet.
 
 ## What it does
 
 - Runs docks as Firecracker microVMs (under `jailer`) on Linux with KVM, or as gVisor (`runsc`) containers on Linux with Docker.
 - Enforces each dock's CPU and memory with cgroups, gives each dock a fixed-size disk, and gives it a TAP or veth network on a host-local subnet.
-- Moves snapshot data through the control plane's authenticated object proxy.
+- Moves snapshot data to the object store over presigned URLs the control plane mints, or through its object proxy; the host never holds store credentials.
 - Connects **outbound only** to the control plane fleet API: it registers, sends heartbeats with its inventory and stats, long-polls for commands and posts results. No inbound port, no per-host address.
 - Serves its own HTTP API on loopback only.
 - Fails closed: a host is not offered work until its readiness checks pass.
@@ -24,29 +24,36 @@ The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on 
 
 A snapshot moves only between hosts with the same engine and CPU architecture.
 
-## Add a host (arrives with the code)
+## Layout
 
-The script, guide and flags below are not in the repo yet. The planned flow is one command per machine, run as root, that installs the runtime, the docklet and a systemd unit, then enrolls the host:
+- `cmd/docklet/` - the daemon. `cmd/gen-fast-agent/` - guest agent generator.
+- `api/v1/` - the versioned contract with the control plane.
+- `internal/` - `agent` (fleet channel), `fc` (Firecracker), `container` (gVisor), `host` (orchestration), `snapmgr` (snapshots), `net`, `egress`, `disk`, `store`, `server` and more.
+- `scripts/` - host bootstrap, image and kernel builders.
+- `DEPLOY.md` - the full host deploy guide.
+
+## Add a host
+
+One command per machine, run as root on Ubuntu from a checkout of this repo. It installs the runtime, the docklet and a systemd unit, then enrolls the host with your control plane ([usedock/dock](https://github.com/usedock/dock)):
 
 ```sh
-sudo bash scripts/bootstrap-host.sh \
-  --fleet-url https://dock.example.com \
-  --fleet-token "$FLEET_TOKEN"
+sudo bash scripts/bootstrap-host.sh \n  --fleet-url https://dock.example.com \n  --fleet-token "$FLEET_TOKEN" \n  --runtime microvm    # or gvisor
 ```
 
-KVM hosts will also need the base image the microVMs boot from. A deploy guide will ship with the code.
+Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The script is re-runnable. See [DEPLOY.md](DEPLOY.md) for flags, base images and troubleshooting.
 
-## Development (arrives with the code)
+## Development
 
-Once the code lands: Linux only, Go 1.25.
+Linux only, Go 1.25.
 
 ```sh
 go build ./...
+go vet ./...
 go test ./...
 go test ./internal/host/    # one package
 ```
 
-Every behavior change ships with `go test` coverage. Fakes live in `*_test.go`, never in production code. `api/v1` will be the versioned contract with the control plane; publishing JSON fixtures for every call is planned, so the control plane can test against the docklet version it supports.
+On Windows or macOS, `GOOS=linux go vet ./...` and `go test -exec=true ./...` check that everything compiles; CI runs the real tests. Every behavior change ships with `go test` coverage. Fakes live in `*_test.go`, never in production code. `api/v1` is the versioned contract with the control plane; publishing JSON fixtures for every call is planned. Agents working in this repo: see [AGENTS.md](AGENTS.md).
 
 ## Contributing
 
