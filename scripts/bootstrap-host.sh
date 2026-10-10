@@ -594,7 +594,8 @@ install_docklet_binary() {
   fi
   if [ "$BUILD_FROM_SOURCE" = "1" ]; then
     warn "building from source: the binary is NOT signature-verified (development only)"
-    [ -f "${DOCKLET_DIR}/go.mod" ] && [ -f "${DOCKLET_DIR}/cmd/docklet/main.go" ]       || die "--build-from-source needs a checkout of this repo"
+    [ -f "${DOCKLET_DIR}/go.mod" ] && [ -f "${DOCKLET_DIR}/cmd/docklet/main.go" ] \
+      || die "--build-from-source needs a checkout of this repo"
     out="$(mktemp -d)"
     TMP_FILES+=("$out")
     if as_invoker sh -c 'command -v go' >/dev/null 2>&1; then
@@ -605,7 +606,8 @@ install_docklet_binary() {
       ( cd "$DOCKLET_DIR" && as_invoker go build -o "${out}/docklet" ./cmd/docklet )
     elif docker_usable; then
       log "no go toolchain; building docklet in a ${GO_IMAGE} container"
-      docker run --rm -v "${DOCKLET_DIR}:/src:ro" -v "${out}:/out" -w /src         -e GOFLAGS=-buildvcs=false "$GO_IMAGE" go build -o /out/docklet ./cmd/docklet
+      docker run --rm -v "${DOCKLET_DIR}:/src:ro" -v "${out}:/out" -w /src \
+        -e GOFLAGS=-buildvcs=false "$GO_IMAGE" go build -o /out/docklet ./cmd/docklet
     else
       die "building docklet needs Go or Docker; install one, or drop --build-from-source"
     fi

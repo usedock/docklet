@@ -25,6 +25,10 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test -timeout 8m ./...
+      - name: version ldflag
+        run: |
+          go build -ldflags "-X main.version=v0.0.0-ci" -o "$RUNNER_TEMP/docklet" ./cmd/docklet
+          test "$("$RUNNER_TEMP/docklet" --version)" = v0.0.0-ci
       - name: shell syntax
         run: for f in scripts/*.sh; do bash -n "$f"; done
       - name: verify tests

@@ -33,6 +33,9 @@ import (
 	"github.com/usedock/docklet/internal/store"
 )
 
+// version is set at release build time with -ldflags "-X main.version=<tag>".
+var version = "dev"
+
 func getenv(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -50,6 +53,10 @@ func getint(key string, fallback int) int {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(version)
+		return
+	}
 	// The SDK gives firecracker 3s to bind its socket by default; cold
 	// binaries on small hosts need longer. Overridable per host.
 	if os.Getenv("FIRECRACKER_GO_SDK_INIT_TIMEOUT_SECONDS") == "" {
@@ -266,7 +273,7 @@ func main() {
 	} else {
 		log.Printf("docklet: standalone mode: DOCKLET_FLEET_URL unset, serving the local API only")
 	}
-	log.Printf("docklet %s listening on %s (family %s)", hostID, addr, family)
+	log.Printf("docklet %s %s listening on %s (family %s)", version, hostID, addr, family)
 	if err := http.ListenAndServe(addr, server.NewMux(server.Deps{
 		Host:    orchestrator,
 		Journal: journal,
