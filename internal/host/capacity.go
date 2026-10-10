@@ -3,8 +3,11 @@ package host
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	apiv1 "github.com/usedock/docklet/api/v1"
+	"github.com/usedock/docklet/internal/fc"
 )
 
 // ErrCapacityExhausted refuses a boot whose requested resources would overcommit the host budget.
@@ -59,13 +62,24 @@ func (h *Host) reserve(id string, res apiv1.Resources) (release func(), err erro
 	for owner, r := range h.pending {
 		add(owner, r, true)
 	}
+	// Stopped docks keep their disks; a boot only needs room for disk it does not already own.
+	var ownedGiB int64
+	if diskBudget > 0 {
+		for owner, gib := range h.untrackedDisksLocked() {
+			if owner == id {
+				ownedGiB = gib
+				continue
+			}
+			allocGiB += gib
+		}
+	}
 	if h.cfg.CapacityVCPU > 0 && vcpu > h.cfg.CapacityVCPU {
 		return nil, fmt.Errorf("%w: %d vCPU requested would exceed the %d vCPU budget", ErrCapacityExhausted, vcpu, h.cfg.CapacityVCPU)
 	}
 	if budget := max(h.cfg.CapacityMemMiB, 0); h.cfg.CapacityMemMiB != 0 && mem > budget {
 		return nil, fmt.Errorf("%w: %d MiB requested would exceed the %d MiB budget", ErrCapacityExhausted, mem, budget)
 	}
-	if diskBudget > 0 && allocGiB<<30 > diskBudget {
+	if diskBudget > 0 && int64(res.DiskGiB) > ownedGiB && allocGiB<<30 > diskBudget {
 		return nil, fmt.Errorf("%w: %d GiB of allocated disk would exceed the %d GiB disk budget", ErrCapacityExhausted, allocGiB, diskBudget>>30)
 	}
 	if checkDisk {
@@ -79,6 +93,35 @@ func (h *Host) reserve(id string, res apiv1.Resources) (release func(), err erro
 		delete(h.pending, id)
 		h.mu.Unlock()
 	}, nil
+}
+
+// untrackedDisksLocked returns the diskGiB recorded beside every jail that no
+// tracked, claimed or in-flight dock accounts for; h.mu must be held.
+func (h *Host) untrackedDisksLocked() map[string]int64 {
+	entries, err := os.ReadDir(filepath.Join(h.cfg.JailBase, "firecracker"))
+	if err != nil {
+		return nil
+	}
+	backing := map[string]bool{}
+	for _, v := range h.vms {
+		if v.backing != "" {
+			backing[v.backing] = true
+		}
+	}
+	out := map[string]int64{}
+	for _, entry := range entries {
+		id := entry.Name()
+		if _, ok := h.vms[id]; ok || backing[id] || !entry.IsDir() {
+			continue
+		}
+		if _, ok := h.pending[id]; ok {
+			continue
+		}
+		if res, err := fc.ReadSidecar(h.jailRoot(id)); err == nil {
+			out[id] = int64(res.DiskGiB)
+		}
+	}
+	return out
 }
 
 // hasWorkDisk reports a dock that already owns its bounded disk, which a resume does not allocate again.

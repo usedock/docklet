@@ -671,3 +671,84 @@ func TestMicroVMAdmissionCountsAllocatedDiskAndInFlightBoots(t *testing.T) {
 		t.Fatalf("after the in-flight boot ended: %v", err)
 	}
 }
+
+// writeJailSidecar records a dock's resources the way a boot does, so it outlives a stop.
+func writeJailSidecar(t *testing.T, h *Host, dockID string, res apiv1.Resources) {
+	t.Helper()
+	if err := os.MkdirAll(h.jailRoot(dockID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fc.WriteSidecar(h.jailRoot(dockID), dockID, res); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdmissionCountsStoppedDocksAndNeverRefusesTheirResume(t *testing.T) {
+	ctx := context.Background()
+	h, _, _, _ := testContainerHost(t)
+	h.cfg.DiskTotalBytes = func() int64 { return 25 * gib }
+	for _, id := range []string{"a", "b"} {
+		if _, err := h.Provision(ctx, id, resSmall, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		writeJailSidecar(t, h, id, resSmall)
+	}
+	markStopped(h, "a")
+	if _, err := h.Provision(ctx, "c", resSmall, "", ""); !errors.Is(err, ErrCapacityExhausted) {
+		t.Fatalf("err = %v, want capacity_exhausted: stopped a still holds 10 GiB", err)
+	}
+	// Already over budget: resuming a dock that owns its disk allocates nothing new.
+	h.cfg.DiskTotalBytes = func() int64 { return 5 * gib }
+	release, err := h.reserve("a", resSmall)
+	if err != nil {
+		t.Fatalf("resume of a dock that owns its disk: %v", err)
+	}
+	release()
+	bigger := resSmall
+	bigger.DiskGiB = 20
+	if _, err := h.reserve("a", bigger); !errors.Is(err, ErrCapacityExhausted) {
+		t.Fatalf("err = %v, want capacity_exhausted when a resume grows the disk past the budget", err)
+	}
+}
+
+func TestClaimedPoolSlotIsTrackedOnceAcrossRescanAndRestart(t *testing.T) {
+	ctx := context.Background()
+	h, driver, _, _ := testContainerHost(t)
+	h.pl = newPool(2)
+	stubAgent(t, h)
+	slot := seedSlot(t, h, resSmall)
+	writeJailSidecar(t, h, slot.id, resSmall)
+	h.pl.target = 0
+	if _, err := h.ProvisionFast(ctx, "run-1", resSmall, "", "tok", "/home/user/work", nil); err != nil {
+		t.Fatal(err)
+	}
+	if adopted := h.Rescan(); len(adopted) != 0 {
+		t.Fatalf("rescan adopted %v: a claimed slot must not be tracked twice", adopted)
+	}
+	// A docklet restart forgets every vm; the claim must come back under the runtime id.
+	h.mu.Lock()
+	h.vms = map[string]*vm{}
+	h.mu.Unlock()
+	if adopted := h.Rescan(); len(adopted) != 1 || adopted[0] != "run-1" {
+		t.Fatalf("adopted = %v, want [run-1]", adopted)
+	}
+	if got := h.Running(); len(got) != 1 || got[0].DockID != "run-1" || got[0].Kind != "fast" {
+		t.Fatalf("running = %+v, want only run-1 as fast", got)
+	}
+	cg := filepath.Join(h.cfg.CgroupBase, "firecracker", slot.id)
+	if err := os.MkdirAll(cg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Destroy(ctx, "run-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(driver.removed) != 1 || driver.removed[0] != slot.id {
+		t.Fatalf("removed work disks = %v, want the slot disk %s", driver.removed, slot.id)
+	}
+	if _, err := os.Stat(h.jailRoot(slot.id)); !os.IsNotExist(err) {
+		t.Fatalf("slot jail must be removed: %v", err)
+	}
+	if _, err := os.Stat(cg); !os.IsNotExist(err) {
+		t.Fatalf("slot cgroup must be removed: %v", err)
+	}
+}

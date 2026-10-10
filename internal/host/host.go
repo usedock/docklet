@@ -158,13 +158,21 @@ func (h *Host) Rescan() []string {
 			continue
 		}
 		dockID := entry.Name()
+		jail := filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
+		// A claimed pool slot is tracked under its runtime id, never as the slot itself.
+		owner := readClaim(jail)
+		if owner == "" {
+			owner = dockID
+		}
 		h.mu.Lock()
-		_, tracked := h.vms[dockID]
+		_, tracked := h.vms[owner]
+		for _, v := range h.vms {
+			tracked = tracked || v.backing == dockID
+		}
 		h.mu.Unlock()
 		if tracked {
 			continue
 		}
-		jail := filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
 		iface := TapFor(dockID)
 		if h.usesVeth() {
 			iface = net.VethFor(dockID)
@@ -185,10 +193,33 @@ func (h *Host) Rescan() []string {
 			continue
 		}
 		token, workspace := readExecAgent(jail)
-		h.vms[dockID] = &vm{res: res, tap: iface, guestIP: assigned[dockID], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
-		adopted = append(adopted, dockID)
+		live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
+		if owner != dockID {
+			live.backing = dockID
+			live.ephemeral = true
+		}
+		h.mu.Lock()
+		h.vms[owner] = live
+		h.mu.Unlock()
+		adopted = append(adopted, owner)
 	}
 	return adopted
+}
+
+// claimSidecar names the runtime id a claimed pool slot serves, so a restart re-tracks it under that id.
+const claimSidecar = "claimed-by"
+
+// readClaim returns the runtime id a slot jail was claimed by, or empty.
+func readClaim(jail string) string {
+	raw, err := os.ReadFile(filepath.Join(jail, claimSidecar))
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(raw))
+	if checkIDs(id) != nil {
+		return ""
+	}
+	return id
 }
 
 // TapFor derives a stable <=15 char TAP name per dock.
@@ -1010,7 +1041,7 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	// A claimed pool dock runs under its slot id: that names the container, jail and work disk.
 	backing := h.backingID(dockID)
 	_ = h.cfg.Driver.Terminate(h.handle(backing))
-	cleanupCgroup(h.cfg.CgroupBase, dockID)
+	cleanupCgroup(h.cfg.CgroupBase, backing)
 	h.releaseEgress(dockID)
 	_ = h.alloc.Release(dockID)
 	// Claimed pool VMs keep their slot TAP, so delete the tracked one.

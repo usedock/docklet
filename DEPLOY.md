@@ -532,10 +532,12 @@ files, so the host only spends blocks a dock actually writes. That also means
 many docks can together promise more disk than the host has, and a host whose
 docks all fill their disks will run out of space. The docklet bounds this at
 admission: it sums the allocated `diskGiB` of every dock on the host on both
-runtimes, plus boots still in flight, and refuses a new dock with
-`capacity_exhausted` when the total would exceed the state directory's
-filesystem capacity times `DOCKLET_DISK_OVERCOMMIT` (default `1.0`, no
-overcommit). Raise it, for example to `1.5`, only if your docks rarely fill
+runtimes, running or stopped, plus boots still in flight, and refuses a new dock with
+`capacity_exhausted` when the total would exceed the disk capacity times
+`DOCKLET_DISK_OVERCOMMIT` (default `1.0`, no overcommit). Capacity is the
+filesystem of the state directory on gvisor hosts and of `DOCKLET_JAIL_BASE` on
+microvm hosts. Resuming a stopped dock is never refused for disk it already
+holds, so a host over its budget still resumes its docks. Raise it, for example to `1.5`, only if your docks rarely fill
 their disks; at `1.0` the allocated total never exceeds the disk, though
 other data on the same filesystem still counts against free space.
 

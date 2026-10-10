@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -145,13 +146,15 @@ func main() {
 	egressPort := getint("DOCKLET_EGRESS_PORT", 3128)
 	memReserveMiB := int64(getint("DOCKLET_MEMORY_RESERVE_MIB", 0))
 	capVCPU, capMemMiB := agent.Capacity("/", memReserveMiB)
-	diskOvercommit := 1.0
-	if raw := os.Getenv("DOCKLET_DISK_OVERCOMMIT"); raw != "" {
-		r, err := strconv.ParseFloat(raw, 64)
-		if err != nil || r <= 0 {
-			log.Fatalf("docklet: DOCKLET_DISK_OVERCOMMIT %q must be a positive number like 1.0 or 1.5", raw)
-		}
-		diskOvercommit = r
+	diskOvercommit, err := parseOvercommit(os.Getenv("DOCKLET_DISK_OVERCOMMIT"))
+	if err != nil {
+		log.Fatalf("docklet: %v", err)
+	}
+	jailBase := getenv("DOCKLET_JAIL_BASE", "/srv/jailer")
+	// Work disks live in the state dir (gvisor); rootfs images live in the jail base (microvm).
+	diskDir := stateDir
+	if runtime != apiv1.RuntimeGVisor {
+		diskDir = jailBase
 	}
 	orchestrator, err := host.New(host.Config{
 		HostID:      hostID,
@@ -165,7 +168,7 @@ func main() {
 		VMsDir:             vmsDir,
 		FirecrackerBin:     getenv("DOCKLET_FC_BIN", "/usr/bin/firecracker"),
 		JailerBin:          getenv("DOCKLET_JAILER_BIN", "jailer"),
-		JailBase:           getenv("DOCKLET_JAIL_BASE", "/srv/jailer"),
+		JailBase:           jailBase,
 		CgroupBase:         "/sys/fs/cgroup",
 		Subnet:             getenv("DOCKLET_SUBNET", "192.168.127.0/24"),
 		UID:                getint("DOCKLET_UID", 1000),
@@ -176,7 +179,7 @@ func main() {
 		EgressAllowPrivate: allowPrivate,
 		CapacityVCPU:       capVCPU,
 		CapacityMemMiB:     capMemMiB,
-		DiskTotalBytes:     func() int64 { return agent.TotalDiskBytes(stateDir) },
+		DiskTotalBytes:     func() int64 { return agent.TotalDiskBytes(diskDir) },
 		DiskOvercommit:     diskOvercommit,
 		DiskFreeBytes:      func() int64 { return agent.FreeDiskBytes(stateDir) },
 		Driver:             backend,
@@ -371,4 +374,16 @@ func tunnelError(err error) error {
 	default:
 		return &agent.TunnelError{Code: "tunnel_failed", Err: err}
 	}
+}
+
+// parseOvercommit reads DOCKLET_DISK_OVERCOMMIT: a finite positive ratio, 1.0 when unset.
+func parseOvercommit(raw string) (float64, error) {
+	if raw == "" {
+		return 1, nil
+	}
+	r, err := strconv.ParseFloat(raw, 64)
+	if err != nil || r <= 0 || math.IsInf(r, 0) || math.IsNaN(r) {
+		return 0, fmt.Errorf("DOCKLET_DISK_OVERCOMMIT %q must be a positive number like 1.0 or 1.5", raw)
+	}
+	return r, nil
 }

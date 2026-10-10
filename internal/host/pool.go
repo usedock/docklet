@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	apiv1 "github.com/usedock/docklet/api/v1"
@@ -125,6 +127,8 @@ func (h *Host) claimSlot(ctx context.Context, slot poolSlot, runtimeID, token st
 		_ = h.Destroy(ctx, slot.id)
 		return "", fmt.Errorf("%w: %s", errFastExists, runtimeID)
 	}
+	// Best effort: without it a docklet restart re-tracks the slot under its own id.
+	_ = os.WriteFile(filepath.Join(h.jailRoot(slot.id), claimSidecar), []byte(runtimeID), 0o644)
 	if len(egressAllow) > 0 {
 		// Warm slots boot unconfined; the claim confines before any run work.
 		if err := h.restrictEgress(v.guestIP, egressAllow); err != nil {
