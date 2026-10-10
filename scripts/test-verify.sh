@@ -104,6 +104,33 @@ old_cosign_ignored() {
   [ "$(PATH="$tmp/oldbin:$PATH" ensure_cosign "$tmp/cosign-dl2")" = "$tmp/cosign-dl2/cosign" ]
 }
 expect_ok old_cosign_ignored
+# A preinstalled cosign is used only when its GitVersion field is exactly the pinned version.
+preinstalled_used() {
+  mkdir -p "$tmp/pre"
+  printf '#!/bin/sh\ncat <<EOF\n  ____  ___  ____\ncosign: A tool for Container Signing\n\nGitVersion:    %s\nGitCommit:     abc\nGoVersion:     go1.22\nEOF\n' "$1" > "$tmp/pre/cosign"
+  chmod +x "$tmp/pre/cosign"
+  uname() { echo x86_64; }
+  curl() { return 1; }
+  [ "$(PATH="$tmp/pre:$PATH" ensure_cosign "$tmp/pre-dl" 2>/dev/null)" = "$tmp/pre/cosign" ]
+}
+expect_ok preinstalled_used v2.4.1
+expect_refuse preinstalled_used v2.4.10
+expect_refuse preinstalled_used v2x4x1
+expect_refuse preinstalled_used v2.4.1-rc.1
+
+# Only v<semver> release versions are accepted; anything else is refused before download or verify.
+for v in v0.1.0 v1.22.333 v1.0.0-rc.1; do expect_ok valid_version "$v"; done
+for v in "" 0.1.0 v1.0 v01.0.0 'v1.0.0 ' 'v1.0.0/../../x' 'v1.0.0$(id)' 'v.*' 'v1.0.0+build' 'v1.0.0-'; do
+  expect_refuse valid_version "$v"
+done
+expect_refuse verify_signature "$tmp/cosign-ok" "$tmp/docklet-linux-amd64" "$tmp/bundle.json" 'v1.*'
+no_download_on_bad_version() {
+  curl() { echo called > "$tmp/curl-called"; return 0; }
+  rm -f "$tmp/curl-called"
+  if ( fetch_release 'v0.1.0/../evil' "$tmp" docklet-linux-amd64 ) 2>/dev/null; then return 1; fi
+  [ ! -e "$tmp/curl-called" ]
+}
+expect_ok no_download_on_bad_version
 
 # fetch_release end to end against a local release directory and a fake cosign on PATH.
 rel="$tmp/rel/v0.0.1"
@@ -121,13 +148,16 @@ fetch_with() {
   DOCKLET_RELEASE_BASE_URL="file://$base" PATH="$tmp/fakebin:$PATH" fetch_release v0.0.1 "$out" docklet-linux-amd64
 }
 # Fails only for the binary (its path is the last argument).
-printf '#!/bin/sh\nfor a; do last="$a"; done\ncase "$last" in *docklet-linux-amd64) exit 1 ;; esac\nexit 0\n' > "$tmp/cosign-binbad"
+printf '#!/bin/sh\n%s\nfor a; do last="$a"; done\ncase "$last" in *docklet-linux-amd64) exit 1 ;; esac\nexit 0\n' "$ver" > "$tmp/cosign-binbad"
 chmod +x "$tmp/cosign-binbad"
 expect_ok fetch_with "$tmp/cosign-ok"
 EXPECT_TAG=v0.0.1 expect_ok fetch_with "$tmp/cosign-rec"
 EXPECT_TAG=v0.0.2 expect_refuse fetch_with "$tmp/cosign-rec"
 expect_refuse fetch_with "$tmp/cosign-bad"
 expect_refuse fetch_with "$tmp/cosign-binbad"
+# The refusal must come from the binary's signature, not from rejecting the fake cosign.
+binbad_reason() { local out; if out="$(fetch_with "$tmp/cosign-binbad" 2>&1)"; then return 1; fi; grep -q 'signature verification FAILED for .*/docklet-linux-amd64$' <<< "$out"; }
+expect_ok binbad_reason
 printf 'tampered' > "$tmp/tampered"; cp "$rel/docklet-linux-amd64" "$tmp/orig"; cp "$tmp/tampered" "$rel/docklet-linux-amd64"
 expect_refuse fetch_with "$tmp/cosign-ok"
 cp "$tmp/orig" "$rel/docklet-linux-amd64"; rm "$rel/docklet-linux-amd64.bundle"

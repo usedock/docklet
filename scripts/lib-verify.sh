@@ -10,6 +10,11 @@ COSIGN_SHA256_ARM64="${COSIGN_SHA256_ARM64:-3b2e2e3854d0356c45fe6607047526ccd047
 COSIGN_IDENTITY_PREFIX='https://github.com/usedock/docklet/.github/workflows/release.yml@refs/tags/'
 COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
+# valid_version <tag>: true only for v<semver> with an optional pre-release, the form release tags use.
+valid_version() {
+  [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]
+}
+
 # Prints the sha256 of a file.
 file_sha256() {
   sha256sum "$1" | awk '{print $1}'
@@ -34,7 +39,7 @@ verify_checksum() {
 # verify_signature <cosign> <file> <bundle> <version>: dies unless the bundle is valid for the file at that tag.
 verify_signature() {
   local cosign="$1" file="$2" bundle="$3" version="${4:-}" err
-  [ -n "$version" ] || die "no release version given to verify ${file}"
+  valid_version "$version" || die "invalid release version '${version}' for ${file}; expected v<major>.<minor>.<patch>"
   [ -n "$cosign" ] && [ -x "$cosign" ] || die "cosign is not available; cannot verify ${file}"
   [ -f "$bundle" ] || die "missing signature bundle for ${file}: ${bundle}"
   if ! err="$("$cosign" verify-blob \
@@ -49,9 +54,11 @@ verify_signature() {
 
 # ensure_cosign <workdir>: prints a usable cosign; a preinstalled one must be exactly the pinned version.
 ensure_cosign() {
-  local dir="$1" arch want url have
+  local dir="$1" arch want url have out
+  # Capture first so grep -q cannot SIGPIPE cosign under pipefail; compare the field exactly, not as a regexp.
   if have="$(command -v cosign 2>/dev/null)" && [ -n "$have" ] \
-    && "$have" version 2>/dev/null | grep -Eq "^GitVersion:[[:space:]]+${COSIGN_VERSION}\$"; then
+    && out="$("$have" version 2>/dev/null)" \
+    && awk -v want="$COSIGN_VERSION" '$1 == "GitVersion:" && $2 == want { found = 1 } END { exit !found }' <<< "$out"; then
     printf '%s\n' "$have"
     return 0
   fi
@@ -70,6 +77,7 @@ ensure_cosign() {
 # fetch_release <version> <workdir> <asset>: downloads a verified release asset into workdir.
 fetch_release() {
   local version="$1" dir="$2" asset="$3" base cosign
+  valid_version "$version" || die "invalid DOCKLET_VERSION '${version}'; expected v<major>.<minor>.<patch>"
   base="${DOCKLET_RELEASE_BASE_URL:-https://github.com/usedock/docklet/releases/download}/${version}"
   for f in "$asset" checksums.txt checksums.txt.bundle "${asset}.bundle"; do
     curl -fsSL -o "${dir}/${f}" "${base}/${f}" || die "could not download ${f} from ${base}"
