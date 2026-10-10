@@ -10,11 +10,11 @@ Thanks for helping build Dock.
 
 ## Contributor License Agreement
 
-Every contributor signs the [Dock CLA](https://github.com/usedock/dock/blob/main/CLA.md) once. It covers all repositories in the usedock organization. On your first pull request the CLA bot posts a comment; reply with the sentence it gives you to sign. You keep the copyright in your work.
+Every contributor signs the [Dock CLA](https://github.com/usedock/dock/blob/main/CLA.md). Signatures are stored per repository, so the CLA bot asks on your first pull request in each repository; reply with the sentence it gives you to sign. You keep the copyright in your work.
 
 ## Development
 
-Linux only, Go 1.25.
+These steps apply once the code lands in this repo. Linux only, Go 1.25.
 
 ```sh
 go build ./...
@@ -22,7 +22,7 @@ go test ./...       # every behavior change ships with go test coverage
 GOOS=linux go vet ./...
 ```
 
-Fakes live in `*_test.go`, never in production code. A change to `api/v1` updates its JSON contract fixtures in the same pull request.
+Fakes live in `*_test.go`, never in production code. Once contract fixtures exist, a change to `api/v1` updates them in the same pull request.
 
 ## Pull requests
 
