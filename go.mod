@@ -3,11 +3,13 @@ module github.com/usedock/docklet
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/klauspost/compress v1.20.0
 	github.com/minio/minio-go/v7 v7.3.0
 	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (

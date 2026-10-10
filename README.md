@@ -26,7 +26,7 @@ A snapshot moves only between hosts with the same engine and CPU architecture.
 
 ## Layout
 
-- `cmd/docklet/` - the daemon. `cmd/gen-fast-agent/` - guest agent generator.
+- `cmd/docklet/` - the daemon. `cmd/gen-fast-agent/` - guest agent generator. `cmd/dock/` + `internal/cli/` - the portable `dock` CLI.
 - `api/v1/` - the versioned contract with the control plane.
 - `internal/` - `agent` (fleet channel), `fc` (Firecracker), `container` (gVisor), `host` (orchestration), `snapmgr` (snapshots), `net`, `egress`, `disk`, `store`, `server` and more.
 - `scripts/` - host bootstrap, image and kernel builders.
@@ -44,6 +44,29 @@ sudo bash scripts/bootstrap-host.sh \
 ```
 
 Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The script is re-runnable. See [DEPLOY.md](DEPLOY.md) for flags, base images and troubleshooting.
+
+## dock CLI (early, not released yet)
+
+`cmd/dock` is a client for the Dock control plane `/v1` API (not for this daemon). It builds on Linux, macOS and Windows and is not packaged or versioned yet.
+
+```sh
+go build -o dock ./cmd/dock
+dock login                               # prompts without echo; or: echo "$DOCK_API_KEY" | dock login
+dock new web --cpus 4 --memory 8gb --disk 40gb --env staging   # returns once the dock is ready
+dock ls
+dock exec web -- uname -a                # exits with the command's exit code
+dock ssh web                             # runs ssh against the Dock SSH gateway (--print to show it)
+dock port web 3000                       # prints the public URL
+dock branch web --count 2
+dock stop web && dock resume web && dock rm web
+```
+
+- Every command accepts `--json` and prints the API data. Errors print `error: <code>: <message>` to stderr and exit 1; usage errors exit 2.
+- Sizes: `8gb`, `8g`, `8192mb`; a plain number is MiB for memory and GiB for disk.
+- `<dock>` is a name or id. `dock new` reads `./dock.toml` (`name`, `image`, `cpus`, `memory`, `disk`, `environment`); flags override it and unknown keys are an error.
+- Contexts: `dock context add|use|ls|rm`. The built-in `cloud` context points at `https://api.usedock.io`. Config lives in `os.UserConfigDir()/dock/config.toml` (mode 0600). `DOCK_API_URL`, `DOCK_API_KEY` and `DOCK_WORKSPACE` override the active context.
+- Workspace for `dock new`: `--workspace`, then `DOCK_WORKSPACE`, then the context default (`dock context use <name> --workspace <id>`), then your only workspace. With several workspaces and none chosen, `dock new` fails and lists them.
+- Not yet: `dock cp` (the API has no file endpoint for live docks) and streaming `exec` output (the exec API returns the bounded result when the command ends).
 
 ## Development
 
