@@ -38,7 +38,6 @@ Linux only (KVM, cgroups, netns). Go version comes from `go.mod`.
 - Images are minimal. Dock never installs agents or tools into a guest.
 - The fleet channel is outbound only: no inbound port, no per-host address. A host is not offered work until readiness passes.
 - Vocabulary: Dock, Snapshot, Branch, Template; never `box` or `computer`.
-- Plan: https://claude.ai/code/artifact/c93a7b9f-45d6-45f7-aeed-15e8ed204830
 
 ## Workflow
 

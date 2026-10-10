@@ -14,7 +14,7 @@ Every contributor signs the [Dock CLA](https://github.com/usedock/dock/blob/8327
 
 ## Development
 
-Linux only, Go 1.25. CI runs vet, tests, shell syntax checks and a secret scan on every pull request.
+Linux only, Go 1.25. CI runs gofmt, vet, tests, shell syntax checks and a secret scan on every pull request.
 
 ```sh
 go build ./...

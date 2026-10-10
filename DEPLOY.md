@@ -429,28 +429,6 @@ sudo chmod 600 /var/lib/docklet/fleet-credential && sudo systemctl restart dockl
 A host never falls back to the shared token after its credential is rejected; it
 logs that the credential needs an admin reset.
 
-**Rollout.** Two orders work; docklets first is the default.
-
-- **Docklets first, then the backend (preferred).** An upgraded docklet against the
-  old backend registers as before and gets no credential, so it keeps using the shared
-  token (the old backend rejects the new `acceptsCredential` register field with 400;
-  the docklet then retries without it). After the backend upgrade, its first heartbeat
-  or poll gets 401; a docklet that holds no credential and still has
-  `DOCKLET_FLEET_TOKEN` registers once with the shared token to claim a credential
-  (the backend issues only to a host with none, 409 otherwise), stores it, and carries
-  on. A docklet that holds a credential never does this: a rejected credential needs an
-  admin reset. Afterwards delete `DOCKLET_FLEET_TOKEN` from
-  `/etc/docklet/docklet.env`. Terminal and tunnel relays keep working because the
-  docklet still sends `X-Host-Id`.
-- **Backend first, then docklets.** Set `FLEET_LEGACY_SHARED_TOKEN=true` first. The
-  backend then accepts the shared token plus the host's own `hostId` for heartbeat,
-  command poll and result posting, only for hosts that have no credential yet. An old
-  docklet that restarts and re-registers stays credential-less (the backend issues a
-  credential only to docklets that send `acceptsCredential`), so it keeps working.
-  Snapshot transfer and terminals need an upgraded docklet. As each docklet is
-  upgraded it registers with `acceptsCredential` and receives its credential. Set the
-  flag back to `false` (the default) once every host has one.
-
 ---
 
 ## 5. Host configuration reference
@@ -509,7 +487,6 @@ Start with the journal and readiness — they name the cause.
 | microvm provision fails `stage kernel … invalid cross-device link` | `DOCKLET_JAIL_BASE` and `DOCKLET_IMAGE_DIR` are on different filesystems, so the kernel cannot be hard-linked into the jail. Keep the default (`/var/lib/docklet/jail`). |
 | microvm stop is slow | A capture is proportional to what the guest changed, and a busy guest (heavy logging, package installs) writes a large delta that must upload. Expect seconds for an idle dock and minutes for a churned one. Keeping the base image and dock rootfs on a reflink filesystem (XFS with `reflink=1`, or btrfs) lets unchanged blocks be skipped by extent maps; without it the same delta is computed by comparing every block, which is slower but still correct. |
 | Capture fails with "store refused the upload" | The host could not reach `SNAPSHOT_STORE_PUBLIC_ENDPOINT`. The dock is left running and the stop reports `service_unavailable`. Minted URLs point at that address, so it must be resolvable and reachable from the host, and its certificate trusted; check it against the bucket's real endpoint. The upload is attempted a bounded number of times, each with a freshly signed URL, then fails rather than retrying until the operation times out. |
-| Resume fails `400` `validation_error` about snapshot ref `latest` | An old backend sent `latest` to a new docklet. Rollout order: upgrade the backend before docklets. Affected docks go to `error`; recover with `stop --force`. |
 | microvm provision fails on a freshly bootstrapped host | Check `/var/lib/docklet/images/{base.ext4,vmlinux,initrd.img}` all exist and are non-zero (`ls -lL`; `base.ext4` is a symlink into `bases/`); a skipped build with an empty directory means the earlier failure above was ignored. |
 | Resume/branch fails with `base_image_unavailable` | The generation is a delta against a base no eligible host holds (`snapshots.base_fingerprint`, or `baseFingerprint` in its manifest). Install that base on a microvm host with `install-base.sh` or `--base-image` (see Base images); hosts report it on the next heartbeat. |
 

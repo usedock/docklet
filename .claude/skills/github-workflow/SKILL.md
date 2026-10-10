@@ -5,7 +5,7 @@ description: The usedock/docklet lifecycle for a piece of work on GitHub - creat
 
 # GitHub workflow
 
-Repo: `usedock/docklet` (public), default branch `main`. CI (`.github/workflows/ci.yml`) runs `go vet`, `go test`, shell syntax checks and gitleaks on every PR. Use `gh`. The docklet is Linux-only: on Windows never run `go test` in WSL (it lags the owner's PC); compile-only locally, real tests in CI.
+Repo: `usedock/docklet` (public), default branch `main`. CI (`.github/workflows/ci.yml`) runs `gofmt`, `go vet`, `go test`, shell syntax checks and gitleaks on every PR. Use `gh`. The docklet is Linux-only: on Windows never run `go test` in WSL (it lags the owner's PC); compile-only locally, real tests in CI.
 
 ## 0. Epic (big or multi-part work)
 
@@ -84,7 +84,7 @@ git switch -c <type>/<short-kebab-summary>
 
 ## 3. Implement
 
-Orchestrated per `CLAUDE.md`:
+Orchestrated with the agents in `.claude/agents/`:
 1. `explorer` (Haiku) maps the code and the pattern to copy.
 2. The orchestrator (Opus) splits the work into units that do not share files.
 3. `implementer` (Sonnet) agents build each unit with tests, in parallel where independent.

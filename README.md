@@ -8,7 +8,7 @@ The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on 
 
 - Runs docks as Firecracker microVMs (under `jailer`) on Linux with KVM, or as gVisor (`runsc`) containers on Linux with Docker.
 - Enforces each dock's CPU and memory with cgroups, gives each dock a fixed-size disk, and gives it a TAP or veth network on a host-local subnet.
-- Moves snapshot data through the control plane's authenticated object proxy.
+- Moves snapshot data to the object store over presigned URLs the control plane mints, or through its object proxy; the host never holds store credentials.
 - Connects **outbound only** to the control plane fleet API: it registers, sends heartbeats with its inventory and stats, long-polls for commands and posts results. No inbound port, no per-host address.
 - Serves its own HTTP API on loopback only.
 - Fails closed: a host is not offered work until its readiness checks pass.
@@ -37,7 +37,7 @@ A snapshot moves only between hosts with the same engine and CPU architecture.
 One command per machine, run as root on Ubuntu from a checkout of this repo. It installs the runtime, the docklet and a systemd unit, then enrolls the host with your control plane ([usedock/dock](https://github.com/usedock/dock)):
 
 ```sh
-sudo bash scripts/bootstrap-host.sh   --fleet-url https://dock.example.com   --fleet-token "$FLEET_TOKEN"   --runtime microvm|gvisor
+sudo bash scripts/bootstrap-host.sh \n  --fleet-url https://dock.example.com \n  --fleet-token "$FLEET_TOKEN" \n  --runtime microvm    # or gvisor
 ```
 
 Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The script is re-runnable. See [DEPLOY.md](DEPLOY.md) for flags, base images and troubleshooting.
