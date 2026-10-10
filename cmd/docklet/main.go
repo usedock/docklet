@@ -145,6 +145,14 @@ func main() {
 	egressPort := getint("DOCKLET_EGRESS_PORT", 3128)
 	memReserveMiB := int64(getint("DOCKLET_MEMORY_RESERVE_MIB", 0))
 	capVCPU, capMemMiB := agent.Capacity("/", memReserveMiB)
+	diskOvercommit := 1.0
+	if raw := os.Getenv("DOCKLET_DISK_OVERCOMMIT"); raw != "" {
+		r, err := strconv.ParseFloat(raw, 64)
+		if err != nil || r <= 0 {
+			log.Fatalf("docklet: DOCKLET_DISK_OVERCOMMIT %q must be a positive number like 1.0 or 1.5", raw)
+		}
+		diskOvercommit = r
+	}
 	orchestrator, err := host.New(host.Config{
 		HostID:      hostID,
 		Family:      family,
@@ -168,6 +176,8 @@ func main() {
 		EgressAllowPrivate: allowPrivate,
 		CapacityVCPU:       capVCPU,
 		CapacityMemMiB:     capMemMiB,
+		DiskTotalBytes:     func() int64 { return agent.TotalDiskBytes(stateDir) },
+		DiskOvercommit:     diskOvercommit,
 		DiskFreeBytes:      func() int64 { return agent.FreeDiskBytes(stateDir) },
 		Driver:             backend,
 		Snaps:              snaps,

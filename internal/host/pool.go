@@ -118,7 +118,7 @@ func (h *Host) claimSlot(ctx context.Context, slot poolSlot, runtimeID, token st
 	_, exists := h.vms[runtimeID]
 	if !exists {
 		delete(h.vms, slot.id)
-		h.vms[runtimeID] = &vm{res: v.res, tap: v.tap, guestIP: v.guestIP, pid: v.pid, running: v.running, fastToken: token, fastWorkspace: v.fastWorkspace, ephemeral: true}
+		h.vms[runtimeID] = &vm{res: v.res, tap: v.tap, guestIP: v.guestIP, pid: v.pid, running: v.running, fastToken: token, fastWorkspace: v.fastWorkspace, ephemeral: true, backing: slot.id}
 	}
 	h.mu.Unlock()
 	if exists {

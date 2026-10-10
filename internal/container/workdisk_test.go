@@ -368,3 +368,28 @@ func TestRestoreStateKeepsTheMountpointDir(t *testing.T) {
 		t.Fatal("restore must clear stale files")
 	}
 }
+
+func TestWorkDiskPathNeverMounts(t *testing.T) {
+	d, f := newDiskDriver(t)
+	if _, err := d.EnsureWorkDisk("d1", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.unmountWork("d1"); err != nil {
+		t.Fatal(err)
+	}
+	path, err := d.WorkDiskPath("d1")
+	if err != nil || path != d.workImage("d1") {
+		t.Fatalf("path = %q err = %v, want the image", path, err)
+	}
+	if f.mounted[d.workMount("d1")] {
+		t.Fatal("WorkDiskPath must not mount the disk")
+	}
+}
+
+func TestWorkDiskPathFallsBackToLegacyVolume(t *testing.T) {
+	d, _ := newDiskDriver(t)
+	d.dockerOut = func([]string) ([]byte, error) { return []byte("/legacy/_data\n"), nil }
+	if path, err := d.WorkDiskPath("nodisk"); err != nil || path != "/legacy/_data" {
+		t.Fatalf("path = %q err = %v", path, err)
+	}
+}
