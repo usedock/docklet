@@ -319,41 +319,47 @@ func (d *Driver) EnsureWorkDisk(dockID string, diskGiB int) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	fresh := !fileExists(img)
-	if fresh {
-		if err := d.createImage(img, diskGiB); err != nil {
+	if !fileExists(img) {
+		if err := d.buildWorkDisk(dockID, img, dir, diskGiB); err != nil {
 			return "", err
 		}
 	}
 	if err := d.mountWork(img, dir); err != nil {
 		return "", err
 	}
-	if fresh {
-		if err := d.initWorkDisk(dockID, dir); err != nil {
-			_ = d.unmountWork(dockID)
-			_ = os.Remove(img)
-			return "", err
-		}
-	}
 	return dir, nil
 }
 
-// createImage builds the image under a temp name so a failed mkfs never
-// leaves a file that later passes for a formatted disk.
-func (d *Driver) createImage(img string, diskGiB int) error {
+// buildWorkDisk formats, chowns and migrates the disk under a temp name and
+// renames it into place last, so a crash at any step leaves no image that
+// passes for a finished disk.
+func (d *Driver) buildWorkDisk(dockID, img, dir string, diskGiB int) error {
 	tmp := img + ".tmp"
+	// A crash mid-build can leave the temp image mounted on dir.
+	if err := d.unmountWork(dockID); err != nil {
+		return err
+	}
 	_ = os.Remove(tmp)
-	if err := d.runner()("truncate", "-s", fmt.Sprintf("%dG", diskGiB), tmp); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("work disk truncate: %w", err)
-	}
-	if err := d.runner()("mkfs.ext4", "-F", "-q", tmp); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("work disk mkfs: %w", err)
-	}
-	if err := os.Rename(tmp, img); err != nil {
+	fail := func(err error) error {
+		_ = d.unmountWork(dockID)
 		_ = os.Remove(tmp)
 		return err
+	}
+	if err := d.runner()("truncate", "-s", fmt.Sprintf("%dG", diskGiB), tmp); err != nil {
+		return fail(fmt.Errorf("work disk truncate: %w", err))
+	}
+	if err := d.runner()("mkfs.ext4", "-F", "-q", tmp); err != nil {
+		return fail(fmt.Errorf("work disk mkfs: %w", err))
+	}
+	if err := d.mountWork(tmp, dir); err != nil {
+		return fail(err)
+	}
+	if err := d.initWorkDisk(dockID, dir); err != nil {
+		return fail(err)
+	}
+	// Renaming the backing file of a mounted loop device is safe; it stays mounted.
+	if err := os.Rename(tmp, img); err != nil {
+		return fail(err)
 	}
 	return nil
 }

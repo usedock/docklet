@@ -18,10 +18,15 @@ type fakeSys struct {
 	mounted map[string]bool
 	inner   dockexec.Runner
 	failOn  string
+	// before runs ahead of each faked command, to observe state mid-build.
+	before func(line string)
 }
 
 func (f *fakeSys) run(name string, args ...string) error {
 	line := strings.Join(append([]string{name}, args...), " ")
+	if f.before != nil {
+		f.before(line)
+	}
 	if f.failOn != "" && strings.HasPrefix(line, f.failOn) {
 		return errors.New("forced failure")
 	}
@@ -89,11 +94,13 @@ func TestEnsureWorkDiskCreatesFormatsAndMounts(t *testing.T) {
 		t.Fatalf("dir = %q, want %q", dir, mnt)
 	}
 	want := []string{
+		"mountpoint -q " + mnt,
 		"truncate -s 7G " + img + ".tmp",
 		"mkfs.ext4 -F -q " + img + ".tmp",
 		"mountpoint -q " + mnt,
-		"mount -o loop,nosuid,nodev " + img + " " + mnt,
+		"mount -o loop,nosuid,nodev " + img + ".tmp " + mnt,
 		"chown 1001:1001 " + mnt,
+		"mountpoint -q " + mnt,
 	}
 	if strings.Join(f.log, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(f.log, "\n"), strings.Join(want, "\n"))
@@ -242,6 +249,51 @@ func TestEnsureWorkDiskMigratesLegacyVolume(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkDiskNamesTheImageOnlyAfterInit(t *testing.T) {
+	d, f := newDiskDriver(t)
+	d.dockerOut = func([]string) ([]byte, error) { return []byte("/legacy\n"), nil }
+	f.before = func(line string) {
+		if (strings.HasPrefix(line, "chown") || strings.HasPrefix(line, "cp")) && d.WorkDiskExists("d1") {
+			t.Errorf("image named before init finished (%q): a crash here would skip chown or migration for good", line)
+		}
+	}
+	if _, err := d.EnsureWorkDisk("d1", 3); err != nil {
+		t.Fatal(err)
+	}
+	if !d.WorkDiskExists("d1") {
+		t.Fatal("a finished build must name the image")
+	}
+}
+
+func TestEnsureWorkDiskRecoversFromCrashMidMigration(t *testing.T) {
+	d, f := newDiskDriver(t)
+	d.dockerOut = func([]string) ([]byte, error) { return []byte("/legacy\n"), nil }
+	// A docklet killed during cp leaves the temp image mounted and no named image.
+	img, mnt := d.workImage("d1"), d.workMount("d1")
+	if err := os.MkdirAll(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(img+".tmp", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.mounted[mnt] = true
+	if _, err := d.EnsureWorkDisk("d1", 3); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(f.log, "\n")
+	for _, want := range []string{"umount " + mnt, "mkfs.ext4", "cp -a /legacy/. " + mnt + "/", "docker volume rm " + WorkVolume("d1")} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("calls:\n%s\nwant %q", joined, want)
+		}
+	}
+	if strings.Index(joined, "umount "+mnt) > strings.Index(joined, "mount -o loop") {
+		t.Fatalf("the stale temp mount must go before the rebuilt disk mounts:\n%s", joined)
+	}
+	if !d.WorkDiskExists("d1") || fileExists(img+".tmp") {
+		t.Fatal("the rebuilt image must replace its temp name")
+	}
+}
+
 func TestEnsureWorkDiskFailedMigrationLeavesNoImage(t *testing.T) {
 	d, f := newDiskDriver(t)
 	d.dockerOut = func([]string) ([]byte, error) { return []byte("/legacy\n"), nil }
@@ -249,8 +301,11 @@ func TestEnsureWorkDiskFailedMigrationLeavesNoImage(t *testing.T) {
 	if _, err := d.EnsureWorkDisk("d1", 3); err == nil {
 		t.Fatal("a failed migration must fail the ensure")
 	}
-	if d.WorkDiskExists("d1") {
+	if d.WorkDiskExists("d1") || fileExists(d.workImage("d1")+".tmp") {
 		t.Fatal("a failed migration must not leave an empty image that hides the old data")
+	}
+	if f.mounted[d.workMount("d1")] {
+		t.Fatal("a failed migration must unmount the temp image")
 	}
 }
 
