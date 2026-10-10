@@ -61,6 +61,8 @@ type Config struct {
 	// CapacityVCPU and CapacityMemMiB budget the summed requested resources of live docks; 0 leaves that resource unbounded.
 	CapacityVCPU   int64
 	CapacityMemMiB int64
+	// DiskFreeBytes reports free host disk for gvisor work disks; nil leaves disk admission off.
+	DiskFreeBytes func() int64
 	// AgentCall overrides guest-agent calls (tests only).
 	AgentCall func(ctx context.Context, ip, token string, req fastAgentRequest) (fastAgentResponse, error)
 	// AgentDial overrides raw guest-agent connections for terminals (tests only).
@@ -359,7 +361,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 		// branch restores the source generation onto the volume before boot so
 		// the dock starts with its files already in place.
 		if resolved != "" {
-			if err := h.restoreContainerState(ctx, dockID, resolved); err != nil {
+			if err := h.restoreContainerState(ctx, dockID, res, resolved); err != nil {
 				return "", err
 			}
 		}
@@ -627,13 +629,13 @@ func (h *Host) SnapshotCreate(ctx context.Context, dockID string, parentID *stri
 // what keeps a capture in the seconds range rather than minutes.
 func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter bool, snapshotID string) (string, int64, string, error) {
 	state, ok := h.cfg.Driver.(interface {
-		VolumeDir(volume string) (string, error)
+		WorkDir(dockID string) (string, error)
 		SaveState(dir, dest string) error
 	})
 	if !ok {
 		return "", 0, "", fmt.Errorf("container driver lacks state capture")
 	}
-	dir, err := state.VolumeDir(h.containerWorkVolume(dockID))
+	dir, err := state.WorkDir(dockID)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -665,12 +667,11 @@ func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *s
 	return snapshotID, total, manifest.CPUFamily, nil
 }
 
-// restoreContainerState writes a generation's workspace onto the dock's volume.
+// restoreContainerState writes a generation's workspace onto the dock's work disk.
 // It runs before boot so the dock never starts without its files.
-func (h *Host) restoreContainerState(ctx context.Context, dockID, resolved string) error {
+func (h *Host) restoreContainerState(ctx context.Context, dockID string, res apiv1.Resources, resolved string) error {
 	state, ok := h.cfg.Driver.(interface {
-		VolumeDir(volume string) (string, error)
-		EnsureVolume(volume string) error
+		EnsureWorkDisk(dockID string, diskGiB int) (string, error)
 		RestoreState(dir, tarPath string) error
 	})
 	if !ok {
@@ -679,11 +680,7 @@ func (h *Host) restoreContainerState(ctx context.Context, dockID, resolved strin
 	if _, err := h.cfg.Snaps.PrepareResume(ctx, resolved); err != nil {
 		return err
 	}
-	volume := h.containerWorkVolume(dockID)
-	if err := state.EnsureVolume(volume); err != nil {
-		return err
-	}
-	dir, err := state.VolumeDir(volume)
+	dir, err := state.EnsureWorkDisk(dockID, res.DiskGiB)
 	if err != nil {
 		return err
 	}
@@ -691,15 +688,6 @@ func (h *Host) restoreContainerState(ctx context.Context, dockID, resolved strin
 		return fmt.Errorf("restore state: %w", err)
 	}
 	return nil
-}
-
-// containerWorkVolume names the volume backing a dock's workspace.
-func (h *Host) containerWorkVolume(dockID string) string {
-	type namer interface{ WorkVolume(dockID string) string }
-	if n, ok := h.cfg.Driver.(namer); ok {
-		return n.WorkVolume(dockID)
-	}
-	return dockID + "-work"
 }
 
 // appendTarEntry rewrites a tar with one extra file entry appended. The delta
@@ -907,7 +895,7 @@ func (h *Host) snapshotLoadContainer(ctx context.Context, dockID string, res api
 	// not complete) and would keep the dock's old files; Terminate is
 	// idempotent when absent.
 	_ = h.cfg.Driver.Terminate(h.handle(dockID))
-	if err := h.restoreContainerState(ctx, dockID, resolved); err != nil {
+	if err := h.restoreContainerState(ctx, dockID, res, resolved); err != nil {
 		return "", err
 	}
 	h.mu.Lock()
@@ -1018,6 +1006,10 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	_ = h.deleteIface(tap)
 	_ = os.RemoveAll(h.jailRoot(dockID))
 	_ = os.RemoveAll(filepath.Join(h.cfg.VMsDir, dockID))
+	// A gvisor dock owns a loop-mounted work disk that must be unmounted before it is removed.
+	if w, ok := h.cfg.Driver.(interface{ RemoveWorkDisk(dockID string) error }); ok {
+		return w.RemoveWorkDisk(dockID)
+	}
 	return nil
 }
 
@@ -1137,12 +1129,12 @@ func (h *Host) diskUsed(dockID string, v *vm) int64 {
 	path := filepath.Join(h.jailRoot(dockID), fc.RootfsName)
 	if h.usesVeth() {
 		vols, ok := h.cfg.Driver.(interface {
-			VolumeDir(volume string) (string, error)
+			WorkDir(dockID string) (string, error)
 		})
 		if !ok {
 			return last.bytes
 		}
-		dir, err := vols.VolumeDir(h.containerWorkVolume(dockID))
+		dir, err := vols.WorkDir(dockID)
 		if err != nil {
 			return last.bytes
 		}

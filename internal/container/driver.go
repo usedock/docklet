@@ -38,6 +38,8 @@ const (
 type Driver struct {
 	Runner dockexec.Runner
 	Image  string
+	// StateDir holds each dock's bounded work disk under docks/<id>.
+	StateDir string
 	// InspectPID resolves a container to its init pid; nil shells docker.
 	InspectPID func(container string) (int, error)
 	// dockerExec runs `docker <args>` with the given streams; nil shells docker.
@@ -108,7 +110,10 @@ func (d *Driver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, error) {
 		return nil, fmt.Errorf("container image not configured")
 	}
 	name := ContainerName(spec.DockID)
-	workVol := WorkVolume(spec.DockID)
+	workDir, err := d.EnsureWorkDisk(spec.DockID, spec.Resources.DiskGiB)
+	if err != nil {
+		return nil, err
+	}
 	image := d.Image
 	network := "--network=none"
 	if spec.AttachNetwork != nil {
@@ -126,7 +131,7 @@ func (d *Driver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, error) {
 		"--memory", fmt.Sprintf("%dm", spec.Resources.MemoryMiB),
 		"--user", fmt.Sprintf("%d:%d", DockUID, DockGID),
 		"--tmpfs", "/tmp",
-		"-v", workVol + ":/home/user/work",
+		"-v", workDir + ":/home/user/work",
 		"--cap-drop=ALL",
 		"--security-opt", "no-new-privileges",
 	}
@@ -260,7 +265,7 @@ func (d *Driver) Terminate(h *fc.Handle) error {
 		err = d.removeContainers(h.DockID)
 		if err == nil {
 			d.removeNetHolder(h.DockID)
-			return nil
+			return d.unmountWork(h.DockID)
 		}
 	}
 	return err
@@ -281,18 +286,161 @@ const (
 	terminateBackoff  = 500 * time.Millisecond
 )
 
-// WorkVolume names the workspace volume backing a dock. Dock state lives on
-// this volume so a capture is a host-side tar of one directory rather than a
-// copy of the whole container filesystem.
+// WorkVolume names the legacy unbounded docker volume of a dock; it only
+// matters for migrating docks created before the work disk existed.
 func WorkVolume(dockID string) string { return sanitizedName(dockID) + "-work" }
 
-// WorkVolume names the workspace volume for a dock through the driver, so the
-// orchestrator never has to know how the name is derived.
-func (d *Driver) WorkVolume(dockID string) string { return WorkVolume(dockID) }
+// workRoot is the dock's state directory holding the work image and mountpoint.
+func (d *Driver) workRoot(dockID string) string {
+	return filepath.Join(d.StateDir, "docks", dockID)
+}
 
-// VolumeDir resolves a volume's host directory through the daemon, which is
-// the only supported way to locate it.
-func (d *Driver) VolumeDir(volume string) (string, error) {
+func (d *Driver) workImage(dockID string) string {
+	return filepath.Join(d.workRoot(dockID), "work.img")
+}
+func (d *Driver) workMount(dockID string) string { return filepath.Join(d.workRoot(dockID), "work") }
+
+// WorkDiskExists reports whether the dock already owns a work image.
+func (d *Driver) WorkDiskExists(dockID string) bool {
+	return d.StateDir != "" && fileExists(d.workImage(dockID))
+}
+
+// EnsureWorkDisk creates (once) and mounts the dock's work disk: a sparse
+// ext4 image of diskGiB, so the dock cannot write past its size. Calling it
+// again is safe. It returns the mounted directory.
+func (d *Driver) EnsureWorkDisk(dockID string, diskGiB int) (string, error) {
+	if d.StateDir == "" {
+		return "", fmt.Errorf("container state dir not configured")
+	}
+	if diskGiB < 1 {
+		return "", fmt.Errorf("work disk needs diskGiB >= 1")
+	}
+	img, dir := d.workImage(dockID), d.workMount(dockID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	fresh := !fileExists(img)
+	if fresh {
+		if err := d.createImage(img, diskGiB); err != nil {
+			return "", err
+		}
+	}
+	if err := d.mountWork(img, dir); err != nil {
+		return "", err
+	}
+	if fresh {
+		if err := d.initWorkDisk(dockID, dir); err != nil {
+			_ = d.unmountWork(dockID)
+			_ = os.Remove(img)
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// createImage builds the image under a temp name so a failed mkfs never
+// leaves a file that later passes for a formatted disk.
+func (d *Driver) createImage(img string, diskGiB int) error {
+	tmp := img + ".tmp"
+	_ = os.Remove(tmp)
+	if err := d.runner()("truncate", "-s", fmt.Sprintf("%dG", diskGiB), tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("work disk truncate: %w", err)
+	}
+	if err := d.runner()("mkfs.ext4", "-F", "-q", tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("work disk mkfs: %w", err)
+	}
+	if err := os.Rename(tmp, img); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// mountWork loop-mounts the image; an already mounted dir is left alone.
+func (d *Driver) mountWork(img, dir string) error {
+	if d.runner()("mountpoint", "-q", dir) == nil {
+		return nil
+	}
+	if err := d.runner()("mount", "-o", "loop,nosuid,nodev", img, dir); err != nil {
+		return fmt.Errorf("work disk mount: %w", err)
+	}
+	return nil
+}
+
+// unmountWork unmounts the work disk; a dir that is not mounted is success.
+func (d *Driver) unmountWork(dockID string) error {
+	if d.StateDir == "" {
+		return nil
+	}
+	dir := d.workMount(dockID)
+	if d.runner()("mountpoint", "-q", dir) != nil {
+		return nil
+	}
+	if err := d.runner()("umount", dir); err != nil {
+		if d.runner()("umount", "-l", dir) != nil {
+			return fmt.Errorf("work disk umount: %w", err)
+		}
+	}
+	return nil
+}
+
+// initWorkDisk hands the fresh disk to the dock user and moves any legacy
+// unbounded docker volume into it.
+func (d *Driver) initWorkDisk(dockID, dir string) error {
+	if err := d.runner()("chown", fmt.Sprintf("%d:%d", DockUID, DockGID), dir); err != nil {
+		return err
+	}
+	legacy, err := d.legacyVolumeDir(WorkVolume(dockID))
+	if err != nil {
+		if isMissingVolume(err) {
+			return nil
+		}
+		return err
+	}
+	if err := d.runner()("cp", "-a", legacy+"/.", dir+"/"); err != nil {
+		return fmt.Errorf("work disk migrate: %w", err)
+	}
+	// The data now lives in the image; failing to drop the old volume only wastes space.
+	_ = d.runner()("docker", "volume", "rm", WorkVolume(dockID))
+	return nil
+}
+
+// RemoveWorkDisk unmounts and deletes the dock's work disk and any legacy volume.
+func (d *Driver) RemoveWorkDisk(dockID string) error {
+	if d.StateDir == "" {
+		return nil
+	}
+	if err := d.unmountWork(dockID); err != nil {
+		return err
+	}
+	// Never delete a tree that is still a mountpoint: that would wipe the disk's files.
+	if d.runner()("mountpoint", "-q", d.workMount(dockID)) == nil {
+		return fmt.Errorf("work disk still mounted")
+	}
+	if err := os.RemoveAll(d.workRoot(dockID)); err != nil {
+		return err
+	}
+	_ = d.runner()("docker", "volume", "rm", WorkVolume(dockID))
+	return nil
+}
+
+// WorkDir returns the dock's mounted work directory for state capture,
+// falling back to a legacy docker volume that was never migrated.
+func (d *Driver) WorkDir(dockID string) (string, error) {
+	if d.WorkDiskExists(dockID) {
+		dir := d.workMount(dockID)
+		if err := d.mountWork(d.workImage(dockID), dir); err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	return d.legacyVolumeDir(WorkVolume(dockID))
+}
+
+// legacyVolumeDir resolves a docker volume's host directory through the daemon.
+func (d *Driver) legacyVolumeDir(volume string) (string, error) {
 	out, err := d.execOut("volume", "inspect", "-f", "{{.Mountpoint}}", volume)
 	if err != nil {
 		return "", err
@@ -304,29 +452,34 @@ func (d *Driver) VolumeDir(volume string) (string, error) {
 	return dir, nil
 }
 
-// EnsureVolume creates the workspace volume if absent, so a restore can write
-// into it before the container exists.
-func (d *Driver) EnsureVolume(volume string) error {
-	if err := d.runner()("docker", "volume", "create", volume); err != nil {
-		return fmt.Errorf("docker volume create: %w", err)
-	}
-	return nil
+func isMissingVolume(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "no such volume")
 }
 
 // SaveState tars a state directory to dest, recording paths relative to the
 // directory so a restore reproduces the same layout.
 func (d *Driver) SaveState(dir, dest string) error {
-	return d.runHostTar([]string{"-C", dir, "-cf", dest, "."})
+	return d.runHostTar([]string{"-C", dir, "--exclude=./lost+found", "-cf", dest, "."})
 }
 
 // RestoreState unpacks a state tarball into a directory, replacing whatever is
 // there so a restore never leaves stale files behind.
 func (d *Driver) RestoreState(dir, tarPath string) error {
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
+	// Clear the contents, not the dir: it may be the work disk mountpoint.
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == "lost+found" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
 	}
 	if err := d.runHostTar([]string{"-C", dir, "-xf", tarPath}); err != nil {
 		return err

@@ -7,7 +7,7 @@ The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on 
 ## What it does
 
 - Runs docks as Firecracker microVMs (under `jailer`) on Linux with KVM, or as gVisor (`runsc`) containers on Linux with Docker.
-- Enforces each dock's CPU and memory with cgroups, gives each dock a fixed-size disk, and gives it a TAP or veth network on a host-local subnet.
+- Enforces each dock's CPU and memory with cgroups, gives each dock a fixed-size disk (a sparse rootfs on microvm, a size-limited work volume at `/home/user/work` on gVisor), and gives it a TAP or veth network on a host-local subnet.
 - Moves snapshot data to the object store over presigned URLs the control plane mints, or through its object proxy; the host never holds store credentials.
 - Connects **outbound only** to the control plane fleet API: it registers, sends heartbeats with its inventory and stats, long-polls for commands and posts results. No inbound port, no per-host address.
 - Serves its own HTTP API on loopback only.

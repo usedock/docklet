@@ -44,6 +44,7 @@ func TestBootPinsRunscAndLocksProfile(t *testing.T) {
 		Image:      "dock-gvisor:test",
 		InspectPID: func(string) (int, error) { return 4242, nil },
 	}
+	useDisk(d, t.TempDir())
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "fast-agent.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
@@ -58,8 +59,8 @@ func TestBootPinsRunscAndLocksProfile(t *testing.T) {
 	for _, want := range []string{
 		"--runtime=runsc", "--network=none", "--cap-drop=ALL", "no-new-privileges",
 		"--cpus 1", "--memory 2048m", "--user 1001:1001", "dock-gvisor:test",
-		// Dock state lives on a volume so a capture is a host-side tar.
-		"dock-dock-1-work:/home/user/work",
+		// Dock state lives on the bounded work disk so a capture is a host-side tar.
+		"/docks/dock-1/work:/home/user/work",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("docker run = %q, want %q", joined, want)
@@ -97,6 +98,7 @@ func TestBootJoinsNetworkHeldBeforeStart(t *testing.T) {
 			return 4242, nil
 		},
 	}
+	useDisk(d, t.TempDir())
 	attach := func(pid int) error {
 		attachedPID = pid
 		calls = append(calls, "attach")
@@ -133,6 +135,7 @@ func TestBootRemovesHolderWhenAttachFails(t *testing.T) {
 		Image:      "dock-gvisor:test",
 		InspectPID: func(string) (int, error) { return 7, nil },
 	}
+	useDisk(d, t.TempDir())
 	attach := func(int) error { return errors.New("nsenter failed") }
 	if _, err := d.Boot(context.Background(), fc.BootSpec{DockID: "dock-1", Resources: testRes, JailRoot: t.TempDir(), AttachNetwork: attach}); err == nil {
 		t.Fatal("a failed attach must fail the boot")
@@ -256,44 +259,6 @@ func TestCreateSnapshotNoopForDiskOnly(t *testing.T) {
 	}
 }
 
-func TestWorkVolumeIsDerivedFromTheContainerName(t *testing.T) {
-	// The orchestrator names volumes through the driver, so a session for one
-	// dock resolves the same volume the container mounts.
-	d := &Driver{}
-	if d.WorkVolume("abc") != WorkVolume("abc") {
-		t.Fatalf("driver and package volume names diverged")
-	}
-	if !strings.HasPrefix(d.WorkVolume("abc"), "dock-") {
-		t.Fatalf("volume %q must share the container name prefix", d.WorkVolume("abc"))
-	}
-}
-
-func TestVolumeDirResolvesThroughTheDaemon(t *testing.T) {
-	var got []string
-	d := &Driver{dockerOut: func(args []string) ([]byte, error) {
-		got = args
-		return []byte("/var/lib/docker/volumes/dock-x-work/_data\n"), nil
-	}}
-	dir, err := d.VolumeDir("dock-x-work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dir != "/var/lib/docker/volumes/dock-x-work/_data" {
-		t.Fatalf("dir = %q", dir)
-	}
-	// The daemon is the only supported way to locate a volume.
-	if !strings.Contains(strings.Join(got, " "), "volume inspect") {
-		t.Fatalf("args = %v", got)
-	}
-}
-
-func TestVolumeDirRejectsAnEmptyMountpoint(t *testing.T) {
-	d := &Driver{dockerOut: func([]string) ([]byte, error) { return []byte("\n"), nil }}
-	if _, err := d.VolumeDir("v"); err == nil {
-		t.Fatal("a volume without a mountpoint must fail rather than yield an empty path")
-	}
-}
-
 func TestSaveStateTarIsRelativeToTheVolume(t *testing.T) {
 	var args []string
 	d := &Driver{hostTar: func(a []string) error {
@@ -360,11 +325,5 @@ func TestRestoreStateOwnsTheWorkspaceAsTheDockUser(t *testing.T) {
 	// The dock runs unprivileged, so restored files must be writable by it.
 	if !strings.Contains(chown, "1001:1001") || !strings.Contains(chown, dir) {
 		t.Fatalf("chown = %q, want the workspace owned by the dock user", chown)
-	}
-}
-
-func TestWorkVolumeName(t *testing.T) {
-	if got := WorkVolume("dock-1"); got != "dock-dock-1-work" {
-		t.Fatalf("volume = %q, want the id-derived name", got)
 	}
 }

@@ -991,6 +991,15 @@ func diskTotalBytes(root string) int64 {
 	return int64(stat.Blocks) * int64(stat.Bsize)
 }
 
+// FreeDiskBytes reports the space available to unprivileged writes on the filesystem holding path; 0 when unknown.
+func FreeDiskBytes(path string) int64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0
+	}
+	return int64(stat.Bavail) * int64(stat.Bsize)
+}
+
 // Default dock size the reported slot count assumes; placement itself admits
 // by each dock's requested resources.
 const (
