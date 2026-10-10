@@ -19,7 +19,7 @@ The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on 
 | --- | --- | --- |
 | Linux with KVM | Firecracker | Supported |
 | Linux with Docker | gVisor | Supported |
-| Windows x86_64 | libkrun on Windows Hypervisor Platform | In progress |
+| Windows x86_64 | libkrun on Windows Hypervisor Platform | Planned |
 | macOS, Apple silicon | libkrun on Hypervisor.framework | Planned |
 
 A snapshot moves only between hosts with the same engine and CPU architecture.
