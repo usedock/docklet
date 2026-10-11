@@ -61,6 +61,10 @@ type Manifest struct {
 	// present and refuses a mismatch.
 	SHA256    string `json:"sha256,omitempty"`
 	SizeBytes int64  `json:"sizeBytes,omitempty"`
+	// DataBytes is the space the flattened disk's data takes once decompressed (its allocated
+	// bytes, not the sparse virtual size). Set by full snapshots so a pull can size its free-space
+	// check; absent on older generations and imports.
+	DataBytes int64 `json:"dataBytes,omitempty"`
 	// Image names the Dockyard image the disk derives from; empty when the
 	// base was built on the host.
 	Image string `json:"image,omitempty"`

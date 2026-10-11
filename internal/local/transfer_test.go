@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usedock/docklet/internal/dockyard"
 )
 
 func TestFlattenDiskArgv(t *testing.T) {
@@ -283,20 +285,62 @@ func TestPushSpaceNeedCountsData(t *testing.T) {
 
 func TestPullSpaceNeed(t *testing.T) {
 	const gib = int64(1) << 30
-	// 1 GiB export of a 20 GiB disk: data ~3 GiB; peak is data plus the larger of export and data.
-	if got := pullSpaceNeed(gib, 20*gib, 0, 0); got != 6*gib {
+	// No recorded data size (an older export): 1 GiB export of a 20 GiB disk guesses ~3 GiB of
+	// data; peak is data plus the larger of export and data.
+	if got := pullSpaceNeed(gib, 0, 20*gib, 0, 0); got != 6*gib {
 		t.Fatalf("need %d, want %d", got, 6*gib)
 	}
-	// The data cannot exceed the disk.
-	if got := pullSpaceNeed(10*gib, 4*gib, 0, 0); got != 14*gib {
+	// The guessed data cannot exceed the disk.
+	if got := pullSpaceNeed(10*gib, 0, 4*gib, 0, 0); got != 14*gib {
 		t.Fatalf("capped need %d, want %d", got, 14*gib)
 	}
 	// A base image still to fetch is held through the pull, and its own peak can dominate.
-	if got := pullSpaceNeed(gib, 20*gib, 0, 2*gib); got != 8*gib {
+	if got := pullSpaceNeed(gib, 0, 20*gib, 0, 2*gib); got != 8*gib {
 		t.Fatalf("with kept image %d, want %d", got, 8*gib)
 	}
-	if got := pullSpaceNeed(gib, 20*gib, 9*gib, 2*gib); got != 9*gib {
+	if got := pullSpaceNeed(gib, 0, 20*gib, 9*gib, 2*gib); got != 9*gib {
 		t.Fatalf("image peak %d, want %d", got, 9*gib)
+	}
+}
+
+func TestPullSpaceNeedUsesRecordedDataSize(t *testing.T) {
+	const gib = int64(1) << 30
+	// Incompressible: 6 GiB of data on a 10 GiB disk exports to 6 GiB. The 3x guess wanted
+	// 10+10 GiB; the real peak is the data plus the export, 12 GiB.
+	if got := pullSpaceNeed(6*gib, 6*gib, 10*gib, 0, 0); got != 12*gib {
+		t.Fatalf("incompressible need %d, want %d", got, 12*gib)
+	}
+	// Highly compressible: 8 GiB of data exports to 1 GiB. The guess wanted 6 GiB and the pull
+	// would run out of space; the real peak is 16 GiB (the raw disk and the qcow2 made from it).
+	if got := pullSpaceNeed(gib, 8*gib, 20*gib, 0, 0); got != 16*gib {
+		t.Fatalf("compressible need %d, want %d", got, 16*gib)
+	}
+	// A recorded size above the disk (it cannot be) is still bounded by the disk.
+	if got := pullSpaceNeed(gib, 30*gib, 4*gib, 0, 0); got != 8*gib {
+		t.Fatalf("capped need %d, want %d", got, 8*gib)
+	}
+	// An absurd recorded size keeps the arithmetic far from overflow.
+	if got := pullSpaceNeed(gib, 1<<62, 0, 0, 0); got <= 0 {
+		t.Fatalf("overflowed: %d", got)
+	}
+}
+
+func TestPullSpaceNeedCountsBaseImageFilesAndTwiceItsData(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	im, err := e.ResolveImage(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files int64
+	for _, f := range im.Files {
+		files += f.Size
+	}
+	rootfs := im.Files[dockyard.FileRootfs].Size
+	data := rootfs * rawDataRatio
+	// A tiny export so the base-image peak dominates. rootfs.zst, the sparse raw file and
+	// base.qcow2.part coexist: the image files plus twice the data.
+	if got, want := e.PullSpaceNeed(context.Background(), 1, 1, 1, ""), files+2*data; got != want {
+		t.Fatalf("need %d, want %d", got, want)
 	}
 }
 

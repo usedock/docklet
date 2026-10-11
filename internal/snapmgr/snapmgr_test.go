@@ -618,6 +618,13 @@ func TestFreezeRootfsFullWritesAWholeChecksummedImage(t *testing.T) {
 	if got, err := c.GenerationSHA256(ctx, "s1"); err != nil || got != manifest.SHA256 {
 		t.Fatal("GenerationSHA256 disagrees with the manifest")
 	}
+	// The data size is the disk's allocated bytes, recorded in the manifest the control plane reads.
+	if manifest.DataBytes <= 0 || persisted.DataBytes != manifest.DataBytes {
+		t.Fatalf("dataBytes = %d, persisted %d", manifest.DataBytes, persisted.DataBytes)
+	}
+	if got, err := c.GenerationDataBytes(ctx, "s1"); err != nil || got != manifest.DataBytes {
+		t.Fatalf("GenerationDataBytes = %d (%v), want %d", got, err, manifest.DataBytes)
+	}
 	if _, err := os.Stat(filepath.Join(c.GensDir, "s1", "rootfs.ext4")); !os.IsNotExist(err) {
 		t.Fatalf("the local copy of an export must be dropped: %v", err)
 	}
@@ -630,6 +637,47 @@ func TestFreezeRootfsFullWritesAWholeChecksummedImage(t *testing.T) {
 	got, _ := os.ReadFile(restored)
 	if !bytes.Equal(got, want) {
 		t.Fatal("restored disk differs from the dock disk")
+	}
+}
+
+func TestFreezeRootfsFullRecordsAllocatedDataNotVirtualSize(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, _ := fullFixture(t)
+	// A 64 MiB disk holding one block of data: the recorded data size is what is allocated, far
+	// below the virtual size, so a pull sizes its free-space check from the real data.
+	const virtual = 64 << 20
+	f, err := os.Create(rootfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(virtual); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(bytes.Repeat([]byte{0xab}, disk.BlockSize), 0); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	manifest, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "sparse", "full", "GenuineIntel:142:10", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.DataBytes <= 0 || manifest.DataBytes >= virtual/2 {
+		t.Fatalf("dataBytes = %d, want the allocated data well under the %d byte virtual size", manifest.DataBytes, virtual)
+	}
+	if manifest.Files[0].RawSize != virtual {
+		t.Fatalf("rawSize = %d, want %d", manifest.Files[0].RawSize, virtual)
+	}
+}
+
+func TestGenerationDataBytesIsZeroForAGenerationThatRecordedNone(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	old := store.Manifest{SnapshotID: "old", DockID: "d1", Kind: "full", SHA256: "x", SizeBytes: 1}
+	if err := c.putManifest(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.GenerationDataBytes(ctx, "old"); err != nil || got != 0 {
+		t.Fatalf("an older generation answers 0, got %d (%v)", got, err)
 	}
 }
 

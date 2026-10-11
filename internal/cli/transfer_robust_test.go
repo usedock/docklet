@@ -495,6 +495,19 @@ func TestPullChecksFreeSpaceBeforeDownloading(t *testing.T) {
 	}
 }
 
+func TestPullFreeSpaceCheckUsesTheRecordedDataSize(t *testing.T) {
+	te, p := transferEnv(t, "direct")
+	p.readyExport(zstdOf(t, diskBytes), "ubuntu-24.04")
+	// A tiny export of a disk that holds a huge amount of data (it compresses very well): the
+	// recorded data size fails the check, where the 3x guess from the export size would pass.
+	p.exportState["diskGiB"] = 100000000
+	p.exportState["dataBytes"] = int64(1) << 50
+	mustExit(t, te, 1, "pull", remoteID, "--from", "lab", "--name", "back")
+	if !strings.Contains(te.errb.String(), "insufficient_space") || len(p.downloads) != 0 {
+		t.Fatalf("stderr %q downloads %v", te.errb, p.downloads)
+	}
+}
+
 func TestPullRejectsAnInvalidNameBeforeExporting(t *testing.T) {
 	te, p := transferEnv(t, "direct")
 	p.readyExport(zstdOf(t, diskBytes), "ubuntu-24.04")

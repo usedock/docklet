@@ -125,14 +125,15 @@ func pushSpaceNeed(diskBytes, dataBytes int64) int64 {
 }
 
 // rawDataRatio is how many times larger than its zstd file a disk's data is assumed to be
-// when pulling, where only the compressed size is known.
+// when the real data size is not known (an export from before it was recorded, or a base image).
 const rawDataRatio = 3
 
 // PullSpaceNeed estimates the peak space of a pull. The downloaded zstd file and the sparse raw
-// disk (its data) coexist, then the raw disk and the qcow2 made from it do. A base image
-// that is not cached yet is downloaded, decompressed and converted first, and what stays of it
-// (kernel, initrd, base) is held through the pull.
-func (e *Engine) PullSpaceNeed(ctx context.Context, exportBytes, diskBytes int64, image string) int64 {
+// disk (its data) coexist, then the raw disk and the qcow2 made from it do. dataBytes is the
+// data size recorded at export; when it is 0 (an older export) the data is guessed from the
+// compressed size. A base image that is not cached yet is downloaded, decompressed and
+// converted first, and what stays of it (kernel, initrd, base) is held through the pull.
+func (e *Engine) PullSpaceNeed(ctx context.Context, exportBytes, dataBytes, diskBytes int64, image string) int64 {
 	imgPeak, imgKept := int64(0), int64(0)
 	if im, err := e.ResolveImage(ctx, image); err == nil && !e.Cache.Cached(im) {
 		var files int64
@@ -141,15 +142,19 @@ func (e *Engine) PullSpaceNeed(ctx context.Context, exportBytes, diskBytes int64
 		}
 		rootfs := im.Files[dockyard.FileRootfs].Size
 		data := rootfs * rawDataRatio
-		imgPeak = files + data
+		// While the base is set up, rootfs.zst, the sparse raw file and base.qcow2.part all exist.
+		imgPeak = files + 2*data
 		imgKept = files - rootfs + data
 	}
-	return pullSpaceNeed(exportBytes, diskBytes, imgPeak, imgKept)
+	return pullSpaceNeed(exportBytes, dataBytes, diskBytes, imgPeak, imgKept)
 }
 
-func pullSpaceNeed(exportBytes, diskBytes, imgPeak, imgKept int64) int64 {
+func pullSpaceNeed(exportBytes, dataBytes, diskBytes, imgPeak, imgKept int64) int64 {
 	exportBytes = min(exportBytes, 1<<50) // keeps the arithmetic far from overflow
 	data := exportBytes * rawDataRatio
+	if dataBytes > 0 {
+		data = min(dataBytes, 1<<50)
+	}
 	if diskBytes > 0 {
 		data = min(data, diskBytes)
 	}
