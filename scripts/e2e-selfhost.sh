@@ -126,9 +126,10 @@ $DOCK rm img
 # The control plane must have the import and export routes (usedock/dock#122, newer than v0.2.1). An empty
 # POST to the import route is 404 when the route is missing and 400 when it validates the body.
 import_supported() {
-  local code
-  code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${DOCK_URL}/v1/docks/import" \
+  local code out; out="$(mktemp)"
+  code="$(curl -sS -o "$out" -w '%{http_code}' -X POST "${DOCK_URL}/v1/docks/import" \
     -b "$COOKIES" -c "$COOKIES" -H "Origin: ${DOCK_URL}" -H 'content-type: application/json' --data '{}')"
+  log "import probe: HTTP ${code} $(head -c 300 "$out")"; rm -f "$out"
   case "$code" in
     404) return 1 ;;
     400|422) return 0 ;;
