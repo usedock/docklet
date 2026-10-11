@@ -29,7 +29,7 @@ The first `dock new` downloads the default `ubuntu-24.04` Dockyard image once. O
 
 Docs: [quickstart](https://docs.usedock.io/quickstart), [CLI](https://docs.usedock.io/cli), [local docks](https://docs.usedock.io/local-docks), [Windows](https://docs.usedock.io/local-docks/windows), [Dockyard images](https://docs.usedock.io/dockyard).
 
-> **Status:** the `dock` CLI ships in signed releases (since v0.1.0; latest v0.2.0). From v0.2.0 it runs docks locally with no account on Linux with KVM and Windows x86_64 with Windows Hypervisor Platform, via QEMU; macOS builds but is untested. The docklet host agent is early, and Windows and macOS fleet hosts are planned.
+> **Status:** the `dock` CLI ships in signed releases (since v0.1.0; latest v0.2.0). From v0.2.0 it runs docks locally with no account on Linux x86_64 with KVM and Windows x86_64 with Windows Hypervisor Platform, via QEMU; macOS builds but is untested. The docklet host agent is early, and Windows and macOS fleet hosts are planned.
 
 ## What it does
 
@@ -44,8 +44,8 @@ Docs: [quickstart](https://docs.usedock.io/quickstart), [CLI](https://docs.usedo
 
 | Host | Engine | Status |
 | --- | --- | --- |
-| Linux with KVM | Firecracker | Target: first release |
-| Linux with Docker | gVisor | Target: first release |
+| Linux with KVM | Firecracker | Early, in signed releases |
+| Linux with Docker | gVisor | Early, in signed releases |
 | Windows x86_64 (fleet host) | docklet daemon on Windows | Planned |
 | macOS, Apple silicon (fleet host) | docklet daemon on macOS | Planned |
 
