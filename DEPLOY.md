@@ -288,6 +288,8 @@ docklet image ls                              # name, release, fingerprint
 sudo DOCKLET_IMAGES="node-22 python-3.12" bash scripts/provision-host.sh
 ```
 
+- `docklet image pull` and `image ls` read `DOCKLET_IMAGE_DIR` (default
+  `/var/lib/docklet/images`): if the daemon uses a custom image dir, pass the same value to them.
 - The pull trusts one pinned release (`internal/dockyard/pin.go`): the
   `dockyard.json` must hash to the pinned sha256, and the rootfs archive must match
   the size and sha256 the index states. Anything else installs nothing. To move a

@@ -159,17 +159,6 @@ func TestCatalogVerifiesTheIndexAgainstItsPin(t *testing.T) {
 	}
 }
 
-func TestCatalogWithoutAPinnedReleaseSaysSo(t *testing.T) {
-	// The shipped build has no release pinned yet.
-	if DockyardTag != "" || DockyardIndexSHA256 != "" || PinnedIndexURL() != "" {
-		t.Skip("a release is pinned in this build")
-	}
-	c := NewCatalog(env(nil), nil)
-	if _, err := c.Index(context.Background()); codeOf(err) != "no_dockyard_release" || !strings.Contains(err.Error(), "no Dockyard release pinned yet") {
-		t.Fatalf("got %v", err)
-	}
-}
-
 func TestCatalogOverrideWarnsAndVerifiesWhenAHashIsGiven(t *testing.T) {
 	url, sum := indexServer(t)
 	var warn bytes.Buffer
@@ -255,15 +244,9 @@ func TestEnsureRemovesStalePartFiles(t *testing.T) {
 	_ = fresh
 }
 
-func TestThePinLooksLikeARelease(t *testing.T) {
-	if !strings.HasPrefix(DockyardTag, "images-") {
-		t.Fatalf("DockyardTag %q must be an images-* tag", DockyardTag)
-	}
-	if len(DockyardIndexSHA256) != 64 || strings.ToLower(DockyardIndexSHA256) != DockyardIndexSHA256 {
-		t.Fatalf("DockyardIndexSHA256 %q must be 64 lowercase hex chars", DockyardIndexSHA256)
-	}
-	want := "https://github.com/usedock/docklet/releases/download/" + DockyardTag + "/dockyard.json"
-	if PinnedIndexURL() != want {
-		t.Fatalf("pinned URL %q, want %q", PinnedIndexURL(), want)
+func TestCatalogUsesTheSharedDockyardPin(t *testing.T) {
+	c := NewCatalog(env(nil), nil)
+	if c.URL != dockyard.DockyardIndexURL || c.SHA256 != dockyard.DockyardIndexSHA256 {
+		t.Fatalf("catalog pin = %q %q, want the internal/dockyard pin", c.URL, c.SHA256)
 	}
 }

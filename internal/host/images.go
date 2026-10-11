@@ -3,6 +3,7 @@ package host
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -194,6 +195,17 @@ func (p *Puller) Pull(ctx context.Context, name string) (InstalledImage, error) 
 	if err := os.MkdirAll(bases, 0o755); err != nil {
 		return InstalledImage{}, err
 	}
+	removeStalePulls(bases)
+	// One pull per image name at a time; the lock sits in images/, where
+	// ListInstalled skips non-directories.
+	if err := os.MkdirAll(filepath.Join(p.Dir, imagesDir), 0o755); err != nil {
+		return InstalledImage{}, err
+	}
+	unlock, err := lockFile(filepath.Join(p.Dir, imagesDir, ".lock-"+name))
+	if err != nil {
+		return InstalledImage{}, fmt.Errorf("lock %s: %w", name, err)
+	}
+	defer unlock()
 	archive, err := os.CreateTemp(bases, ".pull-*.zst")
 	if err != nil {
 		return InstalledImage{}, err
@@ -218,6 +230,24 @@ func (p *Puller) Pull(ctx context.Context, name string) (InstalledImage, error) 
 		return InstalledImage{}, err
 	}
 	return InstalledImage{Name: name, Version: ix.Version, Fingerprint: fp}, nil
+}
+
+// stalePullAge is how old a bases/.pull-* temp file must be before a new pull
+// treats it as the leftover of a crashed pull and removes it.
+const stalePullAge = time.Hour
+
+// removeStalePulls deletes crashed pulls' temp files (the ext4 can be 32 GiB
+// sparse). Younger files may belong to a pull of another name still running.
+func removeStalePulls(bases string) {
+	entries, _ := os.ReadDir(bases)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), ".pull-") {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > stalePullAge {
+			_ = os.Remove(filepath.Join(bases, e.Name()))
+		}
+	}
 }
 
 func (p *Puller) client() *http.Client {
@@ -367,8 +397,7 @@ func (p *Puller) install(name, fp, tmp, version, arch string) error {
 	if err := writeFileAtomic(filepath.Join(dir, "image.json"), meta); err != nil {
 		return err
 	}
-	next := filepath.Join(dir, ".base.ext4.next")
-	_ = os.Remove(next)
+	next := filepath.Join(dir, ".base.ext4.next-"+randSuffix())
 	if err := os.Symlink(filepath.Join("..", "..", disk.BasesDir, fp, "base.ext4"), next); err != nil {
 		return err
 	}
@@ -380,13 +409,30 @@ func (p *Puller) install(name, fp, tmp, version, arch string) error {
 }
 
 func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, path)
+	}
+	if werr != nil {
 		_ = os.Remove(tmp)
-		return err
 	}
-	return nil
+	return werr
+}
+
+// randSuffix is a unique temp-name suffix.
+func randSuffix() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

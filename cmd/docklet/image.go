@@ -52,6 +52,15 @@ func runImage(args []string, stdout, stderr io.Writer, p *host.Puller) int {
 	return 2
 }
 
+// imagePuller builds the puller for an `image` command. `image ls` never
+// downloads, so it ignores the Dockyard override pair (even half-set).
+func imagePuller(args []string, imageDir string) (*host.Puller, error) {
+	if len(args) > 0 && args[0] == "ls" {
+		return host.NewPuller(imageDir), nil
+	}
+	return newPuller(imageDir)
+}
+
 // newPuller pins the release this binary trusts; DOCKLET_DOCKYARD_INDEX_URL and
 // DOCKLET_DOCKYARD_INDEX_SHA256 together move a host to another release.
 func newPuller(imageDir string) (*host.Puller, error) {

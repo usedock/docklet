@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -309,5 +310,102 @@ func TestServedImagesListsBuiltBaseAndPulled(t *testing.T) {
 	}
 	if got := ServedImages(dir); !reflect.DeepEqual(got, []string{"node-22", "ubuntu-24.04"}) {
 		t.Fatalf("ServedImages = %v", got)
+	}
+}
+
+func TestPullRemovesStalePullFiles(t *testing.T) {
+	dir := t.TempDir()
+	bases := filepath.Join(dir, "bases")
+	if err := os.MkdirAll(bases, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(bases, ".pull-123.ext4")
+	fresh := filepath.Join(bases, ".pull-456.zst")
+	other := filepath.Join(bases, "keep.me")
+	for _, f := range []string{stale, fresh, other} {
+		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	for _, f := range []string{stale, other} {
+		if err := os.Chtimes(f, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := newRelease(t, "node-22", rawImage()).puller(dir).Pull(context.Background(), "node-22"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("a .pull-* file older than an hour must be removed")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("a fresh .pull-* file may belong to a running pull: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("a non-.pull file was removed: %v", err)
+	}
+}
+
+func TestConcurrentPullsOfOneNameSerialize(t *testing.T) {
+	raw := rawImage()
+	rel := newRelease(t, "node-22", raw)
+	dir := t.TempDir()
+	withImageDir(t, dir)
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := rel.puller(dir).Pull(context.Background(), "node-22")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent pull failed: %v", err)
+		}
+	}
+	if got, err := os.ReadFile(basePointerFor(filepath.Join(dir, "base.ext4"), "node-22")); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("installed image wrong (err %v)", err)
+	}
+	for _, pat := range []string{filepath.Join(dir, "bases", ".pull-*"), filepath.Join(dir, "images", "node-22", ".*")} {
+		if left, _ := filepath.Glob(pat); len(left) != 0 {
+			t.Fatalf("temp files left behind: %v", left)
+		}
+	}
+}
+
+func TestPullWaitsForTheNameLock(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockFile(filepath.Join(dir, "images", ".lock-node-22"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := newRelease(t, "node-22", rawImage())
+	done := make(chan error, 1)
+	go func() {
+		_, err := rel.puller(dir).Pull(context.Background(), "node-22")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("pull finished while the name lock was held (err %v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("pull did not proceed after the lock was released")
 	}
 }

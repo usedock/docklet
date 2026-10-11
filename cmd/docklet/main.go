@@ -60,7 +60,7 @@ func main() {
 		return
 	}
 	if len(os.Args) >= 2 && os.Args[1] == "image" {
-		p, err := newPuller(getenv("DOCKLET_IMAGE_DIR", "/var/lib/docklet/images"))
+		p, err := imagePuller(os.Args[2:], getenv("DOCKLET_IMAGE_DIR", "/var/lib/docklet/images"))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "docklet: %v\n", err)
 			os.Exit(2)

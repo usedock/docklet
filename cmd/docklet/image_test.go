@@ -59,3 +59,20 @@ func TestNewPullerNeedsBothOverrides(t *testing.T) {
 		t.Fatalf("override not applied: %+v, %v", p, err)
 	}
 }
+
+func TestImageLsIgnoresAPartialOverride(t *testing.T) {
+	t.Setenv("DOCKLET_DOCKYARD_INDEX_URL", "http://example.test/dockyard.json")
+	t.Setenv("DOCKLET_DOCKYARD_INDEX_SHA256", "")
+	dir := t.TempDir()
+	if _, err := imagePuller([]string{"pull", "node-22"}, dir); err == nil {
+		t.Fatal("pull with a half-set override must still be refused")
+	}
+	p, err := imagePuller([]string{"ls"}, dir)
+	if err != nil {
+		t.Fatalf("image ls must not need the override pair: %v", err)
+	}
+	var out, errb bytes.Buffer
+	if code := runImage([]string{"ls"}, &out, &errb, p); code != 0 {
+		t.Fatalf("ls exit = %d, stderr %q", code, errb.String())
+	}
+}

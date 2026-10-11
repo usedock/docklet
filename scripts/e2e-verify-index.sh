@@ -3,9 +3,9 @@
 # binary's source, and verifies its cosign bundle against the images workflow identity.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-tag="$(sed -n 's/.*DockyardTag = "\(images-[^"]*\)".*/\1/p' internal/local/dockyard_pin.go)"
-want="$(sed -n 's/.*DockyardIndexSHA256 = "\([0-9a-f]\{64\}\)".*/\1/p' internal/local/dockyard_pin.go)"
-[ -n "$tag" ] && [ -n "$want" ] || { echo "no Dockyard release pinned in internal/local/dockyard_pin.go" >&2; exit 1; }
+tag="$(sed -n 's/.*DockyardTag *= "\(images-[^"]*\)".*/\1/p' internal/dockyard/pin.go)"
+want="$(sed -n 's/.*DockyardIndexSHA256 *= "\([0-9a-f]\{64\}\)".*/\1/p' internal/dockyard/pin.go)"
+[ -n "$tag" ] && [ -n "$want" ] || { echo "no Dockyard release pinned in internal/dockyard/pin.go" >&2; exit 1; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 base="https://github.com/usedock/docklet/releases/download/${tag}"
