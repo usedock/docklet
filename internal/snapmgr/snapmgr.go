@@ -90,6 +90,11 @@ func (c *Coordinator) capturedManifest(ctx context.Context, snapshotID string) (
 	return store.GetManifest(ctx, c.Store, snapshotID)
 }
 
+// Manifest returns the stored manifest of a generation.
+func (c *Coordinator) Manifest(ctx context.Context, snapshotID string) (store.Manifest, error) {
+	return store.GetManifest(ctx, c.Store, snapshotID)
+}
+
 // FreezeRootfs pins the dock rootfs as a generation and uploads it with its
 // manifest. The VM must already be paused or shut down.
 //

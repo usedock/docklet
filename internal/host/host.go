@@ -529,7 +529,13 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 	// Gate every boot, including forks: the disk may carry a previous
 	// dock's network unit and machine identity.
 	if !isContainer {
-		if err := h.gateRootfs(rootfs, guestIP, gateway, mask, MacFor(dockID)); err != nil {
+		resetKeys, err := h.copiedDisk(ctx, dockID, resolved, true)
+		if err != nil {
+			_ = h.alloc.Release(dockID)
+			_ = h.deleteIface(tap)
+			return "", err
+		}
+		if err := h.gateRootfs(rootfs, guestIP, gateway, mask, MacFor(dockID), resetKeys); err != nil {
 			_ = h.alloc.Release(dockID)
 			_ = h.deleteIface(tap)
 			return "", err
@@ -665,7 +671,10 @@ func (h *Host) stageContainerFastAgent(dockID, token, workspace string) error {
 // gateRootfs records the static network for this dock inside the fresh
 // rootfs. The image carries no network config of its own: the kernel ignores ip= (no CONFIG_IP_PNP),
 // so a MAC-matched networkd unit is the only static addressing path.
-func (h *Host) gateRootfs(rootfs string, guestIP, gateway, mask, mac string) error {
+//
+// resetKeys also drops the sshd host keys so the guest makes fresh ones at
+// boot; it is set only for a disk copied from another dock (see copiedDisk).
+func (h *Host) gateRootfs(rootfs string, guestIP, gateway, mask, mac string, resetKeys bool) error {
 	dir, err := os.MkdirTemp("", "gate")
 	if err != nil {
 		return err
@@ -674,15 +683,41 @@ func (h *Host) gateRootfs(rootfs string, guestIP, gateway, mask, mac string) err
 	if err := h.cfg.Mount.Mount(rootfs, dir, false); err != nil {
 		return err
 	}
-	if err := writeGateFiles(dir, guestIP, gateway, mask, mac); err != nil {
+	if err := writeGateFiles(dir, guestIP, gateway, mask, mac, resetKeys); err != nil {
 		_ = h.cfg.Mount.Unmount(dir)
 		return err
 	}
 	return h.cfg.Mount.Unmount(dir)
 }
 
+// hostKeyFiles are the sshd host keys ssh-keygen -A recreates at boot.
+var hostKeyFiles = []string{
+	"ssh_host_rsa_key", "ssh_host_rsa_key.pub", "ssh_host_ecdsa_key", "ssh_host_ecdsa_key.pub",
+	"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "ssh_host_dsa_key", "ssh_host_dsa_key.pub",
+}
+
+// copiedDisk reports whether the disk materialized from snapshotID is a copy
+// that must not keep its source's sshd host keys: a generation another dock
+// captured (branch, template) or an imported upload. A dock resuming its own
+// generation keeps its keys. provision is true for a create-from-snapshot,
+// where an import is always a fresh dock; a load of an imported generation
+// under the same dock id is a resume.
+func (h *Host) copiedDisk(ctx context.Context, dockID, snapshotID string, provision bool) (bool, error) {
+	if snapshotID == "" {
+		return false, nil
+	}
+	m, err := h.cfg.Snaps.Manifest(ctx, snapshotID)
+	if err != nil {
+		return false, fmt.Errorf("read generation %s: %w", snapshotID, err)
+	}
+	if m.DockID != dockID {
+		return true, nil
+	}
+	return provision && m.Source == store.SourceImport, nil
+}
+
 // writeGateFiles records static networking into a mounted rootfs.
-func writeGateFiles(dir string, guestIP, gateway, mask, mac string) error {
+func writeGateFiles(dir string, guestIP, gateway, mask, mac string, resetKeys bool) error {
 	g, err := disk.OpenGuest(dir)
 	if err != nil {
 		return err
@@ -1008,7 +1043,13 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 	}
 	// Gating is per boot: the frozen disk may carry a previous dock's network
 	// unit and machine identity.
-	if err := h.gateRootfs(rootfs, guestIP, gateway, mask, MacFor(dockID)); err != nil {
+	resetKeys, err := h.copiedDisk(ctx, dockID, resolved, false)
+	if err != nil {
+		_ = h.alloc.Release(dockID)
+		_ = h.deleteIface(tap)
+		return "", err
+	}
+	if err := h.gateRootfs(rootfs, guestIP, gateway, mask, MacFor(dockID), resetKeys); err != nil {
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		return "", err

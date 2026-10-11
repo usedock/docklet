@@ -99,7 +99,7 @@ func TestNoSecretInAnyArgv(t *testing.T) {
 
 func TestWriteGuestConfigIsPlainJSONForTheOwnerOnly(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "guest.json")
-	if err := WriteGuestConfig(p, "tok", "my-dock"); err != nil {
+	if err := WriteGuestConfig(p, "tok", "my-dock", false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(p)
@@ -291,7 +291,7 @@ func TestGuestConfigShapeMatchesTheHostAgentFile(t *testing.T) {
 func TestGuestConfigHostnameOnlyWhenValid(t *testing.T) {
 	for name, want := range map[string]string{"web": "web", "my.dock": "", "a_b": "", "": "", "-x": ""} {
 		p := filepath.Join(t.TempDir(), "g.json")
-		if err := WriteGuestConfig(p, "t", name); err != nil {
+		if err := WriteGuestConfig(p, "t", name, false); err != nil {
 			t.Fatal(err)
 		}
 		raw, _ := os.ReadFile(p)

@@ -391,11 +391,17 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 		return err
 	}
 	cfg := e.file(rec.ID, "guest.json")
-	if err := WriteGuestConfig(cfg, tok, rec.Name); err != nil {
+	// A copied disk carries its source's sshd host keys: the first boot after the copy drops them.
+	_, resetErr := os.Stat(e.file(rec.ID, resetKeysMarker))
+	resetKeys := resetErr == nil
+	if err := WriteGuestConfig(cfg, tok, rec.Name, resetKeys); err != nil {
 		return errf("store_error", "%v", err)
 	}
 	for attempt := 1; ; attempt++ {
 		err := e.bootOnce(ctx, rec, kernel, initrd, cfg, tok)
+		if err == nil && resetKeys {
+			_ = os.Remove(e.file(rec.ID, resetKeysMarker))
+		}
 		if err == nil || attempt >= bootAttempts || ErrCode(err) != "boot_failed" || !strings.Contains(e.logTail(rec.ID), "host forwarding") {
 			return err
 		}
@@ -629,6 +635,17 @@ func (e *Engine) Resume(ctx context.Context, ref string) (Dock, error) {
 	return e.view(ctx, rec), nil
 }
 
+// resetKeysMarker names the file in a dock dir that asks for fresh sshd host keys at the next boot.
+const resetKeysMarker = "reset-hostkeys"
+
+// markResetKeys flags a dock made from a copy of another disk; boot consumes it after the first start.
+func (e *Engine) markResetKeys(id string) error {
+	if err := os.WriteFile(e.file(id, resetKeysMarker), nil, 0o600); err != nil {
+		return errf("store_error", "%v", err)
+	}
+	return nil
+}
+
 // Branch makes count independent docks from a copy of the dock's disk. There is no live
 // VM fork: a running source is stopped for the copy and resumed afterwards.
 func (e *Engine) Branch(ctx context.Context, ref string, count int, name string, over Spec) ([]Dock, error) {
@@ -681,6 +698,10 @@ func (e *Engine) Branch(ctx context.Context, ref string, count int, name string,
 			if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
 				_ = e.removeFiles(rec.ID)
 				return errf("store_error", "%v", err)
+			}
+			if err := e.markResetKeys(rec.ID); err != nil {
+				_ = e.removeFiles(rec.ID)
+				return err
 			}
 			if err := e.addRecord(rec); err != nil {
 				_ = e.removeFiles(rec.ID)

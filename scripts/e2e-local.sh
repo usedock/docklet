@@ -46,8 +46,21 @@ echo "e2e: resume took $(( $(date +%s) - t0 ))s"
 [ "$(stat -c %i "$dir/disk.qcow2")" = "$disk_before" ]
 [ "$($DOCK exec e2e -- cat /home/user/work/marker)" = kept ]
 
+# Host keys: a branch gets its own, and every dock keeps its keys across stop/resume. Needs a guest-init that
+# knows resetHostKeys, so images from before that change are skipped.
+fp() { $DOCK exec "$1" -- "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f2"; }
+hk_src="$(fp e2e)"; [ -n "$hk_src" ]
 $DOCK branch e2e --name e2e-b
 [ "$($DOCK exec e2e-b -- cat /home/user/work/marker)" = kept ]
+hk_b="$(fp e2e-b)"; [ -n "$hk_b" ]
+if $DOCK exec e2e -- grep -q resetHostKeys /usr/local/libexec/dock-guest-init; then
+  [ "$hk_b" != "$hk_src" ] || { echo "branch kept its source ssh host keys" >&2; exit 1; }
+  $DOCK stop e2e-b; $DOCK resume e2e-b
+  [ "$(fp e2e-b)" = "$hk_b" ] || { echo "branch ssh host keys changed across stop/resume" >&2; exit 1; }
+  [ "$(fp e2e)" = "$hk_src" ] || { echo "source ssh host keys changed after a branch" >&2; exit 1; }
+else
+  echo "e2e: image predates resetHostKeys, skipping the host key check"
+fi
 $DOCK ls
 $DOCK rm e2e-b
 
