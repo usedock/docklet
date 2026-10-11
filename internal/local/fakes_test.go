@@ -32,6 +32,7 @@ type fakeDriver struct {
 	starts         []LaunchSpec
 	overlays       []string
 	resizes        []int
+	flattens       []string
 	neverAnswer    bool // VM starts but its agent never answers
 	dieOnStart     bool // VM exits right after start
 	bindFailures   int  // the next N starts exit because the forwarded port could not be bound
@@ -64,6 +65,17 @@ func (f *fakeDriver) ConvertRaw(_ context.Context, raw, qcow2 string) error {
 		return err
 	}
 	return os.WriteFile(qcow2, append([]byte("qcow2:"), b...), 0o600)
+}
+
+func (f *fakeDriver) FlattenDisk(_ context.Context, qcow2, raw string) error {
+	b, err := os.ReadFile(qcow2)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.flattens = append(f.flattens, qcow2)
+	f.mu.Unlock()
+	return os.WriteFile(raw, b, 0o600)
 }
 
 func (f *fakeDriver) Start(_ context.Context, spec LaunchSpec) (int, error) {

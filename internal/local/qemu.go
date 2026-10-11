@@ -73,6 +73,8 @@ type Driver interface {
 	CreateOverlay(ctx context.Context, base, disk string) error
 	ResizeDisk(ctx context.Context, disk string, sizeGiB int) error
 	ConvertRaw(ctx context.Context, raw, qcow2 string) error
+	// FlattenDisk writes the whole guest-visible disk of a qcow2 (backing chain included) to a raw file.
+	FlattenDisk(ctx context.Context, qcow2, raw string) error
 	Start(ctx context.Context, spec LaunchSpec) (pid int, err error)
 	Alive(pid int) bool
 	Kill(pid int) error
@@ -402,6 +404,17 @@ func (q *QEMU) ConvertRaw(ctx context.Context, raw, qcow2 string) error {
 		return err
 	}
 	if out, err := q.run(ctx, q.img, "convert", "-f", "raw", "-O", "qcow2", raw, qcow2); err != nil {
+		return errf("qemu_img_failed", "qemu-img convert: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// FlattenDisk converts a qcow2 disk, following its backing file, into a sparse raw image.
+func (q *QEMU) FlattenDisk(ctx context.Context, qcow2, raw string) error {
+	if err := q.locate(); err != nil {
+		return err
+	}
+	if out, err := q.run(ctx, q.img, "convert", "-f", "qcow2", "-O", "raw", qcow2, raw); err != nil {
 		return errf("qemu_img_failed", "qemu-img convert: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
