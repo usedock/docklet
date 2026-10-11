@@ -88,3 +88,44 @@ func TestDecompressRefusesOverMax(t *testing.T) {
 		t.Fatal("the output must be removed")
 	}
 }
+
+func TestDecompressOverwritesStaleTarget(t *testing.T) {
+	in := make([]byte, 3*sparseBlock)
+	copy(in[sparseBlock-3:], "abcdef") // data straddling a block boundary
+	dir := t.TempDir()
+	src := filepath.Join(dir, "in.zst")
+	if err := os.WriteFile(src, zstdBytes(t, in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A leftover target full of nonzero bytes, longer than the output: skipped blocks must not
+	// expose it.
+	dst := filepath.Join(dir, "out.raw")
+	if err := os.WriteFile(dst, bytes.Repeat([]byte{0xff}, 5*sparseBlock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DecompressFile(context.Background(), src, dst, int64(len(in))); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	if !bytes.Equal(got, in) {
+		t.Fatalf("got %d bytes, want %d identical", len(got), len(in))
+	}
+}
+
+func TestDecompressRefusesTruncatedStream(t *testing.T) {
+	in := make([]byte, 4<<20)
+	rand.New(rand.NewSource(2)).Read(in)
+	z := zstdBytes(t, in)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "in.zst")
+	if err := os.WriteFile(src, z[:len(z)/2], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "out.raw")
+	if err := DecompressFile(context.Background(), src, dst, int64(len(in))); codeOf(err) != "decompress_failed" {
+		t.Fatalf("a truncated stream must fail, got %v", err)
+	}
+	if _, err := os.Stat(dst); err == nil {
+		t.Fatal("the output must be removed")
+	}
+}

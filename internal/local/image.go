@@ -365,7 +365,7 @@ func copySparse(f *os.File, r io.Reader) (int64, error) {
 	var total int64
 	holeEnd := false
 	for {
-		n, err := io.ReadFull(r, buf)
+		n, err := readBlock(r, buf)
 		if n > 0 {
 			if isZero(buf[:n]) {
 				if _, serr := f.Seek(int64(n), io.SeekCurrent); serr != nil {
@@ -380,7 +380,7 @@ func copySparse(f *os.File, r io.Reader) (int64, error) {
 			}
 			total += int64(n)
 		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if err == io.EOF {
 			break
 		}
 		if err != nil {
@@ -393,6 +393,20 @@ func copySparse(f *os.File, r io.Reader) (int64, error) {
 		}
 	}
 	return total, nil
+}
+
+// readBlock fills buf and returns r's own error: io.ReadFull would turn a truncated stream's
+// io.ErrUnexpectedEOF into what looks like a clean short final block.
+func readBlock(r io.Reader, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		m, err := r.Read(buf[n:])
+		n += m
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
 }
 
 func isZero(b []byte) bool {
