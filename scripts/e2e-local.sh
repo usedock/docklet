@@ -62,8 +62,8 @@ l6=$!
 trap 'kill $l4 $l6 2>/dev/null || true' EXIT
 sleep 1
 # Control: the listeners work from the host, so a refusal in the guest means isolation.
-curl -fsS "http://127.0.0.1:$p4/" >/dev/null
-curl -fsS -g "http://[::1]:$p6/" >/dev/null
+curl -fsS --retry 10 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$p4/" >/dev/null
+curl -fsS -g --retry 10 --retry-connrefused --retry-delay 1 "http://[::1]:$p6/" >/dev/null
 probe() { # name host port: exit 0 when the guest could connect
   $DOCK exec "$1" -- "timeout 8 bash -c 'exec 3<>/dev/tcp/$2/$3'" >/dev/null 2>&1
 }

@@ -110,8 +110,7 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 	default:
 		args = append(args, "-accel", "tcg", "-cpu", "max")
 	}
-	// ipv6=off always: libslirp's restrict=on check reads the IPv4 header, so IPv6 would bypass it,
-	// and the guest image is IPv4-only (DHCP from slirp).
+	// ipv6=off always: defense in depth (libslirp's restrict=on has IPv6 TODOs); the guest image is IPv4-only.
 	netdev := "user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:" + strconv.Itoa(l.HostPort) + "-:" + strconv.Itoa(guestagent.Port)
 	if l.Network == "off" {
 		netdev += ",restrict=on"
