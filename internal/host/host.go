@@ -57,7 +57,7 @@ type Config struct {
 	CgroupWait time.Duration
 	// KillPID overrides SIGKILL for the cgroup v1 fallback (tests only).
 	KillPID func(pid int) error
-	// Chown overrides os.Lchown for dock files (tests only).
+	// Chown overrides fc.ChownFile for dock files (tests only).
 	Chown     func(path string, uid, gid int) error
 	Driver    Backend
 	Snaps     *snapmgr.Coordinator
@@ -162,6 +162,7 @@ func New(cfg Config, stateDir string) (*Host, error) {
 		h.pl = newPool(cfg.PoolSize)
 	}
 	h.Rescan()
+	h.sweepUIDs()
 	return h, nil
 }
 
@@ -302,7 +303,7 @@ func (h *Host) chown(path string, owner, group int) error {
 	if h.cfg.Chown != nil {
 		return h.cfg.Chown(path, owner, group)
 	}
-	return os.Lchown(path, owner, group)
+	return fc.ChownFile(path, owner, group)
 }
 
 // ensureIface creates and raises the host-side interface for a dock.

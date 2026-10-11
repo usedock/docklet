@@ -89,6 +89,17 @@ func (a *Allocator) Get(dockID string) (int, bool) {
 	return id, ok
 }
 
+// Docks lists the dock ids holding an allocation.
+func (a *Allocator) Docks() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ids := make([]string, 0, len(a.used))
+	for id := range a.used {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Release frees a dock's id for reuse.
 func (a *Allocator) Release(dockID string) error {
 	a.mu.Lock()

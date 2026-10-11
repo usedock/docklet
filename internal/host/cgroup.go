@@ -64,6 +64,41 @@ func (h *Host) killCgroup(dockID string) bool {
 	return true
 }
 
+// sweepUIDs frees uids left reserved by a destroy that could not empty the
+// dock's cgroup, or by a crash mid-destroy: the dock is untracked and has no
+// jail or vms dir left. Its cgroup is killed first; a uid whose cgroup cannot
+// be emptied stays reserved. Runs once in New, before any provision.
+func (h *Host) sweepUIDs() {
+	if h.uids == nil {
+		return
+	}
+	h.mu.Lock()
+	tracked := map[string]bool{}
+	for id, v := range h.vms {
+		tracked[id] = true
+		if v.backing != "" {
+			tracked[v.backing] = true
+		}
+	}
+	h.mu.Unlock()
+	for _, id := range h.uids.Docks() {
+		if tracked[id] || checkIDs(id) != nil {
+			continue
+		}
+		left := false
+		for _, p := range []string{h.jailRoot(id), h.jailRoot(id) + ".failed", filepath.Join(h.cfg.VMsDir, id)} {
+			if _, err := os.Lstat(p); !os.IsNotExist(err) {
+				left = true
+			}
+		}
+		if left || !h.killCgroup(id) {
+			continue
+		}
+		log.Printf("dock %s: freeing uid left reserved by an earlier destroy", id)
+		h.releaseOwner(id)
+	}
+}
+
 func cgroupPids(dir string) ([]int, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
 	if os.IsNotExist(err) {
