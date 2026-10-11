@@ -15,7 +15,7 @@ Both installers verify the release checksums and cosign signatures before instal
 
 ## Quickstart
 
-With no account, `dock` runs docks on your own machine (the built-in `local` context). You need QEMU and KVM on Linux x86_64, or QEMU and Windows Hypervisor Platform on Windows x86_64; `dock doctor` tells you what is missing.
+With no account, `dock` runs docks on your own machine (the built-in `local` context). You need QEMU and KVM on Linux (x86_64 or arm64), or QEMU and Windows Hypervisor Platform on Windows x86_64; `dock doctor` tells you what is missing.
 
 ```sh
 curl -fsSL https://usedock.io/install | sh
@@ -31,7 +31,7 @@ Docs: [quickstart](https://docs.usedock.io/quickstart), [CLI](https://docs.usedo
 
 Questions and ideas: [GitHub Discussions](https://github.com/usedock/dock/discussions).
 
-> **Status:** the `dock` CLI ships in signed releases (since v0.1.0). From v0.2.0 it runs docks locally with no account on Linux x86_64 with KVM and Windows x86_64 with Windows Hypervisor Platform, via QEMU; macOS builds but is untested. The docklet host agent is early, and Windows and macOS fleet hosts are planned.
+> **Status:** the `dock` CLI ships in signed releases (since v0.1.0). From v0.2.0 it runs docks locally with no account on Linux (x86_64, and arm64 from v0.3.0) with KVM and Windows x86_64 with Windows Hypervisor Platform, via QEMU; macOS builds but is untested. The docklet host agent is early, and Windows and macOS fleet hosts are planned.
 
 ## What it does
 
@@ -60,6 +60,7 @@ The `dock` binary carries its own engine and runs docks on your own machine with
 | Machine | Accelerator | Status |
 | --- | --- | --- |
 | Linux x86_64 | KVM (`/dev/kvm`) | Available |
+| Linux arm64 | KVM (`/dev/kvm`) | Available from v0.3.0 (tested under emulation so far) |
 | Windows x86_64 | Windows Hypervisor Platform (WHPX) | Available |
 | macOS | Hypervisor.framework (HVF) | Untested, planned |
 
