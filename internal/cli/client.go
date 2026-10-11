@@ -16,8 +16,6 @@ type Client struct {
 	BaseURL string
 	Key     string
 	HTTP    *http.Client
-	// Workspace is the context's default workspace id; empty means discover it.
-	Workspace string
 }
 
 type envelope struct {

@@ -19,6 +19,9 @@ const CloudURL = "https://api.usedock.io"
 // CloudContext is the name of the built-in context.
 const CloudContext = "cloud"
 
+// LocalContext is the built-in context that runs docks on this machine, with no account.
+const LocalContext = "local"
+
 var contextNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // Context is one named control plane target.
@@ -87,16 +90,26 @@ func (c *Config) Save(path string) error {
 	return nil
 }
 
-// current returns the active context name.
-func (c *Config) current() string {
-	if c.Current == "" {
+// active returns the context in use: the configured one, else cloud when an API key or
+// URL is configured (stored or in the environment), else the built-in local context.
+func (c *Config) active(getenv func(string) string) string {
+	if c.Current != "" {
+		return c.Current
+	}
+	if getenv != nil && (getenv("DOCK_API_KEY") != "" || getenv("DOCK_API_URL") != "") {
 		return CloudContext
 	}
-	return c.Current
+	if c.Contexts[CloudContext].APIKey != "" || c.Contexts[CloudContext].URL != "" {
+		return CloudContext
+	}
+	return LocalContext
 }
 
 // lookup returns a context with the built-in cloud URL filled in.
 func (c *Config) lookup(name string) (Context, bool) {
+	if name == LocalContext {
+		return Context{URL: LocalContext}, true
+	}
 	ctx, ok := c.Contexts[name]
 	if name == CloudContext {
 		if ctx.URL == "" {
@@ -107,16 +120,16 @@ func (c *Config) lookup(name string) (Context, bool) {
 	return ctx, ok
 }
 
-// names lists known context names, cloud first.
+// names lists known context names, the built-ins first.
 func (c *Config) names() []string {
 	var rest []string
 	for n := range c.Contexts {
-		if n != CloudContext {
+		if n != CloudContext && n != LocalContext {
 			rest = append(rest, n)
 		}
 	}
 	sort.Strings(rest)
-	return append([]string{CloudContext}, rest...)
+	return append([]string{LocalContext, CloudContext}, rest...)
 }
 
 func validateContextName(name string) error {
