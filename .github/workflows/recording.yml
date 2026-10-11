@@ -43,6 +43,13 @@ jobs:
       # Off camera: the first dock new downloads ubuntu-24.04, which would dominate a 30 s recording.
       # The install script is run once here only to get a dock binary to pull with; the binary is removed
       # again so the recorded install is a real fresh install.
+      # The install script asks api.github.com for the latest release, which is rate limited for anonymous
+      # runner IPs. Resolve the tag here with the workflow token and hand it over as DOCK_VERSION; the
+      # recorded command is still the plain curl line.
+      - name: resolve the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "DOCK_VERSION=$(gh release view --repo usedock/docklet --json tagName -q .tagName)" | tee -a "$GITHUB_ENV"
       - name: pre-pull the ubuntu-24.04 image
         run: |
           curl -fsSL https://usedock.io/install | sh
