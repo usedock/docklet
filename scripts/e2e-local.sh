@@ -50,6 +50,37 @@ $DOCK branch e2e --name e2e-b
 [ "$($DOCK exec e2e-b -- cat /home/user/work/marker)" = kept ]
 $DOCK ls
 $DOCK rm e2e-b
+
+# Network isolation: a --network off dock must not reach host listeners on 127.0.0.1 or ::1,
+# through the slirp gateway 10.0.2.2 or its IPv6 counterpart fec0::2 (see README, local docks).
+lport() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
+p4="$(lport)"; p6="$(lport)"
+python3 -m http.server "$p4" --bind 127.0.0.1 >/dev/null 2>&1 &
+l4=$!
+python3 -m http.server "$p6" --bind ::1 >/dev/null 2>&1 &
+l6=$!
+trap 'kill $l4 $l6 2>/dev/null || true' EXIT
+sleep 1
+# Control: the listeners work from the host, so a refusal in the guest means isolation.
+curl -fsS "http://127.0.0.1:$p4/" >/dev/null
+curl -fsS -g "http://[::1]:$p6/" >/dev/null
+probe() { # name host port: exit 0 when the guest could connect
+  $DOCK exec "$1" -- "timeout 8 bash -c 'exec 3<>/dev/tcp/$2/$3'" >/dev/null 2>&1
+}
+$DOCK new e2e-off --cpus 1 --memory 1gb --disk 8gb --network off
+$DOCK exec e2e-off -- true
+# ipv6=off: the guest has no IPv6 route out.
+[ -z "$($DOCK exec e2e-off -- 'ip -6 route show default')" ] || { echo "guest has an IPv6 default route" >&2; exit 1; }
+for h in 10.0.2.2 fec0::2; do
+  if probe e2e-off "$h" "$p4"; then echo "network off dock reached host 127.0.0.1 via $h" >&2; exit 1; fi
+  if probe e2e-off "$h" "$p6"; then echo "network off dock reached host ::1 via $h" >&2; exit 1; fi
+done
+$DOCK exec e2e-off -- 'echo agent-ok' | grep -q agent-ok
+$DOCK rm e2e-off
+# Known limit (README): with the network on, slirp maps 10.0.2.2 to the host's 127.0.0.1.
+if probe e2e 10.0.2.2 "$p4"; then
+  echo "e2e: known limit: a network on dock reaches host 127.0.0.1 services via 10.0.2.2"
+fi
 $DOCK rm e2e
 [ ! -e "$dir" ]
 [ "$($DOCK ls --all --json)" = "[]" ]

@@ -61,7 +61,7 @@ func TestArgvBootNetworkAndConsole(t *testing.T) {
 	if got := argAfter(t, args, "-drive"); got != "file=/d/disk.qcow2,if=virtio,format=qcow2" {
 		t.Fatalf("drive %q", got)
 	}
-	if got := argAfter(t, args, "-netdev"); got != "user,id=n0,hostfwd=tcp:127.0.0.1:41234-:2222" {
+	if got := argAfter(t, args, "-netdev"); got != "user,id=n0,ipv6=off,hostfwd=tcp:127.0.0.1:41234-:2222" {
 		t.Fatalf("netdev %q", got)
 	}
 	if got := argAfter(t, args, "-serial"); got != "file:/d/serial.log" {
@@ -119,6 +119,17 @@ func TestArgvEscapesCommasInConfigPath(t *testing.T) {
 	s.ConfigFile = `C:\Users\a,b\guest.json`
 	if got := argAfter(t, BuildArgv(s, "amd64", "whpx"), "-fw_cfg"); got != `name=opt/usedock/cfg,file=C:\Users\a,,b\guest.json` {
 		t.Fatalf("fw_cfg %q", got)
+	}
+}
+
+func TestArgvNetworkAlwaysDisablesIPv6(t *testing.T) {
+	for _, network := range []string{"on", "off", ""} {
+		s := spec()
+		s.Network = network
+		got := argAfter(t, BuildArgv(s, "amd64", "kvm"), "-netdev")
+		if !strings.HasPrefix(got, "user,id=n0,ipv6=off,") {
+			t.Fatalf("network %q: netdev %q must disable IPv6", network, got)
+		}
 	}
 }
 
