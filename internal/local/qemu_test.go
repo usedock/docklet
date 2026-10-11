@@ -70,7 +70,7 @@ func TestArgvBootNetworkAndConsole(t *testing.T) {
 	if argAfter(t, args, "-display") != "none" {
 		t.Fatal("no display")
 	}
-	if got := argAfter(t, args, "-append"); got != "console=ttyS0 root=/dev/vda rw" {
+	if got := argAfter(t, args, "-append"); got != "console=ttyS0 root=/dev/vda rw rootfstype=ext4 rootwait" {
 		t.Fatalf("cmdline %q must carry no config", got)
 	}
 	if got := argAfter(t, args, "-fw_cfg"); got != "name=opt/usedock/cfg,file=/d/guest.json" {
@@ -99,12 +99,12 @@ func TestNoSecretInAnyArgv(t *testing.T) {
 
 func TestWriteGuestConfigIsPlainJSONForTheOwnerOnly(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "guest.json")
-	if err := WriteGuestConfig(p, "tok"); err != nil {
+	if err := WriteGuestConfig(p, "tok", "my-dock"); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(p)
 	var cfg GuestConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Token != "tok" || cfg.Workspace != "/home/user/work" || len(cfg.Roots) != 2 {
+	if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Token != "tok" || cfg.Hostname != "my-dock" || cfg.Workspace != "/home/user/work" || len(cfg.Roots) != 2 {
 		t.Fatalf("guest config %q %v", raw, err)
 	}
 	if runtime.GOOS != "windows" {
@@ -274,5 +274,30 @@ func TestGuestConfigShapeMatchesTheHostAgentFile(t *testing.T) {
 		if _, ok := m[k]; !ok {
 			t.Errorf("guest config lacks %q", k)
 		}
+	}
+}
+
+func TestGuestConfigHostnameOnlyWhenValid(t *testing.T) {
+	for name, want := range map[string]string{"web": "web", "my.dock": "", "a_b": "", "": "", "-x": ""} {
+		p := filepath.Join(t.TempDir(), "g.json")
+		if err := WriteGuestConfig(p, "t", name); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := os.ReadFile(p)
+		var cfg GuestConfig
+		_ = json.Unmarshal(raw, &cfg)
+		if cfg.Hostname != want {
+			t.Errorf("name %q: hostname %q, want %q", name, cfg.Hostname, want)
+		}
+	}
+}
+
+func TestResizeBelowTheImageSizeExplains(t *testing.T) {
+	q := &QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img",
+		Run: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("qemu-img: Use the --shrink option to perform a shrink operation."), errors.New("exit status 1")
+		}}
+	if err := q.ResizeDisk(context.Background(), "d.qcow2", 1); codeOf(err) != "invalid_argument" {
+		t.Fatalf("got %v", err)
 	}
 }

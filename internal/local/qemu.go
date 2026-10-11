@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,8 @@ type GuestConfig struct {
 	Token     string   `json:"token"`
 	Workspace string   `json:"workspace"`
 	Roots     []string `json:"roots"`
+	// Hostname is applied by the guest at boot when it is a valid host name.
+	Hostname string `json:"hostname,omitempty"`
 }
 
 // DefaultGuestConfig is the config for a dock with the given agent token.
@@ -29,13 +32,19 @@ func DefaultGuestConfig(token string) GuestConfig {
 	return GuestConfig{Token: token, Workspace: "/home/user/work", Roots: []string{"/home/user/work", "/run/dock-fast"}}
 }
 
+var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62})$`)
+
 // FWCfgName is the fw_cfg entry the guest reads its agent config from, at
 // /sys/firmware/qemu_fw_cfg/by_name/opt/usedock/cfg/raw.
 const FWCfgName = "opt/usedock/cfg"
 
 // WriteGuestConfig writes the guest agent config as JSON, readable by the owner only.
-func WriteGuestConfig(path, token string) error {
-	raw, err := json.Marshal(DefaultGuestConfig(token))
+func WriteGuestConfig(path, token, hostname string) error {
+	cfg := DefaultGuestConfig(token)
+	if hostnameRE.MatchString(hostname) {
+		cfg.Hostname = hostname
+	}
+	raw, err := json.Marshal(cfg)
 	if err != nil {
 		return err
 	}
@@ -103,7 +112,7 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 	if l.Network == "off" {
 		netdev += ",restrict=on"
 	}
-	cmdline := "console=" + console + " root=/dev/vda rw"
+	cmdline := "console=" + console + " root=/dev/vda rw rootfstype=ext4 rootwait"
 	args = append(args,
 		"-smp", strconv.Itoa(l.CPUs),
 		"-m", strconv.Itoa(l.MemoryMiB),
@@ -379,6 +388,9 @@ func (q *QEMU) ResizeDisk(ctx context.Context, disk string, sizeGiB int) error {
 		return err
 	}
 	if out, err := q.run(ctx, q.img, "resize", disk, fmt.Sprintf("%dG", sizeGiB)); err != nil {
+		if strings.Contains(string(out), "shrink") {
+			return errf("invalid_argument", "--disk %d GiB is smaller than the image's own disk; use a larger size", sizeGiB)
+		}
 		return errf("qemu_img_failed", "qemu-img resize: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

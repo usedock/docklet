@@ -254,3 +254,16 @@ func TestEnsureRemovesStalePartFiles(t *testing.T) {
 	// The fresh one belongs to a download that may still be running (it was replaced by this one's own).
 	_ = fresh
 }
+
+func TestThePinLooksLikeARelease(t *testing.T) {
+	if !strings.HasPrefix(DockyardTag, "images-") {
+		t.Fatalf("DockyardTag %q must be an images-* tag", DockyardTag)
+	}
+	if len(DockyardIndexSHA256) != 64 || strings.ToLower(DockyardIndexSHA256) != DockyardIndexSHA256 {
+		t.Fatalf("DockyardIndexSHA256 %q must be 64 lowercase hex chars", DockyardIndexSHA256)
+	}
+	want := "https://github.com/usedock/docklet/releases/download/" + DockyardTag + "/dockyard.json"
+	if PinnedIndexURL() != want {
+		t.Fatalf("pinned URL %q, want %q", PinnedIndexURL(), want)
+	}
+}

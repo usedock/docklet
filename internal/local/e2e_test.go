@@ -46,6 +46,10 @@ func TestE2ELocalDock(t *testing.T) {
 		t.Fatalf("exec %+v %v", res, err)
 	}
 
+	res, err = e.Exec(ctx, "e2e", "docker --version && hostname", 60*time.Second)
+	if err != nil || res.ExitCode != 0 || !strings.Contains(res.Stdout, "Docker version") || !strings.Contains(res.Stdout, "e2e") {
+		t.Fatalf("docker and hostname in the image: %+v %v", res, err)
+	}
 	if _, err := e.Stop(ctx, "e2e", false); err != nil {
 		t.Fatal(err)
 	}

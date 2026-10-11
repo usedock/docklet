@@ -380,7 +380,7 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 		return err
 	}
 	cfg := e.file(rec.ID, "guest.json")
-	if err := WriteGuestConfig(cfg, tok); err != nil {
+	if err := WriteGuestConfig(cfg, tok, rec.Name); err != nil {
 		return errf("store_error", "%v", err)
 	}
 	for attempt := 1; ; attempt++ {
