@@ -13,6 +13,11 @@ on:
         type: choice
         options: [build, ghcr]
         default: ghcr
+      push_pull:
+        description: "dock push / dock pull round trip: auto (run when the control plane supports it), skip, or require (fail when unsupported)"
+        type: choice
+        options: [auto, skip, require]
+        default: auto
   schedule:
     - cron: "17 4 * * 1"
   pull_request:
@@ -35,15 +40,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  selfhost:
+  # Dispatch runs the one combination chosen. Pull requests and the weekly schedule run the released images
+  # (what self-hosters run; push/pull auto-skips there until a release has the import routes) and a build of
+  # usedock/dock main, where the push/pull round trip is required.
+  plan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          EVENT: ${{ github.event_name }}
+          IMAGES: ${{ inputs.images }}
+          PUSH_PULL: ${{ inputs.push_pull }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            m="$(jq -nc --arg i "$IMAGES" --arg p "$PUSH_PULL" '{include:[{images:$i,push_pull:$p}]}')"
+          else
+            m='{"include":[{"images":"ghcr","push_pull":"auto"},{"images":"build","push_pull":"require"}]}'
+          fi
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+
+  selfhost:
+    name: selfhost (${{ matrix.images }}, push_pull=${{ matrix.push_pull }})
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
         shell: bash
     env:
       LOGS: /home/runner/selfhost-logs
       DOCK_URL: http://localhost:8088
+      PUSH_PULL: ${{ matrix.push_pull }}
     steps:
       # The 80 GiB dock needs more free disk than the runner has; drop toolchains this job never uses.
       - name: free disk for the 80 GiB dock
@@ -64,6 +96,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      - name: QEMU for the local engine (dock push / dock pull)
+        if: matrix.push_pull != 'skip'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-x86 qemu-utils
       - name: allow /dev/kvm
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -82,7 +117,7 @@ jobs:
           git -C ../.. rev-parse HEAD | tee "$LOGS/dock-ref.txt"
           s=$(date +%s)
           # Pull the published images by default (what self-hosters run); build from the checked-out ref on request.
-          mode="${{ inputs.images || 'ghcr' }}"
+          mode="${{ matrix.images }}"
           echo "$mode" > "$LOGS/setup-mode.txt"
           if [ "$mode" = ghcr ]; then
             ./setup.sh 2>&1 | tee "$LOGS/setup.log"
@@ -113,7 +148,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## selfhost-e2e"
+            echo "## selfhost-e2e (${{ matrix.images }}, push_pull=${{ matrix.push_pull }})"
             echo "usedock/dock ref: \`$(cat "$LOGS/dock-ref.txt" 2>/dev/null || echo unknown)\`"
             echo '```'
             cat "$LOGS/timings.txt" 2>/dev/null || echo "no timings recorded"
@@ -130,6 +165,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: selfhost-e2e-logs
+          name: selfhost-e2e-logs-${{ matrix.images }}
           path: /home/runner/selfhost-logs
           if-no-files-found: warn
