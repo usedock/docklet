@@ -1,0 +1,70 @@
+name: recording
+
+# Renders docs/assets/quickstart.gif from docs/recording/quickstart.tape on a KVM runner, with the
+# real install script and real local docks. Run it by hand (workflow_dispatch); pull requests that
+# touch the tape or this file render it too, so the change is checked. Download the artifact and commit it.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - docs/recording/**
+      - .github/workflows/recording.yml
+
+permissions:
+  contents: read
+
+env:
+  VHS_VERSION: "0.12.1"
+  VHS_SHA256: eb33787a5b1cebf91fe0b18bd231e2d71d36c1ff4babd99ddac1a6ab411efd10
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: install qemu, ttyd, ffmpeg and a font
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ttyd ffmpeg fonts-dejavu-core
+      - name: install vhs ${{ env.VHS_VERSION }} (checksum pinned)
+        run: |
+          f="vhs_${VHS_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/charmbracelet/vhs/releases/download/v${VHS_VERSION}/$f"
+          echo "${VHS_SHA256}  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/vhs"
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/vhs"
+          sudo install -m 0755 "$(find "$RUNNER_TEMP/vhs" -type f -name vhs | head -n 1)" /usr/local/bin/vhs
+          vhs --version
+      - name: allow /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      # Off camera: the first dock new downloads ubuntu-24.04, which would dominate a 30 s recording.
+      # The install script is run once here only to get a dock binary to pull with; the binary is removed
+      # again so the recorded install is a real fresh install.
+      # The install script asks api.github.com for the latest release, which is rate limited for anonymous
+      # runner IPs. Resolve the tag here with the workflow token and hand it over as DOCK_VERSION; the
+      # recorded command is still the plain curl line.
+      - name: resolve the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "DOCK_VERSION=$(gh release view --repo usedock/docklet --json tagName -q .tagName)" | tee -a "$GITHUB_ENV"
+      - name: pre-pull the ubuntu-24.04 image
+        run: |
+          curl -fsSL https://usedock.io/install | sh
+          "$HOME/.local/bin/dock" images pull ubuntu-24.04
+          rm -f "$HOME/.local/bin/dock"
+      - name: record
+        run: vhs docs/recording/quickstart.tape
+      - name: sizes
+        run: ls -l docs/assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quickstart-recording
+          path: docs/assets/quickstart.*
+      - name: clean up the docks
+        if: always()
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          for d in $(dock ls --json 2>/dev/null | sed -n 's/.*"name": "\([^"]*\)".*/\1/p'); do dock rm "$d" || true; done
