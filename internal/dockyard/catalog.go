@@ -10,7 +10,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*$`)
+var (
+	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*$`)
+	archRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_]*$`)
+)
 
 // Catalog is images/catalog.toml: what CI builds.
 type Catalog struct {
@@ -48,6 +51,11 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 		}
 		if e.SizeMiB <= 0 || len(e.Arch) == 0 {
 			return nil, fmt.Errorf("dockyard: image %q needs size_mib and arch", e.Name)
+		}
+		for _, a := range e.Arch {
+			if !archRe.MatchString(a) {
+				return nil, fmt.Errorf("dockyard: image %q has bad arch %q", e.Name, a)
+			}
 		}
 		if e.Setup != "" && filepath.Base(e.Setup) != e.Setup {
 			return nil, fmt.Errorf("dockyard: image %q setup must be a file name under images/", e.Name)

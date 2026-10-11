@@ -53,6 +53,7 @@ func TestParseCatalogErrors(t *testing.T) {
 		"unknown base": "[[image]]\nname='a'\nbase='b'\nsize_mib=1\narch=['amd64']\n",
 		"duplicate":    "[[image]]\nname='a'\nsize_mib=1\narch=['amd64']\n[[image]]\nname='a'\nsize_mib=1\narch=['amd64']\n",
 		"setup path":   "[[image]]\nname='a'\nsetup='../x.sh'\nsize_mib=1\narch=['amd64']\n",
+		"bad arch":     "[[image]]\nname='a'\nsize_mib=1\narch=['../x']\n",
 	}
 	for name, in := range cases {
 		if _, err := ParseCatalog([]byte(in)); err == nil {
@@ -105,15 +106,26 @@ func TestBuildIndexMissingFile(t *testing.T) {
 	}
 }
 
+// fullImage is an index image entry with all three files.
+func fullImage(name, arch string) string {
+	f := `{"url":"u","size":1,"sha256":"` + sum("x") + `"}`
+	return `{"name":"` + name + `","arch":"` + arch + `","files":{"rootfs.ext4.zst":` + f + `,"vmlinuz":` + f + `,"initrd.img":` + f + `}}`
+}
+
 func TestParseIndexErrors(t *testing.T) {
-	good := sum("x")
 	cases := map[string]string{
 		"not json":   "{",
 		"no version": `{"images":[]}`,
 		"no name":    `{"version":"v","images":[{"arch":"amd64"}]}`,
-		"bad sha":    `{"version":"v","images":[{"name":"a","arch":"amd64","files":{"vmlinuz":{"url":"u","size":1,"sha256":"zz"}}}]}`,
-		"no url":     `{"version":"v","images":[{"name":"a","arch":"amd64","files":{"vmlinuz":{"size":1,"sha256":"` + good + `"}}}]}`,
-		"duplicate":  `{"version":"v","images":[{"name":"a","arch":"amd64"},{"name":"a","arch":"amd64"}]}`,
+		"bad sha":    `{"version":"v","images":[` + strings.Replace(fullImage("a", "amd64"), sum("x"), "zz", 1) + `]}`,
+		"no url":     `{"version":"v","images":[` + strings.Replace(fullImage("a", "amd64"), `"url":"u",`, "", 1) + `]}`,
+		"duplicate":  `{"version":"v","images":[` + fullImage("a", "amd64") + `,` + fullImage("a", "amd64") + `]}`,
+		"no files":   `{"version":"v","images":[{"name":"a","arch":"amd64","files":{}}]}`,
+		"traversal":  `{"version":"v","images":[` + fullImage("../../x", "amd64") + `]}`,
+		"bad arch":   `{"version":"v","images":[` + fullImage("a", "../amd64") + `]}`,
+	}
+	if _, err := ParseIndex([]byte(`{"version":"v","images":[` + fullImage("a", "amd64") + `]}`)); err != nil {
+		t.Fatalf("complete image rejected: %v", err)
 	}
 	for name, in := range cases {
 		if _, err := ParseIndex([]byte(in)); err == nil {

@@ -55,14 +55,20 @@ func ParseIndex(data []byte) (*Index, error) {
 	}
 	seen := map[string]bool{}
 	for _, img := range ix.Images {
-		if img.Name == "" || img.Arch == "" {
-			return nil, errors.New("dockyard: image needs a name and an arch")
+		// Name and arch end up in cache paths, so keep them path-safe.
+		if !nameRe.MatchString(img.Name) || !archRe.MatchString(img.Arch) {
+			return nil, fmt.Errorf("dockyard: bad image name %q or arch %q", img.Name, img.Arch)
 		}
 		key := img.Name + "/" + img.Arch
 		if seen[key] {
 			return nil, fmt.Errorf("dockyard: duplicate image %s", key)
 		}
 		seen[key] = true
+		for _, role := range []string{FileRootfs, FileKernel, FileInitrd} {
+			if _, ok := img.Files[role]; !ok {
+				return nil, fmt.Errorf("dockyard: image %s has no %s", key, role)
+			}
+		}
 		for role, f := range img.Files {
 			if f.URL == "" || f.Size < 0 || !validSHA256(f.SHA256) {
 				return nil, fmt.Errorf("dockyard: image %s file %s is malformed", key, role)

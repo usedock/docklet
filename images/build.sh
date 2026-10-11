@@ -62,6 +62,8 @@ deb %s %s-security main universe
 '     "$MIRROR" "$UBUNTU_RELEASE" "$MIRROR" "$UBUNTU_RELEASE" "$MIRROR" "$UBUNTU_RELEASE" > "$tree/etc/apt/sources.list"
   mount_chroot "$tree"
   chroot_exec "$tree" apt-get update
+  # debootstrap installs the release pocket only; take security and updates.
+  chroot_exec "$tree" apt-get -y dist-upgrade
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 \
     cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping
@@ -114,6 +116,13 @@ TREE="$WORK/trees/$NAME"
 
 # Finish: clean caches, export the kernel, drop build identity.
 mount_chroot "$TREE"
+chroot_exec "$TREE" apt-get -y dist-upgrade
+# Refuse to ship an image with pending package updates.
+pending="$(chroot_exec "$TREE" apt-get -s dist-upgrade | grep -c '^Inst ' || true)"
+if [ "$pending" != 0 ]; then
+  echo "build.sh: $NAME has $pending pending package updates" >&2
+  exit 1
+fi
 chroot_exec "$TREE" apt-get clean
 umount_chroot "$TREE"
 printf '{"image":"%s","arch":"%s","builtAt":"%s"}\n' "$NAME" "$ARCH" "$(date -u +%FT%TZ)" > "$TREE/etc/dock-image.json"
