@@ -480,7 +480,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 			return "", fmt.Errorf("provision uid: %w", err)
 		}
 		if resolved != "" {
-			if err := h.cfg.Snaps.MaterializeDisk(ctx, resolved, rootfs); err != nil {
+			if err := h.cfg.Snaps.MaterializeDiskWithin(ctx, resolved, rootfs, int64(res.DiskGiB)<<30); err != nil {
 				return "", err
 			}
 		} else {
@@ -977,7 +977,7 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 	if err != nil {
 		return "", fmt.Errorf("load uid: %w", err)
 	}
-	if err := h.cfg.Snaps.MaterializeDisk(ctx, resolved, rootfs); err != nil {
+	if err := h.cfg.Snaps.MaterializeDiskWithin(ctx, resolved, rootfs, int64(res.DiskGiB)<<30); err != nil {
 		return "", err
 	}
 	if err := growDisk(rootfs, res.DiskGiB); err != nil {

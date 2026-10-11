@@ -64,7 +64,12 @@ type Manifest struct {
 	// Image names the Dockyard image the disk derives from; empty when the
 	// base was built on the host.
 	Image string `json:"image,omitempty"`
+	// Source is SourceImport when the control plane recorded a user-uploaded disk; empty otherwise.
+	Source string `json:"source,omitempty"`
 }
+
+// SourceImport marks a generation whose disk a user uploaded (dock push).
+const SourceImport = "import"
 
 // Key prefixes inside the bucket.
 func key(snapshotID, name string) string { return "snapshots/" + snapshotID + "/" + name }
@@ -413,7 +418,16 @@ func syncDir(dir string) {
 // The bytes land in a unique temp file that is verified against the manifest
 // (stored size, and sha256 when recorded), fsynced, and renamed into place, so
 // a partial download is never visible at localPath.
-func GetFileAuto(ctx context.Context, s Store, snapshotID string, entry FileEntry, localPath string) (err error) {
+func GetFileAuto(ctx context.Context, s Store, snapshotID string, entry FileEntry, localPath string) error {
+	return GetFileAutoLimit(ctx, s, snapshotID, entry, localPath, 0)
+}
+
+// ErrTooLarge marks an object that unpacks past the caller's limit.
+var ErrTooLarge = errors.New("object unpacks past its limit")
+
+// GetFileAutoLimit is GetFileAuto refusing an object that unpacks to more than maxRaw bytes
+// (0 means no limit), so a small upload cannot expand into a disk-filling file.
+func GetFileAutoLimit(ctx context.Context, s Store, snapshotID string, entry FileEntry, localPath string, maxRaw int64) (err error) {
 	rc, err := s.Get(ctx, snapshotID, entry.Path)
 	if err != nil {
 		return err
@@ -435,19 +449,33 @@ func GetFileAuto(ctx context.Context, s Store, snapshotID string, entry FileEntr
 		}
 	}()
 	hash := sha256.New()
-	stored := &byteCounter{Reader: io.TeeReader(rc, hash)}
+	// Never read more than one byte past the declared stored size: enough to see the mismatch.
+	var body io.Reader = rc
+	if entry.Size > 0 {
+		body = io.LimitReader(rc, entry.Size+1)
+	}
+	stored := &byteCounter{Reader: io.TeeReader(body, hash)}
+	var src io.Reader = stored
+	var dec *zstd.Decoder
 	if entry.Encoding == EncodingZstd {
-		r, zerr := zstd.NewReader(stored, zstd.WithDecoderConcurrency(1))
-		if zerr != nil {
-			return zerr
+		if dec, err = zstd.NewReader(stored, zstd.WithDecoderConcurrency(1)); err != nil {
+			return err
 		}
-		_, err = io.Copy(out, r)
-		r.Close()
-	} else {
-		_, err = io.Copy(out, stored)
+		src = dec
+	}
+	if maxRaw > 0 {
+		src = io.LimitReader(src, maxRaw+1)
+	}
+	var written int64
+	written, err = io.Copy(out, src)
+	if dec != nil {
+		dec.Close()
 	}
 	if err != nil {
 		return err
+	}
+	if maxRaw > 0 && written > maxRaw {
+		return fmt.Errorf("download %s/%s: %w (%d bytes)", snapshotID, entry.Path, ErrTooLarge, maxRaw)
 	}
 	// Drain so the stored-byte count and digest cover the whole object.
 	if _, err = io.Copy(io.Discard, stored); err != nil {

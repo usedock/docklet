@@ -8,6 +8,11 @@ import "encoding/json"
 // DockletFeatures is what this build advertises at registration; the control plane gates behaviour on it.
 var DockletFeatures = []string{"egress-on-resume"}
 
+// FeatureVerifiedImports is advertised by microvm hosts that restore an uploaded whole disk (a
+// manifest with no cpuFamily): sha256 required, unpacked size capped at the dock's diskGiB.
+// Older hosts refuse such a generation, so the control plane places imports only on these.
+const FeatureVerifiedImports = "verified-imports"
+
 // APIVersion is the docklet contract version served under /v1/*.
 const APIVersion = "v1"
 

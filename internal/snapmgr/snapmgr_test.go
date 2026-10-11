@@ -769,7 +769,7 @@ func TestMaterializeDiskVerifiesManifestLevelChecksum(t *testing.T) {
 	})
 	t.Run("no checksum restores as before", func(t *testing.T) {
 		// Legacy generations record neither value at manifest level: nothing to verify.
-		controlPlaneManifest(t, c, "legacy", func(m *store.Manifest) { m.SHA256, m.SizeBytes = "", 0 })
+		controlPlaneManifest(t, c, "legacy", func(m *store.Manifest) { m.SHA256, m.SizeBytes, m.Image = "", 0, "" })
 		rc, err := c.Store.Get(ctx, "legacy", "rootfs.ext4.zst")
 		if err != nil {
 			t.Fatal(err)
@@ -800,5 +800,139 @@ func TestMaterializeDiskLabelsAnImportedDiskWithItsDockyardBase(t *testing.T) {
 	}
 	if got := disk.DockImage(c.BaseImage, dest); got != "ubuntu-24.04" {
 		t.Fatalf("dock image = %q", got)
+	}
+}
+
+
+// importedManifest stores raw as the control plane records a dock push (dock#122): source import,
+// manifest-level sha256/sizeBytes/image, the entry's sha256 and size, and the cpuFamily of the host
+// it placed the import on.
+func importedManifest(t *testing.T, c *Coordinator, snapshotID string, raw []byte, mutate func(*store.Manifest)) {
+	t.Helper()
+	ctx := context.Background()
+	entry, err := store.PutFileCompressed(ctx, c.Store, snapshotID, "rootfs.ext4", writeTemp(t, raw), c.GensDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := store.Manifest{
+		SnapshotID: snapshotID, DockID: "imp_1", Kind: "full", CPUFamily: c.HostFamily, Image: "ubuntu-24.04",
+		Source: store.SourceImport, SHA256: entry.SHA256, SizeBytes: entry.Size,
+		Files: []store.FileEntry{{Path: entry.Path, Size: entry.Size, Encoding: store.EncodingZstd, SHA256: entry.SHA256}},
+	}
+	mutate(&m)
+	if err := store.PutManifest(ctx, c.Store, m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializeDiskRestoresAnImportedDisk(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	importedManifest(t, c, "up", []byte("uploaded-disk"), func(*store.Manifest) {})
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDiskWithin(ctx, "up", dest, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "uploaded-disk" {
+		t.Fatalf("restored = %q", got)
+	}
+	// The CPU family check stays: the control plane writes the placed host's family.
+	importedManifest(t, c, "other", []byte("x"), func(m *store.Manifest) { m.CPUFamily = "AuthenticAMD:1:1" })
+	var inc *ErrIncompatible
+	if err := c.MaterializeDiskWithin(ctx, "other", filepath.Join(t.TempDir(), "r"), 1<<30); !errors.As(err, &inc) {
+		t.Fatalf("err = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestMaterializeDiskRefusesAnImportWithoutManifestChecksumOrSize(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	for name, mutate := range map[string]func(*store.Manifest){
+		"no sha256":    func(m *store.Manifest) { m.SHA256 = "" },
+		"no sizeBytes": func(m *store.Manifest) { m.SizeBytes = 0 },
+		// The entry still carries both: an import is judged by its manifest-level fields alone.
+		"neither": func(m *store.Manifest) { m.SHA256, m.SizeBytes = "", 0 },
+		"a delta": func(m *store.Manifest) { m.Files[0].Path = "rootfs.delta.zst" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			importedManifest(t, c, "bad", []byte("uploaded-disk"), mutate)
+			dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+			if err := c.MaterializeDiskWithin(ctx, "bad", dest, 1<<30); err == nil || !strings.Contains(err.Error(), "imported disk") {
+				t.Fatalf("err = %v, want an import refusal", err)
+			}
+			if _, err := os.Stat(dest); !os.IsNotExist(err) {
+				t.Fatalf("a refused import left a disk: %v", err)
+			}
+		})
+	}
+	// A generation naming a Dockyard image is never legacy either.
+	importedManifest(t, c, "named", []byte("d"), func(m *store.Manifest) {
+		m.Source, m.SHA256, m.SizeBytes, m.Files[0].SHA256 = "", "", 0, ""
+	})
+	if err := c.MaterializeDisk(ctx, "named", filepath.Join(t.TempDir(), "r")); err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("err = %v, want a refusal of an image-named generation without a sha256", err)
+	}
+}
+
+func TestMaterializeDiskCapsAnImportAtTheDockDisk(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	// 4 MiB of zeros compresses to a few hundred bytes: the upload must not unpack past the dock.
+	importedManifest(t, c, "bomb", make([]byte, 4<<20), func(*store.Manifest) {})
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "rootfs.ext4")
+	if err := c.MaterializeDiskWithin(ctx, "bomb", dest, 1<<20); !errors.Is(err, store.ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Fatalf("a refused import left files: %v", left)
+	}
+	// Without the dock's size there is nothing to hold it to.
+	if err := c.MaterializeDisk(ctx, "bomb", dest); err == nil {
+		t.Fatal("an import restored without a size limit")
+	}
+	// Exactly the dock's size is fine.
+	if err := c.MaterializeDiskWithin(ctx, "bomb", dest, 4<<20); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializeDiskHoldsAHostCaptureToItsRecordedRawSize(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	importedManifest(t, c, "host", make([]byte, 1<<20), func(m *store.Manifest) {
+		m.Source, m.Image = "", ""
+		m.Files[0].RawSize = 1 << 10 // a lying manifest: the object unpacks far past it
+	})
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDisk(ctx, "host", dest); !errors.Is(err, store.ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestMaterializeDiskMarksAWholeImageFromAnUnheldImageUnknown(t *testing.T) {
+	ctx := context.Background()
+	// The current base is the Dockyard ubuntu-24.04, but the import says node-22, which this host lacks.
+	c, _, _, _ := fullFixture(t)
+	importedManifest(t, c, "node", []byte("node-disk"), func(m *store.Manifest) { m.Image = "node-22" })
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDiskWithin(ctx, "node", dest, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.DockImage(c.BaseImage, dest); got != "" {
+		t.Fatalf("dock image = %q, want empty (export_base_unsupported), never the current base", got)
+	}
+	m, err := c.FreezeRootfsFull(ctx, "d1", dest, "again", "full", c.HostFamily, nil)
+	if err != nil || m.Image != "" {
+		t.Fatalf("recapture image = %q, %v", m.Image, err)
+	}
+	// A host-written whole image that names no image is just as unknown.
+	importedManifest(t, c, "built", []byte("built-disk"), func(m *store.Manifest) { m.Source, m.Image = "", "" })
+	dest2 := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDisk(ctx, "built", dest2); err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.DockImage(c.BaseImage, dest2); got != "" {
+		t.Fatalf("dock image = %q, want empty", got)
 	}
 }

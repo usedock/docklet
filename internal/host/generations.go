@@ -63,7 +63,12 @@ func (h *Host) mountGeneration(ctx context.Context, snapshotID string) (string, 
 	// A KVM generation is a block delta: materialize the rootfs it describes
 	// before mounting, so reads never touch the machine that captured it.
 	genPath := filepath.Join(dir, "rootfs.ext4")
-	if err := h.cfg.Snaps.MaterializeDisk(ctx, snapshotID, genPath); err != nil {
+	// No dock size here: an uploaded disk may take at most half the free host disk.
+	var limit int64
+	if h.cfg.DiskFreeBytes != nil {
+		limit = h.cfg.DiskFreeBytes() / 2
+	}
+	if err := h.cfg.Snaps.MaterializeDiskWithin(ctx, snapshotID, genPath, limit); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", nil, false, err
 	}

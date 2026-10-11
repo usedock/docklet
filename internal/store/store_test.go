@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -380,5 +381,53 @@ func TestPanicInDownloadDoesNotWedgeLaterCallers(t *testing.T) {
 	}()
 	if err := g.do(context.Background(), "k", func() error { return nil }); err != nil {
 		t.Fatalf("later caller = %v, want success", err)
+	}
+}
+
+// endlessStore serves every object as an endless stream of zeros and counts what was read.
+type endlessStore struct {
+	Store
+	read atomic.Int64
+}
+
+type zeros struct{ n *atomic.Int64 }
+
+func (z zeros) Read(p []byte) (int, error) {
+	clear(p)
+	z.n.Add(int64(len(p)))
+	return len(p), nil
+}
+
+func (s *endlessStore) Get(context.Context, string, string) (io.ReadCloser, error) {
+	return io.NopCloser(zeros{&s.read}), nil
+}
+
+func TestDownloadStopsJustPastTheDeclaredSize(t *testing.T) {
+	s := &endlessStore{Store: NewMemStore()}
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	err := GetFileAuto(context.Background(), s, "s1", FileEntry{Path: "rootfs.ext4", Size: 1 << 20}, dest)
+	if err == nil {
+		t.Fatal("an object longer than its declared size was accepted")
+	}
+	// io.Copy reads in 32 KiB chunks, so the overrun is at most one chunk.
+	if got := s.read.Load(); got > 1<<20+64<<10 {
+		t.Fatalf("read %d bytes of a 1 MiB object", got)
+	}
+	noTempFiles(t, filepath.Dir(dest))
+}
+
+func TestDownloadRefusesAnObjectThatUnpacksPastTheLimit(t *testing.T) {
+	s, entry, _ := putCompressed(t, make([]byte, 2<<20))
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "rootfs.ext4")
+	if err := GetFileAutoLimit(context.Background(), s, "g1", entry, dest, 1<<20); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("a refused download left a file: %v", err)
+	}
+	noTempFiles(t, dir)
+	if err := GetFileAutoLimit(context.Background(), s, "g1", entry, dest, 2<<20); err != nil {
+		t.Fatal(err)
 	}
 }

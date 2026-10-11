@@ -145,6 +145,15 @@ func LabelBase(rootfs, fp string) error {
 	return os.WriteFile(rootfs+baseLabelSuffix, []byte(fp+"\n"), 0o644)
 }
 
+// unknownBase labels a disk restored whole from an image this host does not hold.
+const unknownBase = "unknown"
+
+// LabelUnknownBase records that a dock rootfs derives from no base this host
+// holds, so it is never reported as the current base's image.
+func LabelUnknownBase(rootfs string) error {
+	return os.WriteFile(rootfs+baseLabelSuffix, []byte(unknownBase+"\n"), 0o644)
+}
+
 // BaseLabel returns the base a dock rootfs derives from, empty when unknown.
 func BaseLabel(rootfs string) string {
 	raw, err := os.ReadFile(rootfs + baseLabelSuffix)
@@ -235,10 +244,13 @@ func ImageFingerprint(pointer, name string) string {
 
 // DockImage names the Dockyard image a dock rootfs derives from: through its
 // base label while the host holds it, else the current base. Empty for a
-// host-built base or an unknown one.
+// host-built base, a disk labelled unknown, or an unknown base.
 func DockImage(pointer, rootfs string) string {
 	fp := BaseLabel(rootfs)
 	if fp == "" {
+		if raw, err := os.ReadFile(rootfs + baseLabelSuffix); err == nil && strings.TrimSpace(string(raw)) == unknownBase {
+			return ""
+		}
 		var err error
 		if _, fp, err = CurrentBase(pointer); err != nil {
 			return ""

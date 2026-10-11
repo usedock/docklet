@@ -51,6 +51,7 @@ var fixtures = []fixture{
 	{"Readiness", "readiness-ready.json", func() any { return new(Readiness) }},
 	{"Readiness", "readiness-not-ready.json", func() any { return new(Readiness) }},
 	{"FleetRegisterRequest", "fleet-register-request.json", func() any { return new(FleetRegisterRequest) }},
+	{"FleetRegisterRequest", "fleet-register-request-verified-imports.json", func() any { return new(FleetRegisterRequest) }},
 	{"FleetRegisterResponse", "fleet-register-response.json", func() any { return new(FleetRegisterResponse) }},
 	{"FleetHeartbeatRequest", "fleet-heartbeat-request.json", func() any { return new(FleetHeartbeatRequest) }},
 	{"FleetHeartbeatRequest", "fleet-heartbeat-request-gvisor.json", func() any { return new(FleetHeartbeatRequest) }},
