@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"testing"
 
 	"github.com/usedock/docklet/internal/agent"
@@ -41,4 +43,27 @@ func TestParseOvercommit(t *testing.T) {
 			t.Errorf("%q must be refused", raw)
 		}
 	}
+}
+
+type failListener struct{ net.Listener }
+
+func (failListener) Accept() (net.Conn, error) { return nil, errors.New("boom") }
+func (failListener) Close() error              { return nil }
+func (failListener) Addr() net.Addr            { return &net.TCPAddr{} }
+
+func TestServeEgressFatalOnServeError(t *testing.T) {
+	var got string
+	serveEgress(failListener{}, http.NotFoundHandler(), func(f string, a ...any) { got = f })
+	if got == "" {
+		t.Fatal("fatal not called after serve error")
+	}
+}
+
+func TestServeEgressCleanShutdownNotFatal(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	serveEgress(l, http.NotFoundHandler(), func(string, ...any) { t.Fatal("fatal on clean close") })
 }
