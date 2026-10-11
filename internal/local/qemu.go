@@ -51,8 +51,8 @@ type LaunchSpec struct {
 	// fw_cfg, never the command line, because other users can read a process argv.
 	ConfigFile string
 	// Token is the agent token. It is not part of the argv.
-	Token string
-	CPUs, MemoryMiB      int
+	Token           string
+	CPUs, MemoryMiB int
 	// Network is "on" or "off"; off restricts the guest from the outside world.
 	Network string
 }
