@@ -17,6 +17,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/usedock/docklet/internal/dockyard"
+
 	"github.com/usedock/docklet/internal/guestagent"
 )
 
@@ -146,11 +148,11 @@ func (f *fakeDriver) Kill(pid int) error {
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 type fakeCatalog struct {
-	ix  *Index
+	ix  *dockyard.Index
 	err error
 }
 
-func (c fakeCatalog) Index(context.Context) (*Index, error) { return c.ix, c.err }
+func (c fakeCatalog) Index(context.Context) (*dockyard.Index, error) { return c.ix, c.err }
 
 func sha(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
 
@@ -169,12 +171,12 @@ func zstdBytes(t *testing.T, b []byte) []byte {
 }
 
 // imageServer serves a tiny fake image and returns its index entry.
-func imageServer(t *testing.T, arch string) (Image, *httptest.Server, map[string]int) {
+func imageServer(t *testing.T, arch string) (dockyard.Image, *httptest.Server, map[string]int) {
 	t.Helper()
 	files := map[string][]byte{
-		FileKernel: []byte("kernel-bytes"),
-		FileInitrd: []byte("initrd-bytes"),
-		FileRootfs: zstdBytes(t, []byte("rootfs-raw-bytes")),
+		dockyard.FileKernel: []byte("kernel-bytes"),
+		dockyard.FileInitrd: []byte("initrd-bytes"),
+		dockyard.FileRootfs: zstdBytes(t, []byte("rootfs-raw-bytes")),
 	}
 	hits := map[string]int{}
 	var mu sync.Mutex
@@ -191,9 +193,9 @@ func imageServer(t *testing.T, arch string) (Image, *httptest.Server, map[string
 		_, _ = w.Write(b)
 	}))
 	t.Cleanup(srv.Close)
-	im := Image{Name: "test-img", Arch: arch, Description: "a test image", Files: map[string]ImageFile{}}
+	im := dockyard.Image{Name: "test-img", Arch: arch, Description: "a test image", Files: map[string]dockyard.File{}}
 	for n, b := range files {
-		im.Files[n] = ImageFile{URL: srv.URL + "/" + n, Size: int64(len(b)), SHA256: sha(b)}
+		im.Files[n] = dockyard.File{URL: srv.URL + "/" + n, Size: int64(len(b)), SHA256: sha(b)}
 	}
 	return im, srv, hits
 }
@@ -207,7 +209,7 @@ func newTestEngine(t *testing.T) (*Engine, *fakeDriver, map[string]int) {
 	dir := t.TempDir()
 	e := &Engine{
 		Dir: dir, Driver: drv, Arch: Arch(),
-		Catalog:     fakeCatalog{ix: &Index{Images: []Image{im}}},
+		Catalog:     fakeCatalog{ix: &dockyard.Index{Version: "t", Images: []dockyard.Image{im}}},
 		Cache:       &Cache{Dir: dir + "/images", Driver: drv},
 		BootTimeout: 5e9, StopTimeout: 5e9,
 	}

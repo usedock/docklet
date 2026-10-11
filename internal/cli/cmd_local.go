@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/usedock/docklet/internal/dockyard"
 	"github.com/usedock/docklet/internal/guestagent"
 	"github.com/usedock/docklet/internal/local"
 )
@@ -44,7 +45,7 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 		if *c.json {
 			return a.printValue(imageRow(e, im))
 		}
-		fmt.Fprintf(a.Stdout, "pulled %s (%s)\n", im.Name, local.HumanBytes(im.Size()))
+		fmt.Fprintf(a.Stdout, "pulled %s (%s)\n", im.Name, local.HumanBytes(local.ImageSize(im)))
 		return nil
 	}
 	c := a.flags("images", "images | images pull <name>")
@@ -57,6 +58,14 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 	}
 	ix, err := e.Catalog.Index(ctx)
 	if err != nil {
+		if local.ErrCode(err) == "no_dockyard_release" {
+			// Nothing is wrong with the machine; there is just no release to list yet.
+			if *c.json {
+				return a.printValue([]imageInfo{})
+			}
+			fmt.Fprintln(a.Stdout, "no Dockyard release pinned yet; there are no images to list")
+			return nil
+		}
 		return localError(err)
 	}
 	rows := []imageInfo{}
@@ -88,8 +97,8 @@ type imageInfo struct {
 	Cached      bool   `json:"cached"`
 }
 
-func imageRow(e *local.Engine, im local.Image) imageInfo {
-	return imageInfo{Name: im.Name, Arch: im.Arch, Description: im.Description, SizeBytes: im.Size(), Cached: e.Cache.Cached(im)}
+func imageRow(e *local.Engine, im dockyard.Image) imageInfo {
+	return imageInfo{Name: im.Name, Arch: im.Arch, Description: im.Description, SizeBytes: local.ImageSize(im), Cached: e.Cache.Cached(im)}
 }
 
 // cmdDoctor reports what local docks need and what is missing; it exits 1 when something is.

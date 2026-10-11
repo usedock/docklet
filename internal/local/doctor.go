@@ -64,10 +64,14 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	}
 	ix, err := e.Catalog.Index(ctx)
 	if err != nil {
-		add(Check{Name: "dockyard", Detail: err.Error(), Fix: "Check your network, or set DOCK_DOCKYARD_URL to a reachable index."})
+		fix := "Check your network, or set DOCK_DOCKYARD_URL (and DOCK_DOCKYARD_SHA256) to a reachable index."
+		if ErrCode(err) == "no_dockyard_release" {
+			fix = "Images are published by Dockyard releases (images-*); this dock build has none pinned yet."
+		}
+		add(Check{Name: "dockyard", Detail: err.Error(), Fix: fix})
 		return checks
 	}
-	if im, err := ix.Find(DefaultImage, e.Arch); err != nil {
+	if im, err := findImage(ix, DefaultImage, e.Arch); err != nil {
 		add(Check{Name: "dockyard", Detail: err.Error()})
 	} else {
 		add(Check{Name: "dockyard", OK: true, Detail: fmt.Sprintf("%d images for %s/%s", len(ix.Images), runtime.GOOS, e.Arch)})

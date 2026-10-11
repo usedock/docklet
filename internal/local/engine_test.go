@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usedock/docklet/internal/dockyard"
 )
 
 func codeOf(err error) string {
@@ -34,7 +36,7 @@ func TestNewExecStopResumeBranchRemove(t *testing.T) {
 	if len(drv.starts) != 1 || drv.starts[0].CPUs != 3 || drv.starts[0].Network != "on" {
 		t.Fatalf("launch %+v", drv.starts)
 	}
-	if hits[FileKernel] != 1 || hits[FileRootfs] != 1 {
+	if hits[dockyard.FileKernel] != 1 || hits[dockyard.FileRootfs] != 1 {
 		t.Fatalf("image must download once, hits %v", hits)
 	}
 	if _, err := e.New(ctx, Spec{Name: "web"}); codeOf(err) != "dock_name_taken" {

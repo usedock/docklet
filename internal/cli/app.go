@@ -74,7 +74,8 @@ Switch with 'dock context use local|cloud|<name>'.
 
 Every command accepts --json. <dock> is a dock name or id.
 Environment: DOCK_API_URL, DOCK_API_KEY and DOCK_WORKSPACE override the active context.
-Local: DOCK_QEMU (qemu-system binary), DOCK_DATA_DIR, DOCK_DOCKYARD_URL, DOCK_LOCAL_ACCEL=tcg
+Local: DOCK_QEMU (qemu-system binary), DOCK_DATA_DIR, DOCK_DOCKYARD_URL + DOCK_DOCKYARD_SHA256
+(an unpinned image index), DOCK_LOCAL_ACCEL=tcg
 (slow software emulation, tests only).
 `
 

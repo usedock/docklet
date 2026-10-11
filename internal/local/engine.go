@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/usedock/docklet/internal/dockyard"
 	"github.com/usedock/docklet/internal/guestagent"
 )
 
@@ -81,7 +82,7 @@ func NewEngine(getenv func(string) string, progress io.Writer) (*Engine, error) 
 	return &Engine{
 		Dir:      dir,
 		Driver:   drv,
-		Catalog:  NewCatalog(getenv),
+		Catalog:  NewCatalog(getenv, progress),
 		Cache:    &Cache{Dir: filepath.Join(dir, "images"), Driver: drv, Progress: progress},
 		Arch:     Arch(),
 		Progress: progress,
@@ -245,15 +246,15 @@ func (s Spec) withDefaults() (Spec, error) {
 }
 
 // ResolveImage finds the catalog entry for name (or the default) on this architecture.
-func (e *Engine) ResolveImage(ctx context.Context, name string) (Image, error) {
+func (e *Engine) ResolveImage(ctx context.Context, name string) (dockyard.Image, error) {
 	if name == "" {
 		name = DefaultImage
 	}
 	ix, err := e.Catalog.Index(ctx)
 	if err != nil {
-		return Image{}, err
+		return dockyard.Image{}, err
 	}
-	return ix.Find(name, e.Arch)
+	return findImage(ix, name, e.Arch)
 }
 
 // New creates a dock and boots it.
@@ -331,7 +332,7 @@ func freePort() (int, error) {
 
 // boot starts the VM for rec and waits for its agent.
 func (e *Engine) boot(ctx context.Context, rec Record) error {
-	kernel, initrd := filepath.Join(rec.ImageDir, FileKernel), filepath.Join(rec.ImageDir, FileInitrd)
+	kernel, initrd := filepath.Join(rec.ImageDir, dockyard.FileKernel), filepath.Join(rec.ImageDir, dockyard.FileInitrd)
 	if _, err := os.Stat(kernel); err != nil {
 		return errf("image_missing", "the image files of %s are gone (%s); run: dock images pull %s", rec.ID, rec.ImageDir, rec.Image)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,81 +15,31 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/usedock/docklet/internal/dockyard"
 )
-
-// DockyardTag pins the Dockyard release the CLI reads its index from. DOCK_DOCKYARD_URL
-// overrides the full index URL.
-const DockyardTag = "dockyard-v1"
-
-// DockyardIndexURL is the default index location for this CLI build.
-const DockyardIndexURL = "https://github.com/usedock/docklet/releases/download/" + DockyardTag + "/dockyard.json"
 
 // DefaultImage is used when a dock names no image.
 const DefaultImage = "ubuntu-24.04"
 
-// File names every Dockyard image provides.
-const (
-	FileRootfs = "rootfs.ext4.zst"
-	FileKernel = "vmlinuz"
-	FileInitrd = "initrd.img"
-)
-
-// ImageFile is one downloadable artifact of an image.
-type ImageFile struct {
-	URL    string `json:"url"`
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
-}
-
-// Image is one catalog entry. This mirrors the Dockyard index entry; it is a local copy
-// of the shape so the engine does not depend on the index builder.
-type Image struct {
-	Name        string               `json:"name"`
-	Arch        string               `json:"arch"`
-	Description string               `json:"description,omitempty"`
-	Files       map[string]ImageFile `json:"files"`
-}
-
-// Size is the total download size of the image.
-func (i Image) Size() int64 {
+// Image sizes sum the download size of an image.
+func ImageSize(im dockyard.Image) int64 {
 	var n int64
-	for _, f := range i.Files {
+	for _, f := range im.Files {
 		n += f.Size
 	}
 	return n
 }
 
-// Index is the Dockyard catalog.
-type Index struct {
-	Images []Image `json:"images"`
-}
-
-// ParseIndex decodes and validates an index document.
-func ParseIndex(raw []byte) (*Index, error) {
-	var ix Index
-	if err := json.Unmarshal(raw, &ix); err != nil {
-		return nil, errf("bad_index", "the Dockyard index is not valid JSON: %v", err)
-	}
-	for _, im := range ix.Images {
-		if im.Name == "" || im.Arch == "" {
-			return nil, errf("bad_index", "an index entry has no name or arch")
-		}
-		for _, need := range []string{FileRootfs, FileKernel, FileInitrd} {
-			f, ok := im.Files[need]
-			if !ok || f.URL == "" || len(f.SHA256) != 64 {
-				return nil, errf("bad_index", "image %s/%s lacks a valid %s entry", im.Name, im.Arch, need)
+// findImage returns the image for name and arch, or an error listing what exists.
+func findImage(ix *dockyard.Index, name, arch string) (dockyard.Image, error) {
+	if im, ok := ix.Find(name, arch); ok {
+		for _, need := range []string{dockyard.FileRootfs, dockyard.FileKernel, dockyard.FileInitrd} {
+			if f, ok := im.Files[need]; !ok || f.URL == "" {
+				return dockyard.Image{}, errf("bad_index", "image %s/%s lacks a %s entry", name, arch, need)
 			}
 		}
-	}
-	return &ix, nil
-}
-
-// Find returns the image for name and arch.
-func (ix *Index) Find(name, arch string) (Image, error) {
-	for _, im := range ix.Images {
-		if im.Name == name && im.Arch == arch {
-			return im, nil
-		}
+		return *im, nil
 	}
 	var have []string
 	for _, im := range ix.Images {
@@ -99,27 +48,39 @@ func (ix *Index) Find(name, arch string) (Image, error) {
 		}
 	}
 	sort.Strings(have)
-	return Image{}, errf("image_not_found", "no image %q for %s in Dockyard (available: %s)", name, arch, strings.Join(have, ", "))
+	return dockyard.Image{}, errf("image_not_found", "no image %q for %s in Dockyard (available: %s)", name, arch, strings.Join(have, ", "))
 }
 
 // Catalog supplies the image index.
 type Catalog interface {
-	Index(ctx context.Context) (*Index, error)
+	Index(ctx context.Context) (*dockyard.Index, error)
 }
 
-// HTTPCatalog fetches the index over HTTP(S).
+// HTTPCatalog fetches the index over HTTP(S) and verifies it against SHA256 before parsing.
 type HTTPCatalog struct {
 	URL    string
+	SHA256 string // expected sha256 of the index; empty means unverified
 	Client *http.Client
+	// Unpinned is set when the URL comes from DOCK_DOCKYARD_URL instead of the pinned release.
+	Unpinned bool
 }
 
-// NewCatalog returns the catalog for this build, honoring DOCK_DOCKYARD_URL.
-func NewCatalog(getenv func(string) string) *HTTPCatalog {
-	u := getenv("DOCK_DOCKYARD_URL")
-	if u == "" {
-		u = DockyardIndexURL
+// NewCatalog returns the catalog for this build. The default is the pinned release; with
+// DOCK_DOCKYARD_URL the index is unpinned (a warning is written to warn) and is verified
+// only if DOCK_DOCKYARD_SHA256 is set.
+func NewCatalog(getenv func(string) string, warn io.Writer) *HTTPCatalog {
+	if u := getenv("DOCK_DOCKYARD_URL"); u != "" {
+		c := &HTTPCatalog{URL: u, SHA256: strings.ToLower(getenv("DOCK_DOCKYARD_SHA256")), Unpinned: true}
+		if warn != nil {
+			if c.SHA256 == "" {
+				fmt.Fprintln(warn, "warning: DOCK_DOCKYARD_URL is set: the Dockyard index is unpinned and unverified (set DOCK_DOCKYARD_SHA256 to verify it)")
+			} else {
+				fmt.Fprintln(warn, "warning: DOCK_DOCKYARD_URL is set: the Dockyard index is not the release pinned in this dock build")
+			}
+		}
+		return c
 	}
-	return &HTTPCatalog{URL: u}
+	return &HTTPCatalog{URL: PinnedIndexURL(), SHA256: DockyardIndexSHA256}
 }
 
 func (c *HTTPCatalog) client() *http.Client {
@@ -129,8 +90,11 @@ func (c *HTTPCatalog) client() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
 
-// Index downloads and parses the index.
-func (c *HTTPCatalog) Index(ctx context.Context) (*Index, error) {
+// Index downloads the index, checks its sha256 and parses it.
+func (c *HTTPCatalog) Index(ctx context.Context) (*dockyard.Index, error) {
+	if c.URL == "" {
+		return nil, errf("no_dockyard_release", "no Dockyard release pinned yet; set DOCK_DOCKYARD_URL (and DOCK_DOCKYARD_SHA256) to use another index")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.URL, nil)
 	if err != nil {
 		return nil, errf("index_unavailable", "%v", err)
@@ -147,7 +111,17 @@ func (c *HTTPCatalog) Index(ctx context.Context) (*Index, error) {
 	if err != nil {
 		return nil, errf("index_unavailable", "%v", err)
 	}
-	return ParseIndex(raw)
+	if c.SHA256 != "" {
+		sum := sha256.Sum256(raw)
+		if got := hex.EncodeToString(sum[:]); !strings.EqualFold(got, c.SHA256) {
+			return nil, errf("index_mismatch", "the Dockyard index at %s has sha256 %s, expected %s; refusing to use it", c.URL, got, c.SHA256)
+		}
+	}
+	ix, err := dockyard.ParseIndex(raw)
+	if err != nil {
+		return nil, errf("bad_index", "%v", err)
+	}
+	return ix, nil
 }
 
 // CachedImage holds the paths of a ready image.
@@ -170,28 +144,28 @@ func (c *Cache) logf(format string, a ...any) {
 	}
 }
 
-func (c *Cache) imageDir(im Image) string {
-	sum := im.Files[FileRootfs].SHA256
+func (c *Cache) imageDir(im dockyard.Image) string {
+	sum := im.Files[dockyard.FileRootfs].SHA256
 	if len(sum) > 12 {
 		sum = sum[:12]
 	}
 	return filepath.Join(c.Dir, im.Name+"-"+im.Arch+"-"+sum)
 }
 
-func (c *Cache) paths(im Image) CachedImage {
+func (c *Cache) paths(im dockyard.Image) CachedImage {
 	d := c.imageDir(im)
-	return CachedImage{Dir: d, Kernel: filepath.Join(d, FileKernel), Initrd: filepath.Join(d, FileInitrd), Base: filepath.Join(d, "base.qcow2")}
+	return CachedImage{Dir: d, Kernel: filepath.Join(d, dockyard.FileKernel), Initrd: filepath.Join(d, dockyard.FileInitrd), Base: filepath.Join(d, "base.qcow2")}
 }
 
 // Cached reports whether im is fully downloaded, verified and converted.
-func (c *Cache) Cached(im Image) bool {
+func (c *Cache) Cached(im dockyard.Image) bool {
 	p := c.paths(im)
 	_, err := os.Stat(filepath.Join(p.Dir, ".ready"))
 	return err == nil
 }
 
 // Ensure makes im available locally, downloading and converting on first use.
-func (c *Cache) Ensure(ctx context.Context, im Image) (CachedImage, error) {
+func (c *Cache) Ensure(ctx context.Context, im dockyard.Image) (CachedImage, error) {
 	p := c.paths(im)
 	if c.Cached(im) {
 		return p, nil
@@ -199,10 +173,10 @@ func (c *Cache) Ensure(ctx context.Context, im Image) (CachedImage, error) {
 	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
 		return p, errf("cache_error", "%v", err)
 	}
-	for _, name := range []string{FileKernel, FileInitrd, FileRootfs} {
+	for _, name := range []string{dockyard.FileKernel, dockyard.FileInitrd, dockyard.FileRootfs} {
 		dest := filepath.Join(p.Dir, name)
 		if st, err := os.Stat(dest); err == nil && st.Size() == im.Files[name].Size {
-			if err := VerifyFile(dest, im.Files[name]); err == nil {
+			if err := verifyFile(dest, im.Files[name]); err == nil {
 				continue
 			}
 		}
@@ -213,7 +187,7 @@ func (c *Cache) Ensure(ctx context.Context, im Image) (CachedImage, error) {
 	}
 	c.logf("preparing %s disk", im.Name)
 	raw := filepath.Join(p.Dir, "rootfs.raw")
-	if err := decompress(filepath.Join(p.Dir, FileRootfs), raw); err != nil {
+	if err := decompress(filepath.Join(p.Dir, dockyard.FileRootfs), raw); err != nil {
 		return p, err
 	}
 	defer os.Remove(raw)
@@ -229,33 +203,20 @@ func (c *Cache) Ensure(ctx context.Context, im Image) (CachedImage, error) {
 		return p, errf("cache_error", "%v", err)
 	}
 	// The compressed rootfs is no longer needed once the base exists.
-	_ = os.Remove(filepath.Join(p.Dir, FileRootfs))
+	_ = os.Remove(filepath.Join(p.Dir, dockyard.FileRootfs))
 	return p, nil
 }
 
-// VerifyFile checks a file against its index entry (size, then sha256).
-func VerifyFile(path string, want ImageFile) error {
-	f, err := os.Open(path)
-	if err != nil {
+// verifyFile checks a file against its index entry (size, then sha256).
+func verifyFile(path string, want dockyard.File) error {
+	if err := dockyard.VerifyFile(path, want); err != nil {
 		return errf("verify_failed", "%v", err)
-	}
-	defer f.Close()
-	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return errf("verify_failed", "%v", err)
-	}
-	if want.Size > 0 && n != want.Size {
-		return errf("verify_failed", "%s is %d bytes, the index says %d", filepath.Base(path), n, want.Size)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, want.SHA256) {
-		return errf("verify_failed", "%s has sha256 %s, the index says %s", filepath.Base(path), got, want.SHA256)
 	}
 	return nil
 }
 
 // download fetches f to dest through a .part file and keeps it only if it verifies.
-func (c *Cache) download(ctx context.Context, f ImageFile, dest string) error {
+func (c *Cache) download(ctx context.Context, f dockyard.File, dest string) error {
 	if !strings.HasPrefix(f.URL, "https://") && !strings.HasPrefix(f.URL, "http://127.0.0.1") && !strings.HasPrefix(f.URL, "http://localhost") {
 		return errf("insecure_url", "refusing to download %s: only https URLs are allowed", f.URL)
 	}
@@ -293,7 +254,7 @@ func (c *Cache) download(ctx context.Context, f ImageFile, dest string) error {
 		_ = os.Remove(part)
 		return errf("download_failed", "%v", err)
 	}
-	if err := VerifyFile(part, f); err != nil {
+	if err := verifyFile(part, f); err != nil {
 		_ = os.Remove(part)
 		return err
 	}

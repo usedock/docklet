@@ -20,6 +20,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/usedock/docklet/internal/dockyard"
 	"github.com/usedock/docklet/internal/guestagent"
 	"github.com/usedock/docklet/internal/local"
 )
@@ -106,16 +107,16 @@ func (f *fakeVM) Start(_ context.Context, s local.LaunchSpec) (int, error) {
 	return pid, nil
 }
 
-type staticCatalog struct{ ix *local.Index }
+type staticCatalog struct{ ix *dockyard.Index }
 
-func (c staticCatalog) Index(context.Context) (*local.Index, error) { return c.ix, nil }
+func (c staticCatalog) Index(context.Context) (*dockyard.Index, error) { return c.ix, nil }
 
 // localEnv is a testEnv with no API key and a fake local engine.
 func newLocalEnv(t *testing.T) (*testEnv, *fakeVM) {
 	t.Helper()
 	te := newEnv(t)
 	te.env = map[string]string{}
-	files := map[string][]byte{local.FileKernel: []byte("k"), local.FileInitrd: []byte("i"), local.FileRootfs: zstdOf(t, "root")}
+	files := map[string][]byte{dockyard.FileKernel: []byte("k"), dockyard.FileInitrd: []byte("i"), dockyard.FileRootfs: zstdOf(t, "root")}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
 		if !ok {
@@ -125,10 +126,10 @@ func newLocalEnv(t *testing.T) (*testEnv, *fakeVM) {
 		_, _ = w.Write(b)
 	}))
 	t.Cleanup(srv.Close)
-	im := local.Image{Name: local.DefaultImage, Arch: local.Arch(), Description: "Ubuntu test", Files: map[string]local.ImageFile{}}
+	im := dockyard.Image{Name: local.DefaultImage, Arch: local.Arch(), Description: "Ubuntu test", Files: map[string]dockyard.File{}}
 	for n, b := range files {
 		s := sha256.Sum256(b)
-		im.Files[n] = local.ImageFile{URL: srv.URL + "/" + n, Size: int64(len(b)), SHA256: hex.EncodeToString(s[:])}
+		im.Files[n] = dockyard.File{URL: srv.URL + "/" + n, Size: int64(len(b)), SHA256: hex.EncodeToString(s[:])}
 	}
 	other := im
 	other.Name, other.Arch = "other-arch", "s390x"
@@ -136,7 +137,7 @@ func newLocalEnv(t *testing.T) (*testEnv, *fakeVM) {
 	dir := t.TempDir()
 	te.app.Engine = &local.Engine{
 		Dir: dir, Driver: drv, Arch: local.Arch(),
-		Catalog:     staticCatalog{&local.Index{Images: []local.Image{im, other}}},
+		Catalog:     staticCatalog{&dockyard.Index{Version: "t", Images: []dockyard.Image{im, other}}},
 		Cache:       &local.Cache{Dir: dir + "/images", Driver: drv},
 		BootTimeout: 5e9, StopTimeout: 5e9,
 	}
@@ -391,5 +392,32 @@ func TestLocalPortForwardNeedsARunningDock(t *testing.T) {
 	mustExit(t, te, 1, "port", "web", "8080")
 	if !strings.Contains(te.errb.String(), "dock_not_running") {
 		t.Fatalf("err %q", te.errb)
+	}
+}
+
+type noReleaseCatalog struct{}
+
+func (noReleaseCatalog) Index(context.Context) (*dockyard.Index, error) {
+	return nil, &local.Error{Code: "no_dockyard_release", Message: "no Dockyard release pinned yet"}
+}
+
+func TestImagesWithoutAPinnedReleaseIsClean(t *testing.T) {
+	te, _ := newLocalEnv(t)
+	te.app.Engine.Catalog = noReleaseCatalog{}
+	mustExit(t, te, 0, "images")
+	if !strings.Contains(te.out.String(), "no Dockyard release pinned yet") {
+		t.Fatalf("out %q", te.out)
+	}
+	mustExit(t, te, 0, "images", "--json")
+	if rows := jsonOut(t, te).([]any); len(rows) != 0 {
+		t.Fatalf("rows %v", rows)
+	}
+	mustExit(t, te, 1, "images", "pull", "ubuntu-24.04")
+	if !strings.Contains(te.errb.String(), "no_dockyard_release: no Dockyard release pinned yet") {
+		t.Fatalf("err %q", te.errb)
+	}
+	mustExit(t, te, 1, "doctor")
+	if !strings.Contains(te.out.String(), "no Dockyard release pinned yet") {
+		t.Fatalf("doctor %q", te.out)
 	}
 }
