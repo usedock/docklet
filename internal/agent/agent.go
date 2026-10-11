@@ -323,10 +323,14 @@ func (c Config) heartbeat(ctx context.Context) {
 	}
 	err := c.fleet(ctx, http.MethodPost, "/v1/fleet/heartbeat", body, nil, callTimeout)
 	var re *responseError
-	if errors.As(err, &re) && re.status == http.StatusBadRequest && (body.BaseFingerprints != nil || body.Images != nil) {
-		// An older control plane rejects the unknown fields: heartbeat as before.
-		body.BaseFingerprints = nil
+	// An older control plane rejects unknown fields. Drop the newest first so a
+	// control plane that knows baseFingerprints but not images still gets bases.
+	if errors.As(err, &re) && re.status == http.StatusBadRequest && body.Images != nil {
 		body.Images = nil
+		err = c.fleet(ctx, http.MethodPost, "/v1/fleet/heartbeat", body, nil, callTimeout)
+	}
+	if errors.As(err, &re) && re.status == http.StatusBadRequest && body.BaseFingerprints != nil {
+		body.BaseFingerprints = nil
 		err = c.fleet(ctx, http.MethodPost, "/v1/fleet/heartbeat", body, nil, callTimeout)
 	}
 	if err != nil && ctx.Err() == nil {
