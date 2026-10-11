@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         # Add an image: add it to images/catalog.toml and list it here.
         image: [ubuntu-24.04, node-22, python-3.12, browser]

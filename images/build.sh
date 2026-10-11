@@ -48,8 +48,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mount_chroot() { mount -t proc none "$1/proc"; mount --bind /dev "$1/dev"; mount -t sysfs none "$1/sys"; }
-umount_chroot() { umount "$1/sys" "$1/dev" "$1/proc"; }
+mount_chroot() { mount -t proc none "$1/proc"; mount --bind /dev "$1/dev"; mount -t devpts devpts "$1/dev/pts" 2>/dev/null || true; mount -t sysfs none "$1/sys"; }
+umount_chroot() { umount "$1/dev/pts" 2>/dev/null || true; umount "$1/sys" "$1/dev" "$1/proc"; }
 chroot_exec() { local t="$1"; shift; chroot "$t" env DEBIAN_FRONTEND=noninteractive "$@"; }
 
 build_base() {
