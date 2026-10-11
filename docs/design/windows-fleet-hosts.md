@@ -1,6 +1,6 @@
 # Design: Windows machines as fleet hosts
 
-Status: draft for review. Tracks [#37](https://github.com/usedock/docklet/issues/37) (part of #31).
+Status: Proposed, awaiting owner decisions on the open questions (section 7). Tracks [#37](https://github.com/usedock/docklet/issues/37) (part of #31).
 No code lands for this until the note is agreed and the outside security review in section 5 is scoped.
 
 Every claim below names the file it comes from. Statements marked **(unverified)** were not checked
@@ -74,8 +74,8 @@ Non-goals (for this design)
 
 Today `GOOS=windows go build ./cmd/docklet` fails (checked on main at 26aa749). The first errors are
 in the Firecracker SDK dependencies (`github.com/containernetworking/plugins/pkg/ns`,
-`github.com/vishvananda/netns`), `internal/stats` (`syscall.Stat_t`) and `internal/egress`
-(`syscall.IP_FREEBIND`). The import of `internal/fc` from `internal/host` pulls the SDK in, which is
+`github.com/vishvananda/netns`), `internal/stats` (`syscall.Stat_t`), `internal/egress`
+(`syscall.IP_FREEBIND`) and `internal/agent` (`syscall.Statfs`, used for disk capacity). The import of `internal/fc` from `internal/host` pulls the SDK in, which is
 why neutral types are a prerequisite rather than a cleanup.
 
 ### 2.2 What the local engine does today
@@ -87,7 +87,11 @@ why neutral types are a prerequisite rather than a cleanup.
   qemu64` ("WHPX has no in-kernel irqchip and cannot expose the host CPU model"), `q35`,
   `-nodefaults -no-user-config -display none -monitor none`, a virtio qcow2 disk, `virtio-rng`, and a
   user-mode (slirp) netdev with one `hostfwd` from `127.0.0.1:<port>` to the guest agent port
-  (`guestagent.Port`, 2222); `Network: off` adds `restrict=on`.
+  (`guestagent.Port`, 2222); `Network: off` adds `restrict=on`. With `Network: on` the netdev is
+  unrestricted, so a local dock can reach the Windows machine's loopback services through 10.0.2.2
+  (libslirp `sotranslate_out4` maps the slirp host address to 127.0.0.1). That is the CLI's
+  existing trust model and out of scope here, but it is why a fleet host must never use that mode.
+  The netdev also leaves IPv6 on (QEMU's default).
 - The guest config (agent token, workspace, hostname) reaches the guest as the fw_cfg file
   `opt/usedock/cfg` (`FWCfgName`, `WriteGuestConfig`), never argv. `images/overlay/dock-guest-init.sh`
   copies it to `/etc/dock-fast-agent.json` on every boot.
@@ -158,10 +162,17 @@ Decisions this asks for:
 4. **A new runtime name.** The Windows host registers `runtime: "qemu"` (name open, Q2), not
    `microvm`. The control plane's runtime filter (`holdingBase` and `placeAndRun` inputs in
    `apps/backend/src/hosts/hosts.service.ts` and `apps/backend/src/docks/docks.service.ts`) then keeps
-   Firecracker generations and Windows generations apart by default. Today the control plane rejects
-   any runtime other than `microvm` or `gvisor` (`RUNTIMES` in
-   `apps/backend/src/fleet/dto/fleet.dto.ts` and `fleet.service.ts`), so this needs a matching
-   control plane release.
+   Firecracker generations and Windows generations apart by default. The filter only applies when a
+   runtime is pinned: `placeForDock` in `hosts.service.ts` lets "hosts of any runtime qualify unless
+   `runtime` pins one (a restore)", so a fresh provision can land on a `qemu` host. That is the
+   intent, but it means the tenancy gate (section 4) must cover fresh provisions too, not only
+   restores. Today the control plane rejects any runtime other than `microvm` or `gvisor` in three
+   places: `RUNTIMES` in `apps/backend/src/fleet/dto/fleet.dto.ts`, `RUNTIMES` plus `checkedRuntime`
+   in `fleet.service.ts`, and `checkedRuntime` in `hosts/hosts.service.ts`, all of which follow the
+   `Runtime` type from `RUNTIMES` in `apps/backend/src/database/schema/docks.ts`. That type also keys
+   `PERSISTENT_PATHS` (`Record<Runtime, ...>`), which needs a `qemu` entry (`['/']`). The `runtime`
+   columns are `text`, so no database migration is needed, but it is a matching control plane
+   release.
 
 ## 3. Mapping each Linux-only mechanism to Windows
 
@@ -181,13 +192,28 @@ Options on Windows:
 | B. TAP + Hyper-V internal vSwitch + WinNAT | QEMU `-netdev tap` through the OpenVPN `tap-windows6` driver, bridged to an internal vSwitch, NAT through `New-NetNat` | Real per-guest IPs, closest to the Linux model, WFP can filter by guest IP | Third-party kernel driver; Hyper-V role and admin setup; one WinNAT per host **(unverified limit)**; more moving parts to break on Windows updates |
 | C. Hyper-V (HCS) VMs instead of QEMU | vmcompute / HCS API with a Hyper-V switch | First-party VMM, strongest isolation story on Windows | Different VMM, disk format (VHDX), no fw_cfg; does not reuse `internal/local`; a separate design |
 
-Recommendation: **A for phases 1 to 3, always with `restrict=on`**. B and C stay open (Q3).
+| D. User-mode stack in the docklet | QEMU `-netdev stream` (or `dgram`) carries the NIC's frames to a per-dock user-space TCP/IP stack in the docklet (the gvisor-tap-vsock / gvproxy approach) | Network policy runs outside the QEMU process, per dock and per connection; no slirp in QEMU; arbitrary TCP for unconfined docks is possible | A user-space TCP/IP stack becomes trusted docklet code; `-netdev stream` on the Windows QEMU build is **(unverified)** |
+
+Recommendation: **A for phases 1 to 3, always with `restrict=on` and `ipv6=off`**, with D as the
+phase 0 alternative for egress (section 3.2 explains why A's `guestfwd` cannot carry the proxy).
+B, C and D stay open (Q3).
 
 Details of A:
 
-- Every dock runs `-netdev user,id=n0,restrict=on,hostfwd=tcp:127.0.0.1:<agentPort>-:2222`. Outbound
-  traffic leaves only through explicit `guestfwd` rules (section 3.2). QEMU documents that `restrict`
-  does not affect explicit forwarding rules **(unverified on the Windows QEMU build)**.
+- Every dock runs `-netdev user,id=n0,restrict=on,ipv6=off,hostfwd=tcp:127.0.0.1:<agentPort>-:2222`.
+  In libslirp (`tcp_input.c`, `udp.c`, `ip_icmp.c`, `udp6.c`), `restrict` drops a guest TCP SYN
+  unless it matches a `guestfwd` rule, drops all guest UDP except DHCP and TFTP to slirp itself, and
+  drops ICMP echo except to slirp's own addresses; `hostfwd` keeps working because its socket
+  already exists. This is read from the libslirp source; the Windows QEMU build still needs the
+  phase 0 check.
+- **`ipv6=off` is mandatory.** libslirp's restricted-mode check in `tcp_input` compares the IPv4
+  view of the header (`ti_dst`) with the `guestfwd` list even for IPv6 segments (the code carries
+  `/* TODO: IPv6 */`). In `struct tcpiphdr` (`tcpip.h`) `ti_dst` overlays bytes 4 to 7 of the IPv6
+  *source* address, which the guest picks. A guest that adds an IPv6 address whose bytes 4 to 7 are
+  10.0.2.100 (for example `2001:db8:a00:264::1`) and opens TCP to any IPv6 host on the `guestfwd`
+  port passes the check; the segment then reaches `tcp_fconnect` as a real outbound IPv6 connect,
+  or to the host's `::1` if it targets slirp's own IPv6 address. With `ipv6=off` slirp drops IPv6
+  input before TCP. Phase 0 reproduces this on the Windows build and pins the fix with an argv test.
 - Without `restrict=on`, slirp maps 10.0.2.2 to the host's own loopback. A guest could then reach the
   docklet API on `127.0.0.1:8081`, other docks' agent forwards, and any unauthenticated service the
   machine owner runs on loopback. This is the reason unrestricted slirp is never used on a host.
@@ -205,7 +231,10 @@ Details of A:
   Windows backend must pass `network: dhcp` in the fw_cfg config, and `dock-guest-init.sh` must then
   delete the static unit and the stale machine-id (today done by `writeGateFiles` on a mounted disk).
   This is an image change and needs a Dockyard image release before Windows hosts can resume Linux
-  disks.
+  disks. A cheaper option for the network part alone: the static unit matches on
+  `MACAddress=` only, so a Windows backend that derives a different MAC from the dock id never
+  matches it, and the image's DHCP unit applies (`dock-guest-init.sh` header). The stale
+  machine-id still needs the guest-side step.
 
 ### 3.2 Egress allowlist
 
@@ -224,14 +253,31 @@ Windows design (enforcement in QEMU's netdev, backed by WFP):
    keyed by listener. The guest reaches it through
    `guestfwd=tcp:10.0.2.100:3128-tcp:127.0.0.1:<dockProxyPort>`. `egress.ProxyEnv` then points at
    `10.0.2.100:3128`. The admission code (`Allowed`, `dialable`, `public`) is reused unchanged.
+
+   **Blocker for this step as written.** A chardev `guestfwd` cannot carry a proxy. In QEMU's
+   `net/slirp.c` `slirp_guestfwd`, a non-`cmd:` rule opens one chardev when the netdev is created,
+   every guest connection to `10.0.2.100:3128` writes into that one stream (`guestfwd_write`), and
+   bytes coming back are delivered by `slirp_socket_recv` to the first socket that
+   `slirp_find_ctl_socket` finds for that address and port. Concrete failure: `npm install` opens
+   several CONNECT tunnels at once; the proxy sees their bytes interleaved on one TCP stream and
+   replies reach only one of them, so installs hang or fail. There is also no per-connection close.
+   The `cmd:` form spawns a helper process per connection, which conflicts with the one-process Job
+   Object limit (section 3.3) and puts a new process in the trusted path. So the per-dock proxy needs
+   either option D in section 3.1 (frames to a user-space stack in the docklet, which then applies
+   the same admission code per connection) or another transport, and that choice is a phase 0 spike
+   with a go/no-go before phase 4.
 3. **Unconfined docks** get the same mechanism with an "any public host" policy, so the private,
    link-local, CGNAT and loopback block that Linux gets from `guestRestore` also holds on Windows.
-   Consequence: on Windows, unconfined docks only get HTTPS/CONNECT egress plus DNS, not arbitrary
-   TCP/UDP. That is a product difference (Q4). A general TCP forwarder in the docklet would close it,
+   Consequence: on Windows, unconfined docks only get HTTPS/CONNECT egress, without guest DNS
+   (step 4), not arbitrary TCP/UDP. That is a product difference (Q4). A general TCP forwarder in the docklet would close it,
    at the cost of more code in the trusted path.
-4. **DNS.** slirp's built-in DNS at 10.0.2.3 forwards to the host resolver. With `restrict=on` it is
-   **(unverified)** whether 10.0.2.3 still answers. If it does not, the proxy resolves names itself
-   (CONNECT carries host names), and guests only need DNS for non-proxied tools.
+4. **DNS.** slirp's built-in DNS at 10.0.2.3 forwards to the host resolver. With `restrict=on` it does
+   not answer: libslirp `udp_input` drops every guest datagram after the DHCP and TFTP cases, and a
+   TCP connect to 10.0.2.3:53 is dropped like any other SYN without a `guestfwd`. The proxy resolves
+   names itself (CONNECT carries host names), so proxy-aware tools work; tools that resolve before
+   connecting fail. That matches Linux confined docks, whose per-guest rules (`rules` in
+   `internal/egress/egress.go`) also drop everything but the proxy port. The difference is for
+   unconfined docks (step 3), which have DNS on Linux and none here unless option D answers it.
 5. **WFP as the second line.** The Linux design has two lines (iptables plus proxy). On Windows the
    second line is a set of persistent Windows Filtering Platform filters, added by the docklet under
    its own provider and sublayer, on `FWPM_LAYER_ALE_AUTH_CONNECT_V4/V6` for the QEMU binary's app id:
@@ -240,13 +286,23 @@ Windows design (enforcement in QEMU's netdev, backed by WFP):
    connect filters see loopback connects from a user-mode process is **(unverified)** and is a phase 0
    spike item; if they do not, the docklet API and proxy need named-pipe or token-only protection and
    the review must weigh that.
+   An app-id filter cannot tell docks apart: every dock runs the same `qemu-system-x86_64.exe`, so
+   "loopback proxy ports" means all of them. A confined dock's compromised QEMU can therefore connect
+   to an unconfined dock's listener (policy "any public host") and leave its allowlist. The proxy
+   must check, per accepted connection, that the loopback peer's owning process (from
+   `GetExtendedTcpTable`) is that dock's QEMU pid with the recorded creation stamp, and refuse
+   otherwise. If QEMU runs under a per-dock SID (section 5.1), WFP can also filter on
+   `FWPM_CONDITION_ALE_USER_ID`, which does separate docks.
 6. **Trust properties.** On Linux, enforcement sits outside the VMM process (host kernel netfilter),
    so a compromised Firecracker process still meets iptables in a jailed network setup. On Windows,
    enforcement step 1 lives **inside the QEMU process**. A guest that gains code execution in QEMU
    (device model or slirp bug) bypasses `restrict` and talks to the network with QEMU's privileges.
    WFP (step 5) is then the only network control left, and it filters by process, not by dock. This is
    weaker than Linux and must be stated as such to operators, and it is why section 5 limits Windows
-   hosts to a single tenant.
+   hosts to a single tenant. WFP is still a meaningful second line against a slirp logic bug (like
+   the IPv6 case in section 3.1) because the kernel applies it whatever QEMU believes; against code
+   execution in QEMU it limits destinations, not which dock's policy applies. Option D moves step 1
+   out of the QEMU process, which is the main security argument for it.
 7. **Order.** As on Linux: the proxy listener and policy exist before QEMU starts, and the dock is
    tracked as confined only after both. `egress-on-resume` requires that `SnapshotLoad` applies the
    same path, which it does by construction because the netdev is built from the spec at boot.
@@ -265,7 +321,7 @@ Windows mapping, one Job Object per dock, created before QEMU starts and assigne
 |---|---|
 | `cpu.max` | `JobObjectCpuRateControlInformation` with `JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`, rate = CPUs / host logical CPUs. `-smp` already bounds vCPU threads |
 | `memory.max` | `JOB_OBJECT_LIMIT_JOB_MEMORY` set to guest RAM plus a fixed QEMU overhead (value to be measured in phase 0) |
-| pids | `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` = 1: QEMU never needs a child process |
+| pids | `JOB_OBJECT_LIMIT_ACTIVE_PROCESS` = 1: QEMU never needs a child process (true for the current argv; it rules out `guestfwd=...-cmd:` and `smb=`, which spawn processes) |
 | kill all of a dock | `TerminateJobObject`, then the pid plus creation-stamp check from `proc_windows.go` |
 | disk MB/s, IOPS | QEMU `-drive ...,throttling.bps-total=,throttling.iops-total=` (QEMU block throttling) |
 | net MB/s | `JobObjectNetRateControlInformation` on the job **(unverified that it applies to slirp's host sockets)**; otherwise not enforced in phase 1 and reported as such |
@@ -355,6 +411,10 @@ Windows design:
   never appears in argv.
 - The host reaches the agent through the dock's `hostfwd` on `127.0.0.1:<port>`. Any local process on
   the Windows machine can connect to that port; the token is the only control. Section 5 lists this.
+  The reverse also holds: if QEMU exits (crash, kill) and another local process binds the freed
+  port, the docklet's next call sends the dock's token to that process and trusts its answers.
+  Before each new connection the docklet checks that the listener's owning pid
+  (`GetExtendedTcpTable`) is the dock's QEMU with its creation stamp.
 - Later option: a virtio-serial port backed by a named pipe with a DACL for the service account only,
   which removes the loopback listener. This needs a guest agent change and is not in phase 1.
 - Pool rekey (`rekeyFastAgent`) and `terminal.open`/`tunnel.open` work unchanged once the address is
@@ -376,21 +436,48 @@ Windows design:
 - **State dir** under `%ProgramData%\docklet` with a protected DACL: the service SID, SYSTEM and
   Administrators only (same approach as `secureDir`, with the service SID instead of the current
   user).
-- **Credentials with DPAPI.** The fleet credential, the local API token and the S3 credentials are
-  stored encrypted with `CryptProtectData`, entropy bound to the host id, in the service account's
-  scope, inside the protected state dir. `fleetauth.Credential` gets a storage interface with a plain
-  file implementation (Linux, unchanged) and a DPAPI implementation (Windows). DPAPI protects against
-  offline disk reads and other non-admin users; it does not protect against a local administrator,
-  who can run code as the service. That limit is stated in the operator docs.
+- **Credentials with DPAPI.** The fleet credential and the local API token are stored encrypted with
+  `CryptProtectData` in the service account's scope, inside the protected state dir. There are no S3
+  credentials to protect on a fleet host: in fleet mode `openStore` (`cmd/docklet/main.go`) sends
+  generations through the control plane's object proxy with the fleet credential and ignores
+  `SNAPSHOT_STORE_*`. `fleetauth.Credential` gets a storage interface with a plain file
+  implementation (Linux, unchanged) and a DPAPI implementation (Windows). Limits to state plainly:
+  - DPAPI protects against offline disk reads and other non-admin users. It does not protect against
+    a local administrator, or against anything running as the service account, which can call
+    `CryptUnprotectData` itself. QEMU processes run as that account today (section 5.1), so a QEMU
+    escape gets the credential despite DPAPI. DPAPI only helps against threat 1 once QEMU runs under
+    a different, restricted identity.
+  - Entropy "bound to the host id" adds nothing against those callers, since the host id sits in the
+    same state dir; drop it or describe it as a mix-up guard only.
+  - A virtual account (`NT SERVICE\docklet`) has no password, so its DPAPI master key can only be
+    protected by a machine secret, not a user secret; anyone who can read that secret (SYSTEM,
+    administrators) can decrypt offline. How the key is protected, whether user-scope DPAPI works for
+    a virtual account without a loaded profile, and whether it survives profile resets are
+    **(unverified)** (phase 0).
+    Losing the master key means re-enrolling the host (`resetCredential` exists on the control plane).
 - **Enrollment** is a one-shot `docklet enroll --fleet-url ... --token-file ...` run by an
   administrator. It registers, stores the per-host credential, and does not persist the shared
-  enrollment token. The service never needs the shared token in its environment, unlike the Linux
-  default.
+  enrollment token. That matches Linux, where bootstrap writes only the per-host credential
+  (`DEPLOY.md`); the difference is that the Windows service never reads `DOCKLET_FLEET_TOKEN` at all,
+  where the Linux docklet still accepts it from its environment (`fleetauth.Open`).
 - **Local API** stays on `127.0.0.1:8081` behind its bearer token, as on Linux
   (`isLoopbackBind` warning in `cmd/docklet/main.go`). A named pipe is an option for later.
+- **QMP channel.** QEMU's Windows `pipe:` chardev creates its named pipe with `CreateNamedPipe(...,
+  NULL)` (`chardev/char-pipe.c`): the default DACL (full control for SYSTEM, Administrators and the
+  owner, read for Everyone and Anonymous) and no `FILE_FLAG_FIRST_PIPE_INSTANCE`. Read access does not
+  let another user issue QMP commands, but the name can be squatted: a local process that creates
+  `\\.\pipe\<name>` first, with a permissive DACL, either makes QEMU fail to start (denial of
+  service) or ends up as an instance the docklet may connect to, and then answers QMP as if it were
+  QEMU (for example, reporting `stop` done while the guest keeps writing during a capture). The
+  docklet must check `GetNamedPipeServerProcessId` against the dock's QEMU pid and creation stamp
+  after connecting, or use an AF_UNIX socket in the protected state dir if the Windows build
+  supports it **(unverified)**.
 - **Updates and restarts**: docks survive a service restart (section 3.3). `Rescan` enumerates the
   per-dock state dirs and reopens each dock's job and QMP pipe instead of reading
-  `<jailBase>/firecracker`.
+  `<jailBase>/firecracker`. Updating QEMU itself is different: a running dock keeps the old binary
+  until it is stopped and resumed, so a QEMU security fix needs a drain (stop/resume each dock, or
+  refuse new work and wait). Readiness refuses a QEMU version below a minimum the docklet release
+  pins, and the docklet reports its QEMU version so the control plane can see which hosts lag.
 - **Readiness** (`internal/ready`), Windows branch: WHPX usable (the `CheckAccel` probe), QEMU and
   qemu-img present with a supported version, the WFP filters installed, enough memory after the
   reserve, the state dir DACL correct, Hyper-V features consistent. Failing reasons produce 503s on
@@ -407,7 +494,7 @@ What a Windows host registers (`registerFeatures` in `cmd/docklet/main.go`, feat
 | provision, pause, destroy, stop/resume (disk-first) | yes | Pause via QMP `stop`/`cont` |
 | `snapshot.create` `Full` with `sha256`, `dataBytes`, `baseImage` | yes | Wire format unchanged |
 | delta generations, `baseFingerprints` | no (reports `[]`) | Phase 5 |
-| `verified-imports` | yes, from phase 3 | Same `MaterializeDiskWithin` checks; advertise only once the import e2e passes on Windows |
+| `verified-imports` | yes, from phase 3 | Same `MaterializeDiskWithin` checks; advertise only once the import e2e passes on Windows. `registerFeatures(egressProxy, microVM)` adds it only for `microvm` today, so it needs a change |
 | `egress-on-resume` | yes, from phase 4 | Only with the per-dock proxy plus WFP filters in place, and only when readiness confirms them |
 | exec, `terminal.open`, `tunnel.open`, SSH (via control plane) | yes | Through the agent forward |
 | memory snapshots (`Memory: true`) | no | Refuse with a stable code |
@@ -427,10 +514,23 @@ Placement rules the control plane must enforce:
   new feature names that Linux hosts start advertising (`generation-files`, `memory-snapshots`) so
   absence means "no". The second is more general but every older Linux host would look incapable
   until upgraded (Q8).
-- Tenancy: a `qemu` host is only eligible for docks owned by the account that enrolled it. The
-  `hosts` table has no owner column today (`apps/backend/src/database/schema/hosts.ts`), so until one
-  exists the control plane should refuse `qemu` registrations unless an instance setting allows them,
-  which in practice means self-hosted single-tenant control planes only.
+- Tenancy: a `qemu` host is only eligible for docks of one organization. Today nothing records who
+  a host belongs to: the `hosts` table has no owner column
+  (`apps/backend/src/database/schema/hosts.ts`), enrollment uses the single shared `FLEET_TOKEN`
+  (`enrollHost` in `hosts.service.ts` creates the row with only an id and a runtime), and
+  `placeForDock` takes no organization. So "the account that enrolled it" does not exist yet, and
+  "self-hosted" does not mean single-tenant: a self-hosted control plane can hold several
+  organizations, and fresh provisions from any of them can place on any runtime (section 2.3).
+  Two workable gates, in order of strength:
+  1. Owner binding (recommended before anything beyond a lab): an org-scoped enrollment token issued
+     from the dashboard by an org admin, a `hosts.organization_id` set at enrollment and immutable
+     after, and a placement filter so a host with an owner takes only that org's docks (restores,
+     fresh provisions, imports and branch loads alike). Hosts without an owner stay shared, as today.
+  2. Interim instance gate: refuse `qemu` registrations unless an instance setting allows them, and
+     while it is on, refuse to create a second organization (or refuse the setting when more than
+     one exists). A setting alone, without that check, does not keep other tenants off the host.
+  Either gate ships in the same control plane release that adds `qemu` to `RUNTIMES`, default off,
+  not later.
 
 ## 5. Security model and threats
 
@@ -439,7 +539,7 @@ Placement rules the control plane must enforce:
 | Layer | Linux host (`microvm`) | Windows host (`qemu`) |
 |---|---|---|
 | Hypervisor | KVM | Hyper-V via WHPX (the hypervisor is strong; the VMM is not Hyper-V's) |
-| VMM | Firecracker: small Rust device model, few virtio devices | QEMU: C, `q35`, virtio-pci, fw_cfg, slirp; with `kernel-irqchip=off` the interrupt controller is emulated in QEMU user space too |
+| VMM | Firecracker: small Rust device model, virtio-mmio block/net/vsock, serial, i8042 and little else; no PCI, no firmware | QEMU: C, a full `q35` PC (PCIe root, the ICH9 LPC bridge and its on-board controllers, legacy timers and RTC, ACPI) plus virtio-pci net/blk/rng, fw_cfg and slirp; with `kernel-irqchip=off` the interrupt controllers (PIC, IOAPIC, LAPIC) are emulated in QEMU user space too. `-nodefaults` removes the default display, NIC and drives, not the chipset |
 | VMM confinement | jailer: chroot, seccomp, per-dock uid (`internal/uid`), cgroup, network namespace | none today; Job Object for resources only; no seccomp equivalent; same service account for all docks |
 | Network enforcement | host netfilter, outside the VMM | inside the VMM (slirp `restrict`), plus WFP by process |
 | Host owner | operator-controlled server | possibly a personal workstation with other users and services |
@@ -455,6 +555,13 @@ Hardening to evaluate (phase 0 spikes, each with a go/no-go):
   **(unverified)**.
 - Keep the device set minimal: `-nodefaults` already, no USB, no display, no audio; pin the QEMU
   version and track its security advisories, and refuse to start with an unpinned version.
+- Shrink the chipset: try `-machine microvm` (virtio-mmio, no PCI, optional ACPI) under WHPX, or
+  failing that turn off the `q35` on-board devices the guest does not need (SATA, SMBus, HPET, PIT
+  where the guest kernel copes). Both are **(unverified with WHPX)**; record the device tree
+  (`info qtree` over QMP) of the final argv in this note so the outside review scopes it.
+- An argv allow-list test: the backend's `BuildArgv` output must contain no `-virtfs`, `-fsdev`, 9p
+  device, `smb=`, `-chardev` other than the QMP and serial ones, extra `-drive`, USB or audio
+  device. Shared folders between the Windows machine and a guest are not offered on hosts at all.
 - Turn on Windows process mitigations for QEMU (CFG, ACG where QEMU tolerates it, no child processes
   via the job) **(unverified compatibility)**.
 
@@ -462,8 +569,9 @@ Hardening to evaluate (phase 0 spikes, each with a go/no-go):
 
 1. Guest to host escape through the QEMU device model or slirp. Impact: all docks on the host, the
    fleet credential, the machine. Mitigations: section 5.1 hardening, single tenant only.
-2. Guest reaching host loopback services through slirp (10.0.2.2). Mitigation: `restrict=on` always,
-   egress only through `guestfwd` to the proxy, WFP block on QEMU connects.
+2. Guest reaching host loopback services through slirp (10.0.2.2, or slirp's IPv6 host address,
+   which maps to `::1`). Mitigation: `restrict=on` and `ipv6=off` always, egress only through the
+   chosen per-dock transport (section 3.2), WFP block on QEMU connects.
 3. Local users on the Windows machine reaching agent forwards or the docklet API on loopback.
    Mitigation: per-dock agent tokens and the API bearer token stored under the protected DACL; named
    pipes as a later option.
@@ -480,10 +588,24 @@ Hardening to evaluate (phase 0 spikes, each with a go/no-go):
 6. Multi-tenant risk. If another account's docks ran on a workstation, the machine owner (and any
    malware on it) could read their disks, memory and tokens. Hosted, shared use is not acceptable for
    this design.
-7. Denial of service of the workstation: job limits, the memory reserve, and a host-side cap on
-   concurrent docks (`MaxDocks`).
-8. Supply chain: QEMU for Windows is a third-party binary build. Pin the version and its sha256,
-   verify at start (readiness), and document the source.
+7. Denial of service of the workstation: job limits, the memory reserve, and a cap on concurrent
+   docks. `MaxDocks` today is derived from capacity by the docklet (`maxDocks` in
+   `internal/agent/agent.go`), not set by the operator, so a workstation cap is a new setting (Q6).
+   Also cap the guest-written files the docklet keeps: the serial log (`-serial file:`) grows without
+   bound from guest output, and the per-dock state dir sits on the machine's own disk.
+8. Supply chain and patching: QEMU for Windows is a third-party binary build. Pin the version and
+   its sha256, verify at start (readiness), and document the source. QEMU publishes security fixes
+   often; the docklet release that pins a version owns the update, and running docks keep the old
+   binary until stop/resume (section 3.6), so a fix needs a drain.
+9. Slirp restricted-mode bypass over IPv6 (section 3.1): a guest reaches arbitrary IPv6 hosts, or the
+   machine's `::1`, on the `guestfwd` port. Mitigation: `ipv6=off`, an argv test, and WFP blocking
+   QEMU's non-loopback connects.
+10. Cross-dock policy: one dock's QEMU using another dock's proxy listener or agent forward
+    (section 3.2 step 5, section 3.5). Mitigation: peer-pid checks on every loopback channel.
+11. QMP named pipe squatting by another local process (section 3.6). Mitigation: verify the pipe
+    server pid, or a socket in the protected state dir.
+12. Shared folders: QEMU can expose host directories to the guest (`-virtfs`/9p, `smb=`). Never used;
+    the argv allow-list test enforces it.
 
 ### 5.3 Recommendation
 
@@ -500,11 +622,13 @@ in `dock` CLI output.
 - The QEMU process confinement actually achieved (restricted token or AppContainer, job, mitigations),
   with an attempt to reach another dock's files and the credential from a QEMU-context shell.
 - Egress: proof that a confined guest cannot reach anything but allowlisted hosts, including through
-  DNS, IPv6, 10.0.2.2/10.0.2.3, `guestfwd` targets, and the proxy's private-range checks; WFP filter
+  DNS, IPv6 (including spoofed IPv6 source addresses), 10.0.2.2/10.0.2.3, `guestfwd` targets,
+  another dock's proxy listener, and the proxy's private-range checks; WFP filter
   persistence across reboot and service crash; behaviour when the proxy dies (`serveEgress` exits the
   process on Linux).
 - Service account rights, state dir DACLs, DPAPI use, enrollment token handling, local API and agent
-  ports from another local user's session.
+  ports and the QMP channel from another local user's session (including squatting a freed port or
+  a pipe name).
 - Restart and adoption: no window in which a dock runs unconfined or unlimited after a service restart
   or a crash.
 - Fleet trust: what a malicious Windows host can do to the control plane and to other hosts through
@@ -520,7 +644,13 @@ Acceptance: a written yes/no with evidence for each **(unverified)** item above,
 filters on QEMU loopback connects; `restrict=on` with `hostfwd`/`guestfwd` and slirp DNS on the
 Windows QEMU build; QMP `stop` flush and `blockdev-snapshot-sync` on Windows; Job Object CPU, memory,
 network-rate behaviour on a QEMU process; WHPX from a virtual service account and from an
-AppContainer; QEMU memory overhead per dock size.
+AppContainer; QEMU memory overhead per dock size. Added in review: a live repro of the IPv6
+restricted-mode bypass with and without `ipv6=off`; the egress transport (option D with
+`-netdev stream` on the Windows build, or another design that carries concurrent CONNECTs, with a
+test that runs 20 parallel CONNECTs through it); DPAPI from the virtual account; peer-pid lookup for
+loopback TCP and named pipes; `-machine microvm` or a reduced `q35` under WHPX. Phase 0 ends with a
+go/no-go per item, and a no-go on the egress transport or on QEMU confinement stops phases 3 and 4
+until the owner re-decides Q3.
 
 **Phase 1: neutral types and seams, Linux unchanged.**
 Add `internal/vmm` `BootSpec`/`Handle`, convert `fc.SDKDriver` and `container.Driver` at their
@@ -534,7 +664,8 @@ self-host e2e (`scripts/e2e-selfhost.sh`) passes; `GOOS=windows go build ./inter
 Move argv, accelerator, qemu-img and process code; `internal/local` uses it.
 Acceptance: no behaviour change in the `dock` CLI; the local engine tests and the local e2e
 (`internal/local/e2e_test.go`) pass; `BuildArgv` gains QMP, throttling, `restrict=on` and
-`guestfwd` options covered by argv tests.
+the chosen egress-transport options covered by argv tests, including that `ipv6=off` is always set
+on hosts and the device and shared-folder allow-list (section 5.1).
 
 **Phase 3: `qemuvm` backend, Windows service, readiness, whole-image generations.**
 Windows build of `cmd/docklet`, `docklet service install|uninstall`, `docklet enroll`, DPAPI
@@ -546,13 +677,16 @@ Acceptance: on a Windows CI or lab host, provision, exec, terminal, tunnel, stop
 resume, destroy all pass through a real control plane; a generation captured on Windows restores on
 another Windows host; a dock exported from Linux imports onto Windows and the reverse, with `sha256`
 verified and `dataBytes` equal to what the Linux path records for the same disk; a service restart
-adopts running docks; `verified-imports` advertised and the import size cap tested.
+adopts running docks; `verified-imports` advertised and the import size cap tested; the agent and
+QMP channels refuse a peer that is not the dock's QEMU (tested by squatting the port and the pipe
+name); a guest with network off cannot reach host loopback over IPv4 or IPv6.
 
 **Phase 4: egress on Windows.**
 Per-dock proxy listeners, `guestfwd`, WFP provider and filters, readiness check for them,
 `egress-on-resume` advertised.
 Acceptance: tests that a confined dock reaches only allowlisted hosts and nothing on host loopback,
-private ranges, link-local or IPv6; filters survive service restart and reboot; proxy death stops the
+private ranges, link-local or IPv6; parallel CONNECTs from one dock all work; a confined dock cannot
+use an unconfined dock's listener; filters survive service restart and reboot; proxy death stops the
 service; confinement holds on `snapshot.load`.
 
 **Phase 5: delta generations on Windows (optional, after Q5).**
@@ -568,18 +702,20 @@ docs (`DEPLOY.md` Windows section) published; only then is #37 closed and Window
 available as single-tenant, self-host.
 
 Control plane work (usedock/dock) runs alongside: accept the new runtime (phase 3), keep unsupported
-operations away from `qemu` hosts (phase 3), the tenancy gate (before any hosted exposure), and an
-optional re-home flow (Q7).
+operations away from `qemu` hosts (phase 3), the tenancy gate in the same release that accepts the
+runtime, default off (section 4), and an optional re-home flow (Q7).
 
 ## 7. Open questions for the owner
 
 - Q1. One orchestrator with seams (recommended) or a separate Windows orchestrator behind the same
   routes?
 - Q2. Names: runtime `qemu` (or `whpx`), and the fixed CPU family string for Windows hosts.
-- Q3. Networking: confirm slirp with `restrict=on` for the first release, or invest in TAP plus
-  WinNAT, or a Hyper-V (HCS) backend instead of QEMU?
-- Q4. Is HTTPS-CONNECT-plus-DNS egress acceptable for unconfined docks on Windows, or must Windows
-  match Linux's arbitrary TCP/UDP egress before release?
+- Q3. Networking: slirp (`restrict=on`, `ipv6=off`) for the agent channel, plus which egress
+  transport, given that a chardev `guestfwd` cannot carry concurrent proxy connections: a user-space
+  stack in the docklet over `-netdev stream` (option D, also moves enforcement out of QEMU), TAP plus
+  WinNAT (B), or a Hyper-V (HCS) backend instead of QEMU (C)?
+- Q4. Is HTTPS-CONNECT-only egress (no guest DNS) acceptable for unconfined docks on Windows, or must
+  Windows match Linux's arbitrary TCP/UDP egress before release? Option D can close the gap.
 - Q5. Working disk: qcow2 overlays (recommended, reuses proven local code, whole-image captures) or
   raw ext4 like Linux (all of `internal/disk` including deltas applies, but provisioning is a full
   sparse copy without reflink on NTFS)?
@@ -592,3 +728,11 @@ optional re-home flow (Q7).
   per phase?
 - Q10. Minimum Windows versions and editions (Windows 10 22H2, Windows 11, Server 2022/2025), and
   whether Windows Server hosts should be allowed in hosted fleets at all after the review.
+- Q11. Tenancy gate: owner binding (org-scoped enrollment token, `hosts.organization_id`, placement
+  filter) before the first release, or the interim instance setting that also refuses a second
+  organization (section 4)?
+- Q12. QEMU distribution: does the docklet installer ship a pinned QEMU build (and who rebuilds it
+  for advisories), or does the operator install it and readiness only enforce a minimum version?
+- Q13. Are DPAPI's limits acceptable as stated (no protection from QEMU while it runs as the service
+  account), or is per-dock QEMU identity (restricted token or AppContainer) a release requirement
+  rather than a phase 0 "evaluate"?
