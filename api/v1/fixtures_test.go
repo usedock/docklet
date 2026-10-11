@@ -31,6 +31,8 @@ var fixtures = []fixture{
 	{"PauseRequest", "pause-request.json", func() any { return new(PauseRequest) }},
 	{"SnapshotCreateRequest", "snapshot-create-request.json", func() any { return new(SnapshotCreateRequest) }},
 	{"SnapshotCreateResponse", "snapshot-create-response.json", func() any { return new(SnapshotCreateResponse) }},
+	{"SnapshotCreateRequest", "snapshot-create-request-full.json", func() any { return new(SnapshotCreateRequest) }},
+	{"SnapshotCreateResponse", "snapshot-create-response-full.json", func() any { return new(SnapshotCreateResponse) }},
 	{"SnapshotLoadRequest", "snapshot-load-request.json", func() any { return new(SnapshotLoadRequest) }},
 	{"SnapshotLoadResponse", "snapshot-load-response.json", func() any { return new(SnapshotLoadResponse) }},
 	{"DestroyRequest", "destroy-request.json", func() any { return new(DestroyRequest) }},

@@ -1,6 +1,7 @@
 package disk
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -155,4 +156,93 @@ func BaseLabel(rootfs string) string {
 		return ""
 	}
 	return fp
+}
+
+// sourceFile records, inside bases/<fp>/, the Dockyard image the base came
+// from. Host-built bases have none.
+const sourceFile = "source.json"
+
+type baseSource struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
+// RecordBaseSource notes that the held base fp is the Dockyard image name, so
+// a dock derived from it can report which image it runs.
+func RecordBaseSource(pointer, fp, name, version string) error {
+	if !ValidFingerprint(fp) {
+		return fmt.Errorf("record base source: invalid fingerprint %q", fp)
+	}
+	raw, err := json.Marshal(baseSource{Name: name, Version: version})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(filepath.Dir(BasePath(pointer, fp)), sourceFile)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// BaseSourceName names the Dockyard image the held base fp was pulled as, or ""
+// for a host-built base. Bases pulled before sources were recorded are matched
+// through the images/<name>/image.json records instead.
+func BaseSourceName(pointer, fp string) string {
+	if !ValidFingerprint(fp) {
+		return ""
+	}
+	if raw, err := os.ReadFile(filepath.Join(filepath.Dir(BasePath(pointer, fp)), sourceFile)); err == nil {
+		var src baseSource
+		if json.Unmarshal(raw, &src) == nil && src.Name != "" {
+			return src.Name
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Join(filepath.Dir(pointer), "images"))
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(pointer), "images", e.Name(), "image.json"))
+		if err != nil {
+			continue
+		}
+		var rec struct {
+			Name        string `json:"name"`
+			Fingerprint string `json:"fingerprint"`
+		}
+		if json.Unmarshal(raw, &rec) == nil && rec.Fingerprint == fp && rec.Name != "" {
+			return rec.Name
+		}
+	}
+	return ""
+}
+
+// ImageFingerprint returns the held base the Dockyard image name resolves to
+// on this host: its own pointer when pulled under that name, else the current
+// base when that is the image. Empty when unknown.
+func ImageFingerprint(pointer, name string) string {
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return ""
+	}
+	if path, err := filepath.EvalSymlinks(filepath.Join(filepath.Dir(pointer), "images", name, baseFile)); err == nil {
+		if fp, ok := addressedFingerprint(path); ok {
+			return fp
+		}
+	}
+	if _, fp, err := CurrentBase(pointer); err == nil && fp != "" && BaseSourceName(pointer, fp) == name {
+		return fp
+	}
+	return ""
+}
+
+// DockImage names the Dockyard image a dock rootfs derives from: through its
+// base label while the host holds it, else the current base. Empty for a
+// host-built base or an unknown one.
+func DockImage(pointer, rootfs string) string {
+	fp := BaseLabel(rootfs)
+	if fp == "" {
+		var err error
+		if _, fp, err = CurrentBase(pointer); err != nil {
+			return ""
+		}
+	}
+	return BaseSourceName(pointer, fp)
 }

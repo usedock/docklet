@@ -485,11 +485,20 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		defer unlock()
-		id, size, family, err := s.deps.Host.SnapshotCreate(lifecycleCtx(r), req.DockID, req.ParentID, req.Kind, req.ResumeAfter, req.Memory)
+		create := s.deps.Host.SnapshotCreate
+		if req.Full {
+			create = s.deps.Host.SnapshotCreateFull
+		}
+		id, size, family, err := create(lifecycleCtx(r), req.DockID, req.ParentID, req.Kind, req.ResumeAfter, req.Memory)
 		if err != nil {
 			return nil, err
 		}
-		return apiv1.SnapshotCreateResponse{SnapshotID: id, SizeBytes: size, CPUFamily: family, BaseFingerprint: s.deps.Host.GenerationBase(lifecycleCtx(r), id)}, nil
+		resp := apiv1.SnapshotCreateResponse{SnapshotID: id, SizeBytes: size, CPUFamily: family, BaseFingerprint: s.deps.Host.GenerationBase(lifecycleCtx(r), id)}
+		if req.Full {
+			resp.SHA256 = s.deps.Host.GenerationSHA256(lifecycleCtx(r), id)
+			resp.BaseImage = s.deps.Host.GenerationImage(lifecycleCtx(r), id)
+		}
+		return resp, nil
 	})
 }
 

@@ -55,6 +55,15 @@ type Manifest struct {
 	BaseFingerprint string `json:"baseFingerprint,omitempty"`
 	// ImageSize is the logical size of the rootfs a delta reconstructs.
 	ImageSize int64 `json:"imageSize,omitempty"`
+	// SHA256 and SizeBytes describe the whole-image object (rootfs.ext4.zst):
+	// the hex digest and byte length of the stored (compressed) bytes. Set by
+	// full snapshots and control-plane imports; restore verifies them when
+	// present and refuses a mismatch.
+	SHA256    string `json:"sha256,omitempty"`
+	SizeBytes int64  `json:"sizeBytes,omitempty"`
+	// Image names the Dockyard image the disk derives from; empty when the
+	// base was built on the host.
+	Image string `json:"image,omitempty"`
 }
 
 // Key prefixes inside the bucket.

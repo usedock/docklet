@@ -29,6 +29,7 @@ import (
 	"github.com/usedock/docklet/internal/net"
 	"github.com/usedock/docklet/internal/snapmgr"
 	"github.com/usedock/docklet/internal/stats"
+	"github.com/usedock/docklet/internal/store"
 	"github.com/usedock/docklet/internal/uid"
 )
 
@@ -718,6 +719,20 @@ func (h *Host) Pause(ctx context.Context, dockID string) error {
 // is terminal (archived docks free host CPU/RAM, resume fresh-boots).
 // The gvisor runtime captures disk-only generations via export (see 4.1).
 func (h *Host) SnapshotCreate(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter, memory bool) (snapshotID string, sizeBytes int64, cpuFamily string, err error) {
+	return h.snapshotCreate(ctx, dockID, parentID, kind, resumeAfter, memory, false)
+}
+
+// SnapshotCreateFull is SnapshotCreate writing the whole rootfs.ext4.zst (never a delta) with its
+// sha256 and size in the manifest, so the generation can leave this host (dock pull).
+// Container docks keep only their workspace and cannot be captured whole.
+func (h *Host) SnapshotCreateFull(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter, memory bool) (snapshotID string, sizeBytes int64, cpuFamily string, err error) {
+	if h.diskOnly() {
+		return "", 0, "", errors.New("full snapshots need a microvm host")
+	}
+	return h.snapshotCreate(ctx, dockID, parentID, kind, resumeAfter, memory, true)
+}
+
+func (h *Host) snapshotCreate(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter, memory, whole bool) (snapshotID string, sizeBytes int64, cpuFamily string, err error) {
 	parent := ""
 	if parentID != nil {
 		parent = *parentID
@@ -734,7 +749,7 @@ func (h *Host) SnapshotCreate(ctx context.Context, dockID string, parentID *stri
 		// full capture degrades to a disk-only freeze instead of failing
 		// the dock. Anything else still fails fast.
 		if kind == apiv1.SnapshotFull && errors.Is(err, fc.ErrNoMicroVM) {
-			return h.freezeOnly(ctx, dockID, parentID, snapshotID)
+			return h.freezeOnly(ctx, dockID, parentID, snapshotID, whole)
 		}
 		return "", 0, "", err
 	}
@@ -753,7 +768,7 @@ func (h *Host) SnapshotCreate(ctx context.Context, dockID string, parentID *stri
 			return "", 0, "", err
 		}
 	}
-	manifest, err := h.cfg.Snaps.FreezeRootfs(ctx, dockID, filepath.Join(h.jailRoot(dockID), fc.RootfsName), snapshotID, string(kind), h.cfg.Family, parentID)
+	manifest, err := h.freezeRootfs(ctx, whole, dockID, filepath.Join(h.jailRoot(dockID), fc.RootfsName), snapshotID, string(kind), parentID)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -907,12 +922,12 @@ func appendTarEntry(tarPath, name string, content []byte) error {
 	return os.Rename(rewritten, tarPath)
 }
 
-func (h *Host) freezeOnly(ctx context.Context, dockID string, parentID *string, snapshotID string) (string, int64, string, error) {
+func (h *Host) freezeOnly(ctx context.Context, dockID string, parentID *string, snapshotID string, whole bool) (string, int64, string, error) {
 	rootfs := filepath.Join(h.jailRoot(dockID), fc.RootfsName)
 	if _, err := os.Stat(rootfs); err != nil {
 		return "", 0, "", err
 	}
-	manifest, err := h.cfg.Snaps.FreezeRootfs(ctx, dockID, rootfs, snapshotID, string(apiv1.SnapshotFull), h.cfg.Family, parentID)
+	manifest, err := h.freezeRootfs(ctx, whole, dockID, rootfs, snapshotID, string(apiv1.SnapshotFull), parentID)
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -1401,4 +1416,30 @@ func (h *Host) diskUsed(dockID string, v *vm) int64 {
 	v.disk = diskMark{bytes: used, at: time.Now()}
 	h.mu.Unlock()
 	return used
+}
+
+// freezeRootfs captures the dock rootfs as a delta against its base, or as a
+// whole checksummed image when whole is set.
+func (h *Host) freezeRootfs(ctx context.Context, whole bool, dockID, rootfs, snapshotID, kind string, parentID *string) (store.Manifest, error) {
+	if whole {
+		return h.cfg.Snaps.FreezeRootfsFull(ctx, dockID, rootfs, snapshotID, kind, h.cfg.Family, parentID)
+	}
+	return h.cfg.Snaps.FreezeRootfs(ctx, dockID, rootfs, snapshotID, kind, h.cfg.Family, parentID)
+}
+
+// GenerationImage names the Dockyard image a microvm generation's disk derives from, "" for a
+// host-built base.
+func (h *Host) GenerationImage(ctx context.Context, snapshotID string) string {
+	if h.diskOnly() {
+		return ""
+	}
+	return h.cfg.Snaps.GenerationImage(ctx, snapshotID)
+}
+
+// GenerationSHA256 is the sha256 of a whole-image generation's stored object, "" for deltas.
+func (h *Host) GenerationSHA256(ctx context.Context, snapshotID string) string {
+	if h.diskOnly() {
+		return ""
+	}
+	return h.cfg.Snaps.GenerationSHA256(ctx, snapshotID)
 }

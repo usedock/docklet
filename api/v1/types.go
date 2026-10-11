@@ -80,12 +80,15 @@ const (
 // and have proven fatal to the snapshotted VM on this stack, so the default
 // flows leave them off.
 type SnapshotCreateRequest struct {
-	DockID           string       `json:"dockId"`
-	ParentID         *string      `json:"parentId"`
-	Kind             SnapshotKind `json:"kind"`
-	ResumeAfter      bool         `json:"resumeAfter"`
-	Memory           bool         `json:"memory"`
-	IdempotencyToken string       `json:"idempotencyToken"`
+	DockID      string       `json:"dockId"`
+	ParentID    *string      `json:"parentId"`
+	Kind        SnapshotKind `json:"kind"`
+	ResumeAfter bool         `json:"resumeAfter"`
+	Memory      bool         `json:"memory"`
+	// Full writes the whole rootfs.ext4.zst (never a delta) and records its sha256 and size, so the
+	// generation can move to another host or context. Microvm hosts only.
+	Full             bool   `json:"full,omitempty"`
+	IdempotencyToken string `json:"idempotencyToken"`
 }
 
 // SnapshotCreateResponse identifies the stored generation.
@@ -96,6 +99,11 @@ type SnapshotCreateResponse struct {
 	// BaseFingerprint names the base image a microvm delta generation restores
 	// onto; empty for gvisor and whole-image generations.
 	BaseFingerprint string `json:"baseFingerprint,omitempty"`
+	// SHA256 is the hex digest of the stored rootfs.ext4.zst object; set for Full requests only.
+	SHA256 string `json:"sha256,omitempty"`
+	// BaseImage names the Dockyard image the dock's base came from; empty when the base was built
+	// on the host (or the request was not Full).
+	BaseImage string `json:"baseImage,omitempty"`
 }
 
 // SnapshotLoadRequest restores a generation onto a fresh microVM at the

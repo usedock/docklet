@@ -95,6 +95,8 @@ sudo bash scripts/bootstrap-host.sh \
 
 Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The script is re-runnable. See [DEPLOY.md](DEPLOY.md) for flags, base images and troubleshooting.
 
+A microvm host boots from the signed Dockyard `ubuntu-24.04` (pulled at bootstrap; `--build-base` or an unreachable Dockyard falls back to building it on the host), so a dock's whole disk can move between hosts and contexts. A snapshot with `full: true` writes a checksummed `rootfs.ext4.zst`, and restoring one verifies it. See [DEPLOY.md](DEPLOY.md#full-snapshots-and-checksums-dock-push--dock-pull).
+
 ## dock CLI reference
 
 `cmd/dock` runs docks locally (the built-in `local` context, no account) or talks to the Dock control plane `/v1` API (the `cloud` context and added URLs; not this daemon). It builds on Linux, macOS and Windows; released binaries come from the installer above.

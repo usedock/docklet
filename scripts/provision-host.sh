@@ -153,4 +153,17 @@ if [ -n "${DOCKLET_IMAGES:-}" ]; then
   DOCKLET_IMAGE_DIR="${DOCKLET_IMAGE_DIR:-/var/lib/docklet/images}" "${DOCKLET_BIN}" image pull ${DOCKLET_IMAGES}
 fi
 
+# Default base (microvm hosts): the signed Dockyard ubuntu-24.04, or build-image.sh when Dockyard
+# is unreachable (DOCKLET_BUILD_BASE=1 forces the build). Skipped when no docklet binary is installed
+# yet; bootstrap-host.sh installs the binary and runs the same step afterwards.
+if [ "${DOCKLET_RUNTIME:-microvm}" != "gvisor" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  BASE_BIN="${DOCKLET_BIN:-$(command -v docklet || echo /usr/local/bin/docklet)}"
+  if [ -z "${DOCKLET_BASE_IMAGE:-}" ] && [ -f "${SCRIPT_DIR}/ensure-base.sh" ] && { [ -x "${BASE_BIN}" ] || [ "${DOCKLET_BUILD_BASE:-0}" = "1" ]; }; then
+    OUT_DIR="${DOCKLET_IMAGE_DIR:-/var/lib/docklet/images}" DOCKLET_BIN="${BASE_BIN}" bash "${SCRIPT_DIR}/ensure-base.sh"
+  else
+    echo "provision-host: no docklet binary yet, leaving the base image to bootstrap-host.sh" >&2
+  fi
+fi
+
 echo "provision-host: done (firecracker ${FC_VERSION})"
