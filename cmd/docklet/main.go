@@ -282,7 +282,12 @@ func main() {
 	// The fleet agent is the only outbound client: it registers this host,
 	// heartbeats inventory, and relays queued commands into the loopback API.
 	if fleetURL := os.Getenv("DOCKLET_FLEET_URL"); fleetURL != "" {
+		var features []string
+		if egressPort > 0 {
+			features = apiv1.DockletFeatures
+		}
 		fleet := agent.Config{
+			Features:         features,
 			FleetURL:         fleetURL,
 			Token:            os.Getenv("DOCKLET_FLEET_TOKEN"),
 			Auth:             fleetAuth,

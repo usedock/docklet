@@ -101,6 +101,8 @@ type Config struct {
 	LocalToken string
 	Client     Doer
 	Host       Orchestrator
+	// Features is advertised at registration; leave empty when the host cannot honour them (no egress proxy).
+	Features []string
 	// Bases lists the base image fingerprints this host holds, reported on each
 	// heartbeat so delta restores are placed only where their base exists; a nil
 	// func (gvisor hosts) or a nil result reports nothing.
@@ -251,7 +253,7 @@ func (c Config) registerBody() registerRequest {
 func (c Config) registerOnce(ctx context.Context, body registerRequest, out *registerResponse) error {
 	auth := c.credential()
 	body.AcceptsCredential = true
-	body.Features = apiv1.DockletFeatures
+	body.Features = c.Features
 	err := c.fleetAs(ctx, auth.Bearer(), http.MethodPost, "/v1/fleet/register", body, out, callTimeout)
 	var re *responseError
 	if errors.As(err, &re) && re.status == http.StatusBadRequest {

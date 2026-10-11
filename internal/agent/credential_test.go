@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	apiv1 "github.com/usedock/docklet/api/v1"
 	"github.com/usedock/docklet/internal/fleetauth"
 )
 
@@ -146,6 +147,7 @@ func TestRegisterAnnouncesCredentialSupportAndFallsBackForOlderBackends(t *testi
 		return jsonResponse(http.StatusOK, registerReply("")), nil
 	}
 	cfg := testAgent(t, transport, inventory{})
+	cfg.Features = apiv1.DockletFeatures
 
 	if _, err := cfg.register(context.Background()); err != nil {
 		t.Fatalf("register: %v", err)
@@ -254,5 +256,25 @@ func TestFailedClaimLeavesTheHostCredentialless(t *testing.T) {
 	}
 	if cfg.Auth.Held() != "" || len(transport.callsMatching("/v1/fleet/heartbeat")) != 1 {
 		t.Fatal("a refused claim must not retry the call or invent a credential")
+	}
+}
+
+func TestRegisterAdvertisesFeaturesOnlyWhenConfigured(t *testing.T) {
+	for name, features := range map[string][]string{"with proxy": apiv1.DockletFeatures, "without proxy": nil} {
+		t.Run(name, func(t *testing.T) {
+			transport := &fakeTransport{}
+			transport.handler = func(recorded) (*http.Response, error) {
+				return jsonResponse(http.StatusOK, registerReply("")), nil
+			}
+			cfg := testAgent(t, transport, inventory{})
+			cfg.Features = features
+			if _, err := cfg.register(context.Background()); err != nil {
+				t.Fatalf("register: %v", err)
+			}
+			body := string(transport.callsMatching("/v1/fleet/register")[0].body)
+			if got := strings.Contains(body, "egress-on-resume"); got != (features != nil) {
+				t.Fatalf("egress-on-resume advertised = %v, body %s", got, body)
+			}
+		})
 	}
 }
