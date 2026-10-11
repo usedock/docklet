@@ -31,8 +31,8 @@ Wait+Screen@120s /installed dock/
 Sleep 1500ms
 
 Type "clear" Enter
-Type "dock doctor | head -n 7" Enter
-Wait+Screen@60s /qemu/i
+Type "dock doctor" Enter
+Wait+Screen@60s /try: dock new/
 Sleep 2500ms
 
 Type "clear" Enter
