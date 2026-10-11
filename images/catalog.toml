@@ -4,8 +4,8 @@
 
 [[image]]
 name = "ubuntu-24.04"
-description = "Minimal Ubuntu 24.04: systemd, openssh-server, git, curl, python3"
-size_mib = 1536
+description = "Minimal Ubuntu 24.04: systemd, openssh-server, Docker, git, curl, python3"
+size_mib = 2048
 arch = ["amd64"]
 
 [[image]]
@@ -13,7 +13,7 @@ name = "node-22"
 description = "ubuntu-24.04 with Node.js 22"
 base = "ubuntu-24.04"
 setup = "setup-node-22.sh"
-size_mib = 2048
+size_mib = 2560
 arch = ["amd64"]
 
 [[image]]
@@ -21,7 +21,7 @@ name = "python-3.12"
 description = "ubuntu-24.04 with Python 3.12, pip and venv"
 base = "ubuntu-24.04"
 setup = "setup-python-3.12.sh"
-size_mib = 2048
+size_mib = 2560
 arch = ["amd64"]
 
 [[image]]
@@ -29,5 +29,5 @@ name = "browser"
 description = "ubuntu-24.04 with Chromium and its dependencies"
 base = "ubuntu-24.04"
 setup = "setup-browser.sh"
-size_mib = 3072
+size_mib = 3584
 arch = ["amd64"]

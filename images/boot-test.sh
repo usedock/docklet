@@ -15,7 +15,7 @@ trap '[ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 PREFIX="$OUT/$NAME-$ARCH"
 zstd -d -q "$PREFIX.rootfs.ext4.zst" -o "$TMP/disk.ext4"
-truncate -s 4G "$TMP/disk.ext4"
+truncate -s 6G "$TMP/disk.ext4"
 
 TOKEN="boot-test-token"
 CFG="$(printf '{"token":"%s","workspace":"/home/user/work","roots":["/home/user/work","/run/dock-fast"],"hostname":"boot-test"}' "$TOKEN" | base64 -w0)"

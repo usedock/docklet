@@ -32,12 +32,20 @@ def main():
         time.sleep(2)
     checks = {
         "hostname": ("hostname", lambda out: out.strip() == "boot-test"),
-        "root grown": ("df -BM --output=size / | tail -1", lambda out: int(out.strip().rstrip("M")) > 3000),
+        "root grown": ("df -BM --output=size / | tail -1", lambda out: int(out.strip().rstrip("M")) > 5000),
         "agent config mode": ("stat -c %a /etc/dock-fast-agent.json", lambda out: out.strip() == "600"),
+        "docker client": ("docker version --format '{{.Client.Version}}'", lambda out: out.strip() != ""),
+        "user in docker group": ("id -nG user", lambda out: "docker" in out.split()),
+        # The daemon may still be starting when the agent first answers.
+        "docker daemon": (
+            "for i in $(seq 45); do systemctl is-active -q docker && break; sleep 1; done; "
+            "docker version --format '{{.Server.Version}}'",
+            lambda out: out.strip() != "",
+        ),
     }
     failed = False
     for label, (script, ok) in checks.items():
-        res = call(host, port, {"token": token, "op": "exec", "script": script, "timeoutSeconds": 30})
+        res = call(host, port, {"token": token, "op": "exec", "script": script, "timeoutSeconds": 55})
         good = res.get("ok") and res.get("exitCode") == 0 and ok(res.get("stdout", ""))
         print("ping-agent: %s: %s" % (label, "ok" if good else "FAIL " + json.dumps(res)))
         failed = failed or not good

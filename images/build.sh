@@ -65,9 +65,10 @@ deb %s %s-security main universe
   # debootstrap installs the release pocket only; take security and updates.
   chroot_exec "$tree" apt-get -y dist-upgrade
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
-    systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 \
+    systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 docker.io \
     cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping
-  chroot_exec "$tree" useradd -m -s /bin/bash -G sudo user
+  # Same user as scripts/build-image.sh: sudo and Docker without a password.
+  chroot_exec "$tree" useradd -m -s /bin/bash -G sudo,docker user
   echo "user ALL=(ALL) NOPASSWD:ALL" > "$tree/etc/sudoers.d/user"
   chmod 0440 "$tree/etc/sudoers.d/user"
 
@@ -78,7 +79,7 @@ deb %s %s-security main universe
   install -m 0755 "$HERE/overlay/dock-guest-init.sh" "$tree/usr/local/libexec/dock-guest-init"
   install -m 0644 "$HERE/overlay/dock-guest-init.service" "$HERE/overlay/dock-fast-agent.service" "$tree/etc/systemd/system/"
   install -m 0644 "$HERE/overlay/99-dock-dhcp.network" "$tree/etc/systemd/network/"
-  chroot_exec "$tree" systemctl enable dock-guest-init.service dock-fast-agent.service \
+  chroot_exec "$tree" systemctl enable dock-guest-init.service dock-fast-agent.service docker.service \
     systemd-networkd.service ssh.service
   chroot_exec "$tree" systemctl mask apt-daily.service apt-daily.timer apt-daily-upgrade.timer \
     motd-news.timer e2scrub_all.timer e2scrub_reap.service systemd-networkd-wait-online.service || true
