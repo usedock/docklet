@@ -2,7 +2,11 @@
 
 package local
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
 
 // freeBytes is the space available to an unprivileged user under dir.
 func freeBytes(dir string) (uint64, error) {
@@ -13,9 +17,8 @@ func freeBytes(dir string) (uint64, error) {
 	return uint64(st.Bavail) * uint64(st.Bsize), nil
 }
 
-// sparseTemp reports that qemu-img writes a flattened raw disk sparse here, so it takes only
-// the space of its data.
-const sparseTemp = true
+// markSparse is a no-op: files are sparse by default here.
+func markSparse(*os.File) error { return nil }
 
 // allocatedBytes is the space a file takes on disk (its allocated blocks), or 0.
 func allocatedBytes(path string) int64 {

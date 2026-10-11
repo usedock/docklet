@@ -4,6 +4,8 @@ package local
 
 import (
 	"os"
+	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -21,14 +23,26 @@ func freeBytes(dir string) (uint64, error) {
 	return free, nil
 }
 
-// sparseTemp is false: the flattened raw disk is written at its full size here (docklet#76).
-const sparseTemp = false
+// markSparse flags f sparse so zero ranges that are never written take no space on NTFS.
+// A volume without sparse support (FAT, exFAT) returns an error; callers ignore it.
+func markSparse(f *os.File) error {
+	var n uint32
+	return windows.DeviceIoControl(windows.Handle(f.Fd()), windows.FSCTL_SET_SPARSE, nil, 0, nil, 0, &n, nil)
+}
 
-// allocatedBytes is the size of a file, or 0.
+var procGetCompressedFileSize = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCompressedFileSizeW")
+
+// allocatedBytes is the space a file takes on disk (a sparse file counts only its written
+// ranges), or 0.
 func allocatedBytes(path string) int64 {
-	st, err := os.Stat(path)
+	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0
 	}
-	return st.Size()
+	var high uint32
+	low, _, callErr := procGetCompressedFileSize.Call(uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&high)))
+	if uint32(low) == 0xFFFFFFFF && callErr != syscall.Errno(0) {
+		return 0
+	}
+	return int64(high)<<32 | int64(uint32(low))
 }

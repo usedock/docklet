@@ -657,8 +657,9 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if info.BaseImage == "" {
 		return contractError(newError("export_base_unsupported", ""))
 	}
-	// The part file and the raw disk live side by side before the part is removed.
-	if err := eng.CheckFreeSpace(info.SizeBytes+gibBytes(info.DiskGiB), "pull"); err != nil {
+	// Peak: the part file beside the sparse raw disk, then that raw disk beside the new qcow2,
+	// on top of a base image that may still have to be downloaded.
+	if err := eng.CheckFreeSpace(eng.PullSpaceNeed(ctx, info.SizeBytes, gibBytes(info.DiskGiB), info.BaseImage), "pull"); err != nil {
 		return localError(err)
 	}
 	if !*c.json {

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -476,24 +475,20 @@ func TestPushChecksFreeSpace(t *testing.T) {
 	// A huge virtual disk that holds a few bytes.
 	mustExit(t, te, 0, "new", "web", "--disk", "100000000")
 	mustExit(t, te, 0, "stop", "web")
-	if runtime.GOOS != "windows" {
-		// The flattened raw is sparse: only the data needs room, so the push goes through.
-		mustExit(t, te, 0, "push", "web", "--to", "lab")
-		return
-	}
-	mustExit(t, te, 1, "push", "web", "--to", "lab")
-	if !strings.Contains(te.errb.String(), "insufficient_space") || !strings.Contains(te.errb.String(), "docklet#76") || p.importBody != nil {
-		t.Fatalf("stderr %q import %v", te.errb, p.importBody)
-	}
+	// The flattened raw is sparse on every platform: only the data needs room.
+	mustExit(t, te, 0, "push", "web", "--to", "lab")
 	if len(tmpEntries(t, te)) != 0 {
 		t.Fatal("temp files must be cleaned")
 	}
+	_ = p
 }
 
 func TestPullChecksFreeSpaceBeforeDownloading(t *testing.T) {
 	te, p := transferEnv(t, "direct")
 	p.readyExport(zstdOf(t, diskBytes), "ubuntu-24.04")
+	// The data is estimated from the export size, so only a huge export fails the check.
 	p.exportState["diskGiB"] = 100000000
+	p.exportState["sizeBytes"] = int64(1) << 50
 	mustExit(t, te, 1, "pull", remoteID, "--from", "lab", "--name", "back")
 	if !strings.Contains(te.errb.String(), "insufficient_space") || len(p.downloads) != 0 {
 		t.Fatalf("stderr %q downloads %v", te.errb, p.downloads)

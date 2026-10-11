@@ -414,6 +414,12 @@ func (q *QEMU) FlattenDisk(ctx context.Context, qcow2, raw string) error {
 	if err := q.locate(); err != nil {
 		return err
 	}
+	// Pre-create the target sparse: on NTFS a file is only sparse once flagged, and qemu-img
+	// keeps the flag when it reuses the file, so zero ranges (-S) stay holes.
+	if f, err := os.OpenFile(raw, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+		_ = markSparse(f)
+		_ = f.Close()
+	}
 	if out, err := q.run(ctx, q.img, "convert", "-f", "qcow2", "-O", "raw", qcow2, raw); err != nil {
 		return errf("qemu_img_failed", "qemu-img convert: %v: %s", err, strings.TrimSpace(string(out)))
 	}
