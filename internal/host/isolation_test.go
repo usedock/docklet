@@ -408,3 +408,105 @@ func TestStartupSweepKeepsLiveAndStoppedDocks(t *testing.T) {
 		}
 	}
 }
+
+// A full snapshot that stops the dock kills its cgroup before removing it; the uid stays reserved.
+func TestFullSnapshotKillsCgroupBeforeRemoving(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 100 * time.Millisecond
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", true)
+	if _, _, _, err := iso.h.SnapshotCreate(ctx, "dock-1", nil, apiv1.SnapshotFull, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "cgroup.kill")); string(raw) != "1" {
+		t.Fatalf("cgroup.kill = %q, want 1 before the cgroup is removed", raw)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); !ok {
+		t.Fatal("a stopped dock keeps its uid")
+	}
+}
+
+// Without cgroup.kill the cgroup is frozen before pids are signalled, then thawed.
+func TestKillCgroupFreezesBeforeKilling(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 2 * time.Second
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", false)
+	freeze := filepath.Join(dir, "cgroup.freeze")
+	if err := os.WriteFile(freeze, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.events"), []byte("populated 1\nfrozen 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var frozenAtKill string
+	iso.h.cfg.KillPID = func(pid int) error {
+		raw, _ := os.ReadFile(freeze)
+		frozenAtKill = string(raw)
+		return os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644)
+	}
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if frozenAtKill != "1" {
+		t.Fatalf("cgroup.freeze at kill = %q, want 1", frozenAtKill)
+	}
+}
+
+func TestKillCgroupThawsAfterKilling(t *testing.T) {
+	dir := t.TempDir()
+	freeze := filepath.Join(dir, "cgroup.freeze")
+	for name, body := range map[string]string{"cgroup.freeze": "0", "cgroup.events": "frozen 1\n", "cgroup.procs": "7\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var killed []int
+	freezeKill(dir, func(pid int) error { killed = append(killed, pid); return nil }, time.Now().Add(time.Second))
+	if len(killed) != 1 || killed[0] != 7 {
+		t.Fatalf("killed = %v, want [7]", killed)
+	}
+	if raw, _ := os.ReadFile(freeze); string(raw) != "0" {
+		t.Fatalf("cgroup.freeze = %q, want thawed", raw)
+	}
+}
+
+// A uid leaked by a destroy is freed by the timed sweep, but not while that dock is being provisioned.
+func TestPeriodicSweepFreesLeakedUIDAndSkipsBusyDock(t *testing.T) {
+	iso := isolatedHost(t)
+	dir := stuckDestroy(t, iso)
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unlock := iso.h.lockDock("dock-1")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { iso.h.RunSweeper(ctx, 20*time.Millisecond); close(done) }()
+	time.Sleep(150 * time.Millisecond)
+	if _, ok := iso.h.uids.Get("dock-1"); !ok {
+		t.Fatal("sweep freed the uid of a dock being provisioned")
+	}
+	unlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := iso.h.uids.Get("dock-1"); !ok {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("periodic sweep must free the leaked uid")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sweeper did not stop with its context")
+	}
+}

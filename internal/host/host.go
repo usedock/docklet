@@ -133,6 +133,8 @@ type Host struct {
 	fastSpecs map[string]fastSpec
 	pl        *pool
 	uids      *uid.Allocator
+	lockMu    sync.Mutex
+	dockLocks map[string]*dockLock
 }
 
 // growDisk is disk.Grow; tests swap it for a scaled-down grow so no test
@@ -411,6 +413,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 	if _, err := ResolveImage(image); err != nil {
 		return "", err
 	}
+	defer h.lockDock(dockID)()
 	if err := fc.ValidateResources(res); err != nil {
 		return "", err
 	}
@@ -715,7 +718,8 @@ func (h *Host) SnapshotCreate(ctx context.Context, dockID string, parentID *stri
 		// Terminal capture: the archived dock keeps its files but frees
 		// host CPU and RAM; resume boots fresh from the generation.
 		_ = h.cfg.Driver.Terminate(h.handle(dockID))
-		cleanupCgroup(h.cfg.CgroupBase, dockID)
+		// A stopped dock keeps its uid, so a cgroup that will not empty is only logged.
+		h.killCgroup(h.backingID(dockID))
 		markStopped(h, dockID)
 	}
 	var total int64
@@ -885,6 +889,7 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 	if err := checkIDs(dockID, snapshotID); err != nil {
 		return "", err
 	}
+	defer h.lockDock(dockID)()
 	if err := fc.ValidateResources(res); err != nil {
 		return "", err
 	}
@@ -1099,6 +1104,7 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	if err := checkIDs(dockID); err != nil {
 		return err
 	}
+	defer h.lockDock(dockID)()
 	// A claimed pool dock runs under its slot id: that names the container, jail and work disk.
 	backing := h.backingID(dockID)
 	_ = h.cfg.Driver.Terminate(h.handle(backing))

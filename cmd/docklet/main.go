@@ -263,6 +263,10 @@ func main() {
 			}
 		}
 	}()
+	// Leaked uids are freed on a timer; it stops with the process.
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	go orchestrator.RunSweeper(sweepCtx, host.SweepInterval)
 	// The fleet agent is the only outbound client: it registers this host,
 	// heartbeats inventory, and relays queued commands into the loopback API.
 	if fleetURL := os.Getenv("DOCKLET_FLEET_URL"); fleetURL != "" {
