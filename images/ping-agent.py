@@ -59,6 +59,17 @@ def main():
             "for i in $(seq 15); do getent hosts github.com && exit 0; sleep 2; done; exit 1",
             lambda out: out.strip() != "",
         ),
+        # sshd must be up and no ssh unit may be failed (a failed ssh.service
+        # shows as "[FAILED] Failed to start ssh.service" on every boot). Prints
+        # the unit state and journal on failure so CI shows the reason.
+        "sshd healthy": (
+            "for i in $(seq 60); do systemctl is-active -q ssh.service && break; sleep 1; done; "
+            "bad=$(systemctl --failed --plain --no-legend | grep -E '^ssh'); "
+            "if systemctl is-active -q ssh.service && [ -z \"$bad\" ]; then exit 0; fi; "
+            "systemctl --failed --plain --no-pager; systemctl status ssh.service ssh.socket --no-pager; "
+            "journalctl -u ssh.service -u ssh.socket -b --no-pager | tail -40; exit 1",
+            lambda out: True,
+        ),
         # The daemon may still be starting when the agent first answers.
         "docker daemon": (
             "for i in $(seq 240); do systemctl is-active -q docker && break; sleep 1; done; "
