@@ -559,6 +559,15 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 			return "", fmt.Errorf("provision fast agent: %w", err)
 		}
 	}
+	// Confine before the guest exists: the IP is fixed, so no unconfined window.
+	confined := isFast && len(fast.egress) > 0
+	if confined {
+		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
+			_ = h.alloc.Release(dockID)
+			_ = h.deleteIface(tap)
+			return "", fmt.Errorf("provision egress: %w", err)
+		}
+	}
 	spec := fc.BootSpec{
 		DockID: dockID, Resources: res,
 		KernelImage: h.cfg.KernelImage, InitrdImage: h.cfg.InitrdImage, JailRoot: h.jailRoot(dockID),
@@ -573,6 +582,9 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 	}
 	bootHandle, err := h.cfg.Driver.Boot(ctx, spec)
 	if err != nil {
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		// Preserve the failed jail for diagnosis instead of deleting it;
@@ -589,14 +601,19 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 	// could starve its neighbor, so limit failures fail the provision.
 	if err := h.enforceLimits(bootHandle.Pid, res); err != nil {
 		_ = h.cfg.Driver.Terminate(bootHandle)
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		return "", fmt.Errorf("provision cgroup: %w", err)
 	}
 	var egressGateway string
-	if isFast && len(fast.egress) > 0 {
+	if confined {
+		// Second line, idempotent: rules were installed before boot.
 		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
 			_ = h.cfg.Driver.Terminate(bootHandle)
+			h.dropEgress(guestIP)
 			_ = h.alloc.Release(dockID)
 			_ = h.deleteIface(tap)
 			return "", fmt.Errorf("provision egress: %w", err)
@@ -991,6 +1008,15 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 			return "", fmt.Errorf("load fast agent: %w", err)
 		}
 	}
+	// Confine before the guest exists: the IP is fixed, so no unconfined window.
+	confined := isFast && len(fast.egress) > 0
+	if confined {
+		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
+			_ = h.alloc.Release(dockID)
+			_ = h.deleteIface(tap)
+			return "", fmt.Errorf("load egress: %w", err)
+		}
+	}
 	bootHandle, err := h.cfg.Driver.Boot(ctx, fc.BootSpec{
 		DockID: dockID, Resources: res,
 		KernelImage: h.cfg.KernelImage, InitrdImage: h.cfg.InitrdImage, JailRoot: h.jailRoot(dockID),
@@ -1001,6 +1027,9 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 		TrackDirty: true,
 	})
 	if err != nil {
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		_ = os.RemoveAll(h.jailRoot(dockID) + ".failed")
@@ -1009,14 +1038,19 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 	}
 	if err := h.enforceLimits(bootHandle.Pid, res); err != nil {
 		_ = h.cfg.Driver.Terminate(bootHandle)
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		return "", fmt.Errorf("load cgroup: %w", err)
 	}
 	var egressGateway string
-	if isFast && len(fast.egress) > 0 {
+	if confined {
+		// Second line, idempotent: rules were installed before boot.
 		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
 			_ = h.cfg.Driver.Terminate(bootHandle)
+			h.dropEgress(guestIP)
 			_ = h.alloc.Release(dockID)
 			_ = h.deleteIface(tap)
 			return "", fmt.Errorf("load egress: %w", err)
@@ -1078,11 +1112,23 @@ func (h *Host) snapshotLoadContainer(ctx context.Context, dockID string, res api
 		_ = h.deleteIface(tap)
 		return "", fmt.Errorf("load network: %w", err)
 	}
+	// Confine before the guest exists: the IP is fixed, so no unconfined window.
+	confined := isFast && len(fast.egress) > 0
+	if confined {
+		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
+			_ = h.alloc.Release(dockID)
+			_ = h.deleteIface(tap)
+			return "", fmt.Errorf("load egress: %w", err)
+		}
+	}
 	bootHandle, err := h.cfg.Driver.Boot(ctx, fc.BootSpec{
 		DockID: dockID, Resources: res, JailRoot: h.jailRoot(dockID), Limits: h.cfg.Limits.For(res),
 		AttachNetwork: h.vethAttacher(tap, guestIP, gateway, mask),
 	})
 	if err != nil {
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		_ = os.RemoveAll(h.jailRoot(dockID) + ".failed")
@@ -1091,14 +1137,19 @@ func (h *Host) snapshotLoadContainer(ctx context.Context, dockID string, res api
 	}
 	if err := h.enforceLimits(bootHandle.Pid, res); err != nil {
 		_ = h.cfg.Driver.Terminate(bootHandle)
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		return "", fmt.Errorf("load cgroup: %w", err)
 	}
 	var egressGateway string
-	if isFast && len(fast.egress) > 0 {
+	if confined {
+		// Second line, idempotent: rules were installed before boot.
 		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
 			_ = h.cfg.Driver.Terminate(bootHandle)
+			h.dropEgress(guestIP)
 			_ = h.alloc.Release(dockID)
 			_ = h.deleteIface(tap)
 			return "", fmt.Errorf("load egress: %w", err)
@@ -1211,6 +1262,12 @@ func (h *Host) restrictEgress(guestIP string, allow []string) error {
 	}
 	h.cfg.Egress.Allow(guestIP, allow)
 	return nil
+}
+
+// dropEgress removes a guest IP's confinement after a failed boot.
+func (h *Host) dropEgress(guestIP string) {
+	egress.Unrestrict(h.cfg.NetRunner, guestIP, h.cfg.EgressPort)
+	h.cfg.Egress.Revoke(guestIP)
 }
 
 // reconfine re-arms an adopted dock's allowlist: its iptables rules outlive a

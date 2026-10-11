@@ -28,13 +28,22 @@ type fakeDriver struct {
 	pauseErr   error
 	snapErr    error
 	adoptPid   int
+	onBoot     func()
+	bootErr    error
 }
 
 func (f *fakeDriver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, error) {
 	f.mu.Lock()
 	f.boots++
 	f.lastRes = spec.Resources
+	hook := f.onBoot
 	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if f.bootErr != nil {
+		return nil, f.bootErr
+	}
 	return &fc.Handle{DockID: spec.DockID, Pid: 4242}, nil
 }
 func (f *fakeDriver) Pause(_ context.Context, _ *fc.Handle) error {

@@ -32,6 +32,8 @@ type fakeVethDriver struct {
 	removed    []string
 	mounts     int
 	terminates []string
+	onBoot     func()
+	bootErr    error
 }
 
 // writeTestImage writes size bytes of a deterministic pattern.
@@ -82,6 +84,12 @@ func writeTestTar(t *testing.T, path string, files map[string]string) {
 
 func (f *fakeVethDriver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, error) {
 	f.boots++
+	if f.onBoot != nil {
+		f.onBoot()
+	}
+	if f.bootErr != nil {
+		return nil, f.bootErr
+	}
 	if spec.AttachNetwork == nil {
 		return nil, errors.New("container boot without a network attacher")
 	}
