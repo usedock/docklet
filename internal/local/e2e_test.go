@@ -21,11 +21,16 @@ func TestE2ELocalDock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Once a release is pinned, CI sets DOCK_E2E_REQUIRE so a missing accelerator or image fails.
+	skip := t.Skipf
+	if os.Getenv("DOCK_E2E_REQUIRE") != "" && PinnedIndexURL() != "" {
+		skip = t.Fatalf
+	}
 	if err := e.Driver.Preflight(ctx); err != nil {
-		t.Skipf("local docks cannot run here: %v", err)
+		skip("local docks cannot run here: %v", err)
 	}
 	if _, err := e.ResolveImage(ctx, DefaultImage); err != nil {
-		t.Skipf("no Dockyard image available: %v", err)
+		skip("no Dockyard image available: %v", err)
 	}
 
 	d, err := e.New(ctx, Spec{Name: "e2e", CPUs: 2, MemoryMiB: 1024, DiskGiB: 4})
