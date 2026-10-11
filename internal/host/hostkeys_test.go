@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/usedock/docklet/internal/store"
@@ -44,6 +45,14 @@ func TestGateFilesResetHostKeysOnlyWhenAsked(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(reset, "etc/ssh/sshd_config")); err != nil {
 		t.Fatalf("sshd_config must stay: %v", err)
+	}
+	// A base without the image's keygen drop-in must still get keys back at boot.
+	unit, err := os.ReadFile(filepath.Join(reset, sshKeygenDropIn))
+	if err != nil || !strings.Contains(string(unit), "ExecStartPre=/usr/bin/ssh-keygen -A") {
+		t.Fatalf("a copy must get the keygen drop-in: %q, %v", unit, err)
+	}
+	if _, err := os.Stat(filepath.Join(keep, sshKeygenDropIn)); !os.IsNotExist(err) {
+		t.Fatalf("a resume must not touch ssh.service: %v", err)
 	}
 }
 

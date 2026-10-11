@@ -696,6 +696,12 @@ var hostKeyFiles = []string{
 	"ssh_host_ed25519_key", "ssh_host_ed25519_key.pub", "ssh_host_dsa_key", "ssh_host_dsa_key.pub",
 }
 
+// sshKeygenDropIn makes ssh.service create missing host keys before its sshd -t; same as images/build.sh.
+const (
+	sshKeygenDropIn = "etc/systemd/system/ssh.service.d/hostkeys.conf"
+	sshKeygenUnit   = "[Service]\nExecStartPre=\nExecStartPre=/usr/bin/ssh-keygen -A\nExecStartPre=/usr/sbin/sshd -t\n"
+)
+
 // copiedDisk reports whether the disk materialized from snapshotID is a copy
 // that must not keep its source's sshd host keys: a generation another dock
 // captured (branch, template) or an imported upload. A dock resuming its own
@@ -739,6 +745,11 @@ func writeGateFiles(dir string, guestIP, gateway, mask, mac string, resetKeys bo
 				return err
 			}
 		}
+		// A host-built base has no keygen step, so sshd would fail without its keys.
+		if err := g.WriteFile(sshKeygenDropIn, []byte(sshKeygenUnit), 0o644); err != nil {
+			return err
+		}
+	}
 	}
 	unit := "[Match]\nMACAddress=" + mac + "\n\n[Network]\nAddress=" + guestIP + "/" + mask + "\nGateway=" + gateway + "\nDNS=1.1.1.1\nDHCP=no\n"
 	if err := g.WriteFile("etc/systemd/network/10-dock.network", []byte(unit), 0o644); err != nil {
