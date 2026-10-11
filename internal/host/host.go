@@ -208,6 +208,14 @@ func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
 	if owner == "" {
 		owner = dockID
 	}
+	// Destroy of a claimed slot locks the runtime id, not the slot id.
+	if owner != dockID {
+		unlockOwner, ok := h.tryLockDock(owner)
+		if !ok {
+			return ""
+		}
+		defer unlockOwner()
+	}
 	h.mu.Lock()
 	_, tracked := h.vms[owner]
 	for _, v := range h.vms {
