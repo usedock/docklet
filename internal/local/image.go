@@ -87,7 +87,7 @@ func NewCatalog(getenv func(string) string, warn io.Writer) *HTTPCatalog {
 		}
 		return c
 	}
-	return &HTTPCatalog{URL: PinnedIndexURL(), SHA256: DockyardIndexSHA256}
+	return &HTTPCatalog{URL: dockyard.DockyardIndexURL, SHA256: dockyard.DockyardIndexSHA256}
 }
 
 func (c *HTTPCatalog) client() *http.Client {

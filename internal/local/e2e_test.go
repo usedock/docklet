@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usedock/docklet/internal/dockyard"
 )
 
 // TestE2ELocalDock boots a real dock with QEMU and the host accelerator. It needs QEMU, a
@@ -23,7 +25,7 @@ func TestE2ELocalDock(t *testing.T) {
 	}
 	// Once a release is pinned, CI sets DOCK_E2E_REQUIRE so a missing accelerator or image fails.
 	skip := t.Skipf
-	if os.Getenv("DOCK_E2E_REQUIRE") != "" && PinnedIndexURL() != "" {
+	if os.Getenv("DOCK_E2E_REQUIRE") != "" && dockyard.DockyardIndexURL != "" {
 		skip = t.Fatalf
 	}
 	if err := e.Driver.Preflight(ctx); err != nil {
