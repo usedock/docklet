@@ -11,7 +11,7 @@ RELEASE="$(uname -r)"
 mkdir -p "$OUT_DIR"
 
 cp "/boot/vmlinuz-${RELEASE}" "$OUT_DIR/.vmlinuz.next"
-"$(dirname "$0")/extract-vmlinux.sh" "$OUT_DIR/.vmlinuz.next" "$OUT_DIR/.vmlinux.next"
+bash "$(dirname "$0")/extract-vmlinux.sh" "$OUT_DIR/.vmlinuz.next" "$OUT_DIR/.vmlinux.next"
 rm -f "$OUT_DIR/.vmlinuz.next"
 cp "/boot/initrd.img-${RELEASE}" "$OUT_DIR/.initrd.img.next"
 chmod 0644 "$OUT_DIR/.vmlinux.next" "$OUT_DIR/.initrd.img.next"

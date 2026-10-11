@@ -157,3 +157,17 @@ func TestBuildImageGrowsRootFilesystemAtBoot(t *testing.T) {
 		t.Fatal("kernel root device changed: update the fstab entry in build-image.sh")
 	}
 }
+
+// The scripts are stored without the executable bit, so install-kernel.sh must run its sibling
+// through bash: calling it directly fails with "Permission denied" on a fresh checkout.
+func TestInstallKernelRunsExtractVmlinuxThroughBash(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "install-kernel.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(script), "\n") {
+		if strings.Contains(line, "extract-vmlinux.sh") && !strings.HasPrefix(strings.TrimSpace(line), "#") && !strings.HasPrefix(line, "bash ") {
+			t.Fatalf("install-kernel.sh must run extract-vmlinux.sh with bash: %q", line)
+		}
+	}
+}

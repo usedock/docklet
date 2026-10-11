@@ -15,6 +15,10 @@ on:
       - .github/workflows/selfhost-e2e.yml
       - scripts/bootstrap-host.sh
       - scripts/provision-host.sh
+      - scripts/build-image.sh
+      - scripts/install-base.sh
+      - scripts/install-kernel.sh
+      - scripts/extract-vmlinux.sh
       - scripts/e2e-selfhost.sh
 
 permissions:
