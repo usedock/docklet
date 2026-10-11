@@ -414,5 +414,8 @@ func (q *QEMU) Start(ctx context.Context, spec LaunchSpec) (int, error) {
 // Alive reports whether pid is a running process.
 func (q *QEMU) Alive(pid int) bool { return pidAlive(pid) }
 
+// StartStamp identifies the process behind pid so a reused pid is not mistaken for the VM.
+func (q *QEMU) StartStamp(pid int) (uint64, bool) { return procStart(pid) }
+
 // Kill ends pid immediately.
 func (q *QEMU) Kill(pid int) error { return killPid(pid) }

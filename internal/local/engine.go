@@ -142,10 +142,39 @@ func (e *Engine) agentAddr(id string) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(e.readInt(id, "port")))
 }
 
-func (e *Engine) alive(id string) bool {
-	pid := e.readInt(id, "pid")
-	return pid > 0 && e.Driver.Alive(pid)
+// stamper is a Driver that can tell one process from a later one with the same pid.
+type stamper interface {
+	StartStamp(pid int) (uint64, bool)
 }
+
+// livePID is the dock's VM pid when that process is still running and is the one this
+// engine started, else 0. After a crash or a reboot the pid file can name an unrelated
+// process that reused the pid; it must never be reported running or killed.
+func (e *Engine) livePID(id string) int {
+	pid := e.readInt(id, "pid")
+	if pid <= 0 || !e.Driver.Alive(pid) {
+		return 0
+	}
+	st, ok := e.Driver.(stamper)
+	if !ok {
+		return pid
+	}
+	raw, err := os.ReadFile(e.file(id, "pidstart"))
+	if err != nil {
+		// Without a recorded start time the pid cannot be trusted.
+		return 0
+	}
+	want, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	if got, ok := st.StartStamp(pid); !ok || got != want {
+		return 0
+	}
+	return pid
+}
+
+func (e *Engine) alive(id string) bool { return e.livePID(id) > 0 }
 
 func (e *Engine) ping(ctx context.Context, id string) bool {
 	tok, err := e.token(id)
@@ -355,6 +384,17 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 	if err != nil {
 		return err
 	}
+	if st, ok := e.Driver.(stamper); ok {
+		start, ok := st.StartStamp(pid)
+		if !ok {
+			_ = e.Driver.Kill(pid)
+			return errf("boot_failed", "the VM exited during boot.%s", e.logTail(rec.ID))
+		}
+		if err := os.WriteFile(e.file(rec.ID, "pidstart"), []byte(strconv.FormatUint(start, 10)), 0o600); err != nil {
+			_ = e.Driver.Kill(pid)
+			return errf("store_error", "%v", err)
+		}
+	}
 	if err := os.WriteFile(e.file(rec.ID, "pid"), []byte(strconv.Itoa(pid)), 0o600); err != nil {
 		_ = e.Driver.Kill(pid)
 		return errf("store_error", "%v", err)
@@ -484,8 +524,8 @@ func (e *Engine) Stop(ctx context.Context, ref string, force bool) (Dock, error)
 }
 
 func (e *Engine) stopVM(ctx context.Context, id string, force bool) error {
-	pid := e.readInt(id, "pid")
-	if pid <= 0 || !e.Driver.Alive(pid) {
+	pid := e.livePID(id)
+	if pid == 0 {
 		e.clearRuntime(id)
 		return nil
 	}
@@ -524,6 +564,7 @@ func (e *Engine) stopVM(ctx context.Context, id string, force bool) error {
 
 func (e *Engine) clearRuntime(id string) {
 	_ = os.Remove(e.file(id, "pid"))
+	_ = os.Remove(e.file(id, "pidstart"))
 	_ = os.Remove(e.file(id, "port"))
 }
 

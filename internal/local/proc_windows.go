@@ -44,3 +44,20 @@ func killPid(pid int) error {
 	defer windows.CloseHandle(h)
 	return windows.TerminateProcess(h, 1)
 }
+
+// procStart is the creation time of pid as a FILETIME.
+func procStart(pid int) (uint64, bool) {
+	if pid <= 0 {
+		return 0, false
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return 0, false
+	}
+	defer windows.CloseHandle(h)
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return 0, false
+	}
+	return uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime), true
+}
