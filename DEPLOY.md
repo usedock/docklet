@@ -332,8 +332,9 @@ stored, compressed bytes), and the response carries `sha256` plus `baseImage`: t
 the dock's base came from (`ubuntu-24.04`, `node-22`, ...), or empty when the base was built on the
 host (such a dock cannot be pulled to a laptop, whose engine only boots Dockyard bases).
 
-The manifest and the response also carry `dataBytes`: the allocated size of the flattened disk before
-compression. `dock pull` sizes its free-space check from it; a host that predates it leaves it out
+The manifest and the response also carry `dataBytes`: the space the flattened disk's data takes once
+decompressed and written sparse (its non-zero 64 KiB blocks, counted while compressing, so the host
+filesystem's own compression or deduplication does not shrink it). `dock pull` sizes its free-space check from it; a host that predates it leaves it out
 and the CLI falls back to estimating the data as three times the compressed size.
 
 Restoring any whole-image generation verifies that sha256 and size when the manifest has them and

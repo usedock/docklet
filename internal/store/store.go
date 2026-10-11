@@ -36,6 +36,9 @@ type FileEntry struct {
 	SHA256 string `json:"sha256,omitempty"`
 	// RawSize is the decompressed size of a zstd entry; known when SHA256 is set.
 	RawSize int64 `json:"rawSize,omitempty"`
+	// DataBytes is what the decompressed entry takes when written sparse in SparseBlock
+	// blocks, as a pull writes it. Set by PutFileCompressed; not part of the manifest.
+	DataBytes int64 `json:"-"`
 }
 
 // EncodingZstd marks zstd-compressed objects.
@@ -61,9 +64,9 @@ type Manifest struct {
 	// present and refuses a mismatch.
 	SHA256    string `json:"sha256,omitempty"`
 	SizeBytes int64  `json:"sizeBytes,omitempty"`
-	// DataBytes is the space the flattened disk's data takes once decompressed (its allocated
-	// bytes, not the sparse virtual size). Set by full snapshots so a pull can size its free-space
-	// check; absent on older generations and imports.
+	// DataBytes is the space the flattened disk's data takes once decompressed and written sparse
+	// (its non-zero 64 KiB blocks, not the virtual size). Set by full snapshots so a pull can size
+	// its free-space check; absent on older generations and imports.
 	DataBytes int64 `json:"dataBytes,omitempty"`
 	// Image names the Dockyard image the disk derives from; empty when the
 	// base was built on the host.
@@ -240,6 +243,7 @@ func PutFileCompressed(ctx context.Context, s Store, snapshotID, name, localPath
 	hash := sha256.New()
 	count := &byteCounter{Reader: io.TeeReader(pr, hash)}
 	var rawSize int64
+	data := &dataCounter{}
 	done := make(chan error, 1)
 	go func() {
 		zw, err := zstd.NewWriter(pw, zstd.WithEncoderLevel(zstd.SpeedFastest))
@@ -249,7 +253,7 @@ func PutFileCompressed(ctx context.Context, s Store, snapshotID, name, localPath
 			done <- err
 			return
 		}
-		n, copyErr := io.Copy(zw, src)
+		n, copyErr := io.Copy(zw, io.TeeReader(src, data))
 		rawSize = n
 		src.Close()
 		closeErr := zw.Close()
@@ -275,7 +279,48 @@ func PutFileCompressed(ctx context.Context, s Store, snapshotID, name, localPath
 	if err := <-done; err != nil {
 		return FileEntry{}, err
 	}
-	return FileEntry{Path: stored, Size: count.n, Encoding: EncodingZstd, SHA256: hex.EncodeToString(hash.Sum(nil)), RawSize: rawSize}, nil
+	return FileEntry{Path: stored, Size: count.n, Encoding: EncodingZstd, SHA256: hex.EncodeToString(hash.Sum(nil)), RawSize: rawSize, DataBytes: data.total()}, nil
+}
+
+// SparseBlock is the granularity at which a pull skips all-zero data (internal/local copySparse).
+const SparseBlock = 64 << 10
+
+var zeroBlock [SparseBlock]byte
+
+// dataCounter tallies the bytes of every SparseBlock-aligned block holding a non-zero byte. It
+// reads the content, not the file's allocation, which compression, deduplication or delayed
+// allocation on the host filesystem would understate.
+type dataCounter struct {
+	off   int64
+	dirty bool
+	n     int64
+}
+
+func (c *dataCounter) Write(p []byte) (int, error) {
+	written := len(p)
+	for len(p) > 0 {
+		chunk := p[:min(int64(len(p)), SparseBlock-c.off%SparseBlock)]
+		if !c.dirty && !bytes.Equal(chunk, zeroBlock[:len(chunk)]) {
+			c.dirty = true
+		}
+		c.off += int64(len(chunk))
+		if c.off%SparseBlock == 0 {
+			if c.dirty {
+				c.n += SparseBlock
+			}
+			c.dirty = false
+		}
+		p = p[len(chunk):]
+	}
+	return written, nil
+}
+
+// total includes a trailing partial block, which a pull writes at its own length.
+func (c *dataCounter) total() int64 {
+	if c.dirty {
+		return c.n + c.off%SparseBlock
+	}
+	return c.n
 }
 
 // byteCounter tallies compressed bytes as the store drains the pipe.

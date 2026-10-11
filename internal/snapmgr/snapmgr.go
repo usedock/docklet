@@ -158,8 +158,6 @@ func (c *Coordinator) FreezeRootfsFull(ctx context.Context, dockID, rootfsSrc, s
 	if err := disk.Freeze(c.Runner, rootfsSrc, genPath); err != nil {
 		return store.Manifest{}, err
 	}
-	// The frozen copy is sparse, so its allocated blocks are the data a pull must write back.
-	dataBytes := disk.AllocatedBytes(genPath)
 	entry, err := store.PutFileCompressed(ctx, c.Store, snapshotID, "rootfs.ext4", genPath, c.GensDir)
 	if err != nil {
 		return store.Manifest{}, err
@@ -173,7 +171,7 @@ func (c *Coordinator) FreezeRootfsFull(ctx context.Context, dockID, rootfsSrc, s
 		Files:      []store.FileEntry{entry},
 		SHA256:     entry.SHA256,
 		SizeBytes:  entry.Size,
-		DataBytes:  dataBytes,
+		DataBytes:  entry.DataBytes,
 	}
 	if c.BaseImage != "" {
 		manifest.Image = disk.DockImage(c.BaseImage, rootfsSrc)

@@ -106,8 +106,8 @@ type SnapshotCreateResponse struct {
 	BaseFingerprint string `json:"baseFingerprint,omitempty"`
 	// SHA256 is the hex digest of the stored rootfs.ext4.zst object; set for Full requests only.
 	SHA256 string `json:"sha256,omitempty"`
-	// DataBytes is the allocated size of the flattened disk before compression, the space a pull
-	// needs for its data. Set for Full requests only; absent from hosts that predate it.
+	// DataBytes is the space the flattened disk's data takes written sparse (its non-zero 64 KiB
+	// blocks), what a pull needs for it. Set for Full requests only; absent from hosts that predate it.
 	DataBytes int64 `json:"dataBytes,omitempty"`
 	// BaseImage names the Dockyard image the dock's base came from; empty when the base was built
 	// on the host (or the request was not Full).

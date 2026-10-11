@@ -618,7 +618,7 @@ func TestFreezeRootfsFullWritesAWholeChecksummedImage(t *testing.T) {
 	if got, err := c.GenerationSHA256(ctx, "s1"); err != nil || got != manifest.SHA256 {
 		t.Fatal("GenerationSHA256 disagrees with the manifest")
 	}
-	// The data size is the disk's allocated bytes, recorded in the manifest the control plane reads.
+	// The data size is the disk's non-zero content, recorded in the manifest the control plane reads.
 	if manifest.DataBytes <= 0 || persisted.DataBytes != manifest.DataBytes {
 		t.Fatalf("dataBytes = %d, persisted %d", manifest.DataBytes, persisted.DataBytes)
 	}
@@ -640,40 +640,13 @@ func TestFreezeRootfsFullWritesAWholeChecksummedImage(t *testing.T) {
 	}
 }
 
-func TestFreezeRootfsFullRecordsAllocatedDataNotVirtualSize(t *testing.T) {
+func TestFreezeRootfsFullRecordsTheDataNotTheVirtualSize(t *testing.T) {
 	ctx := context.Background()
 	c, rootfs, _, _ := fullFixture(t)
-	// A 64 MiB disk holding one block of data: the recorded data size is what is allocated, far
-	// below the virtual size, so a pull sizes its free-space check from the real data.
+	// A 64 MiB disk holding 1 MiB of data plus one stray byte. The stub runner copies densely, so
+	// the frozen copy's allocation says nothing: the data is read from its content, in the blocks
+	// a pull writes (the stray byte costs one whole block).
 	const virtual = 64 << 20
-	// The stub runner copies densely; this one does what `cp --sparse=always` does, so the frozen
-	// copy keeps its holes.
-	c.Runner = func(name string, args ...string) error {
-		src, dst := args[len(args)-2], args[len(args)-1]
-		in, err := os.Open(src)
-		if err != nil {
-			return err
-		}
-		defer in.Close()
-		out, err := os.Create(dst)
-		if err != nil {
-			return err
-		}
-		defer out.Close()
-		if err := out.Truncate(virtual); err != nil {
-			return err
-		}
-		buf := make([]byte, disk.BlockSize)
-		for off := int64(0); off < virtual; off += disk.BlockSize {
-			n, _ := in.ReadAt(buf, off)
-			if n > 0 && !bytes.Equal(buf[:n], make([]byte, n)) {
-				if _, err := out.WriteAt(buf[:n], off); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
 	f, err := os.Create(rootfs)
 	if err != nil {
 		t.Fatal(err)
@@ -684,13 +657,16 @@ func TestFreezeRootfsFullRecordsAllocatedDataNotVirtualSize(t *testing.T) {
 	if _, err := f.WriteAt(bytes.Repeat([]byte{0xab}, disk.BlockSize), 0); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.WriteAt([]byte{1}, 40<<20+5); err != nil {
+		t.Fatal(err)
+	}
 	_ = f.Close()
 	manifest, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "sparse", "full", "GenuineIntel:142:10", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.DataBytes <= 0 || manifest.DataBytes >= virtual/2 {
-		t.Fatalf("dataBytes = %d, want the allocated data well under the %d byte virtual size", manifest.DataBytes, virtual)
+	if want := int64(disk.BlockSize + store.SparseBlock); manifest.DataBytes != want {
+		t.Fatalf("dataBytes = %d, want %d", manifest.DataBytes, want)
 	}
 	if manifest.Files[0].RawSize != virtual {
 		t.Fatalf("rawSize = %d, want %d", manifest.Files[0].RawSize, virtual)

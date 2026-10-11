@@ -431,3 +431,44 @@ func TestDownloadRefusesAnObjectThatUnpacksPastTheLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPutFileCompressedCountsTheDataAPullWrites(t *testing.T) {
+	ctx := context.Background()
+	const block = SparseBlock
+	// Zero block, block with one byte at its end, two zero blocks, block of data, then a
+	// trailing half block with one byte: a pull writes the second, fifth and the partial last.
+	raw := make([]byte, 5*block+block/2)
+	raw[2*block-1] = 1
+	for i := 4 * block; i < 5*block; i++ {
+		raw[i] = 0xab
+	}
+	raw[5*block+7] = 1
+	want := int64(2*block + block/2)
+	src := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := os.WriteFile(src, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := PutFileCompressed(ctx, NewMemStore(), "s1", "rootfs.ext4", src, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.DataBytes != want || entry.RawSize != int64(len(raw)) {
+		t.Fatalf("dataBytes %d rawSize %d, want %d %d", entry.DataBytes, entry.RawSize, want, len(raw))
+	}
+	// Writes that straddle block edges count the same as aligned ones.
+	for _, step := range []int{1, 4095, block - 1, block + 3, len(raw)} {
+		c := &dataCounter{}
+		for off := 0; off < len(raw); off += step {
+			_, _ = c.Write(raw[off:min(off+step, len(raw))])
+		}
+		if c.total() != want {
+			t.Fatalf("step %d: %d, want %d", step, c.total(), want)
+		}
+	}
+	// An all-zero disk records no data, which reads as "not recorded".
+	zeros := &dataCounter{}
+	_, _ = zeros.Write(make([]byte, 3*block))
+	if zeros.total() != 0 {
+		t.Fatal("zeros counted as data")
+	}
+}
