@@ -5,6 +5,9 @@ package v1
 
 import "encoding/json"
 
+// DockletFeatures is what this build advertises at registration; the control plane gates behaviour on it.
+var DockletFeatures = []string{"egress-on-resume"}
+
 // APIVersion is the docklet contract version served under /v1/*.
 const APIVersion = "v1"
 
@@ -102,8 +105,10 @@ type SnapshotLoadRequest struct {
 	Resources  Resources `json:"resources"`
 	SnapshotID string    `json:"snapshotId"`
 	// ExecAgent boots the guest exec agent with a fresh token.
-	ExecAgent        bool   `json:"execAgent,omitempty"`
-	IdempotencyToken string `json:"idempotencyToken"`
+	ExecAgent bool `json:"execAgent,omitempty"`
+	// EgressAllow confines the resumed guest to these HTTPS hosts; requires ExecAgent.
+	EgressAllow      []string `json:"egressAllow,omitempty"`
+	IdempotencyToken string   `json:"idempotencyToken"`
 }
 
 // SnapshotLoadResponse carries the restored guest address.
@@ -259,6 +264,8 @@ type FleetRegisterRequest struct {
 	// AcceptsCredential tells the control plane this docklet stores the per-host
 	// credential, so it may issue one; older docklets stay credential-less.
 	AcceptsCredential bool `json:"acceptsCredential,omitempty"`
+	// Features lists optional docklet behaviours (such as "egress-on-resume") the control plane may rely on.
+	Features []string `json:"features,omitempty"`
 }
 
 // FleetRegisterResponse carries the cadence the control plane wants from this host.

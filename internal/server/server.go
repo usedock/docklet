@@ -508,11 +508,15 @@ func (s *Server) handleSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		defer unlock()
-		load := s.deps.Host.SnapshotLoad
-		if req.ExecAgent {
-			load = s.deps.Host.SnapshotLoadWithAgent
+		if len(req.EgressAllow) > 0 && !req.ExecAgent {
+			return nil, errors.New("egressAllow requires execAgent")
 		}
-		ip, err := load(lifecycleCtx(r), req.DockID, req.Resources, req.SnapshotID)
+		var ip string
+		if req.ExecAgent {
+			ip, err = s.deps.Host.SnapshotLoadWithAgent(lifecycleCtx(r), req.DockID, req.Resources, req.SnapshotID, req.EgressAllow)
+		} else {
+			ip, err = s.deps.Host.SnapshotLoad(lifecycleCtx(r), req.DockID, req.Resources, req.SnapshotID)
+		}
 		if err != nil {
 			return nil, err
 		}

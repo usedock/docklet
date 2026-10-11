@@ -251,11 +251,13 @@ func (c Config) registerBody() registerRequest {
 func (c Config) registerOnce(ctx context.Context, body registerRequest, out *registerResponse) error {
 	auth := c.credential()
 	body.AcceptsCredential = true
+	body.Features = apiv1.DockletFeatures
 	err := c.fleetAs(ctx, auth.Bearer(), http.MethodPost, "/v1/fleet/register", body, out, callTimeout)
 	var re *responseError
 	if errors.As(err, &re) && re.status == http.StatusBadRequest {
 		// An older control plane rejects the unknown field: register as before.
 		body.AcceptsCredential = false
+		body.Features = nil
 		err = c.fleetAs(ctx, auth.Bearer(), http.MethodPost, "/v1/fleet/register", body, out, callTimeout)
 	}
 	if err != nil {

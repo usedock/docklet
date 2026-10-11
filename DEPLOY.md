@@ -669,16 +669,20 @@ been validated for your image.
   only. Generations move on short-lived presigned URLs that the control plane
   mints per transfer, so a host can write and read exactly one object and never
   holds the bucket credentials, which stay inside the control plane.
-- **Confined guests leave only through the egress proxy.** Docks booted with an
-  egress allowlist (issue-to-PR runs) have their forwarded traffic dropped and
+- **Confined guests leave only through the egress proxy.** Docks booted or
+  resumed with an egress allowlist (issue-to-PR runs, and docks on an
+  environment with an outbound allowlist) have their forwarded traffic dropped and
   every host-bound packet refused except the proxy port, by host iptables rules
   keyed to the guest IP, so root inside the guest cannot lift them. The proxy is
   CONNECT-only, admits allowlisted hosts on 443, refuses private, loopback, and
   link-local resolutions (except ranges an operator opts into with
   `DOCKLET_EGRESS_ALLOW_PRIVATE`, for a control plane on a private network),
   and binds only the guest gateway address, never a
-  public or loopback interface. Rules are removed on stop and destroy so a
-  reused IP never inherits them. Allowlists name hosts, not tenants: an
+  public or loopback interface. A boot or resume that cannot confine fails
+  instead of running open. A restarted docklet re-arms the allowlist of each
+  dock it adopts; an adopted ephemeral run keeps its rules but reaches
+  nothing. Rules are removed on stop and destroy so a reused IP never inherits
+  them. Allowlists name hosts, not tenants: an
   allowlisted multi-tenant service (GitHub, a package registry) can still
   receive data pushed with credentials the guest brings itself.
 - **Guest network isolation** applies to every dock, confined or not, and is

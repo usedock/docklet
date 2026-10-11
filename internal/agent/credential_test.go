@@ -152,7 +152,7 @@ func TestRegisterAnnouncesCredentialSupportAndFallsBackForOlderBackends(t *testi
 	}
 
 	calls := transport.callsMatching("/v1/fleet/register")
-	if len(calls) != 2 || !strings.Contains(string(calls[0].body), `"acceptsCredential":true`) || strings.Contains(string(calls[1].body), "acceptsCredential") {
+	if len(calls) != 2 || !strings.Contains(string(calls[0].body), `"acceptsCredential":true`) || strings.Contains(string(calls[1].body), "acceptsCredential") || !strings.Contains(string(calls[0].body), `"features":["egress-on-resume"]`) || strings.Contains(string(calls[1].body), "features") {
 		t.Fatalf("register bodies = %d calls, want one with the flag then one without", len(calls))
 	}
 }
