@@ -940,9 +940,9 @@ func (h *Host) freezeOnly(ctx context.Context, dockID string, parentID *string, 
 
 // GenerationBase names the base image a microvm generation needs to restore, so
 // the control plane can place its resumes only on hosts holding that base.
-func (h *Host) GenerationBase(ctx context.Context, snapshotID string) string {
+func (h *Host) GenerationBase(ctx context.Context, snapshotID string) (string, error) {
 	if h.diskOnly() || h.cfg.Snaps.BaseImage == "" {
-		return ""
+		return "", nil
 	}
 	return h.cfg.Snaps.GenerationBase(ctx, snapshotID)
 }
@@ -1429,17 +1429,17 @@ func (h *Host) freezeRootfs(ctx context.Context, whole bool, dockID, rootfs, sna
 
 // GenerationImage names the Dockyard image a microvm generation's disk derives from, "" for a
 // host-built base.
-func (h *Host) GenerationImage(ctx context.Context, snapshotID string) string {
+func (h *Host) GenerationImage(ctx context.Context, snapshotID string) (string, error) {
 	if h.diskOnly() {
-		return ""
+		return "", nil
 	}
 	return h.cfg.Snaps.GenerationImage(ctx, snapshotID)
 }
 
 // GenerationSHA256 is the sha256 of a whole-image generation's stored object, "" for deltas.
-func (h *Host) GenerationSHA256(ctx context.Context, snapshotID string) string {
+func (h *Host) GenerationSHA256(ctx context.Context, snapshotID string) (string, error) {
 	if h.diskOnly() {
-		return ""
+		return "", nil
 	}
 	return h.cfg.Snaps.GenerationSHA256(ctx, snapshotID)
 }

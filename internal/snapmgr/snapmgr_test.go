@@ -353,7 +353,7 @@ func TestRebuiltBaseKeepsOlderGenerationsRestorable(t *testing.T) {
 	if second.BaseFingerprint != old {
 		t.Fatalf("capture after rebuild diffed against %q, want the dock's own base %q", second.BaseFingerprint, old)
 	}
-	if got := c.GenerationBase(ctx, "s2"); got != old {
+	if got, _ := c.GenerationBase(ctx, "s2"); got != old {
 		t.Fatalf("generation base = %q, want %q", got, old)
 	}
 	restored := filepath.Join(dir, "restored", "rootfs.ext4")
@@ -615,7 +615,7 @@ func TestFreezeRootfsFullWritesAWholeChecksummedImage(t *testing.T) {
 	if err != nil || persisted.SHA256 != manifest.SHA256 || persisted.SizeBytes != manifest.SizeBytes {
 		t.Fatalf("persisted manifest = %+v, %v", persisted, err)
 	}
-	if c.GenerationSHA256(ctx, "s1") != manifest.SHA256 {
+	if got, err := c.GenerationSHA256(ctx, "s1"); err != nil || got != manifest.SHA256 {
 		t.Fatal("GenerationSHA256 disagrees with the manifest")
 	}
 	if _, err := os.Stat(filepath.Join(c.GensDir, "s1", "rootfs.ext4")); !os.IsNotExist(err) {
@@ -640,8 +640,8 @@ func TestFreezeRootfsFullReportsTheDockyardBaseImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Image != "ubuntu-24.04" || c.GenerationImage(ctx, "s1") != "ubuntu-24.04" {
-		t.Fatalf("image = %q / %q, want ubuntu-24.04", manifest.Image, c.GenerationImage(ctx, "s1"))
+	if got, err := c.GenerationImage(ctx, "s1"); err != nil || manifest.Image != "ubuntu-24.04" || got != "ubuntu-24.04" {
+		t.Fatalf("image = %q / %q (%v), want ubuntu-24.04", manifest.Image, got, err)
 	}
 	// A dock labeled with a base the host built itself reports none.
 	built := addBase(t, c.BaseImage, 9)
@@ -933,5 +933,68 @@ func TestMaterializeDiskMarksAWholeImageFromAnUnheldImageUnknown(t *testing.T) {
 	}
 	if got := disk.DockImage(c.BaseImage, dest2); got != "" {
 		t.Fatalf("dock image = %q, want empty", got)
+	}
+}
+
+// unreadableStore refuses to read back any generation but the allowed ones, as the control plane
+// does for a fleet host and a capture it has not recorded yet.
+type unreadableStore struct {
+	store.Store
+	allow map[string]bool
+}
+
+func (s unreadableStore) Get(ctx context.Context, snapshotID, name string) (io.ReadCloser, error) {
+	if !s.allow[snapshotID] {
+		return nil, errors.New("generation_forbidden")
+	}
+	return s.Store.Get(ctx, snapshotID, name)
+}
+
+func TestCaptureAnswersDoNotDependOnReadingTheManifestBack(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, fp := fullFixture(t)
+	backing := c.Store
+	c.Store = unreadableStore{Store: backing}
+	full, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "whole", "full", c.HostFamily, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.GenerationImage(ctx, "whole"); err != nil || got != "ubuntu-24.04" {
+		t.Fatalf("image = %q (%v), want ubuntu-24.04 although the manifest cannot be read back", got, err)
+	}
+	if got, err := c.GenerationSHA256(ctx, "whole"); err != nil || got == "" || got != full.SHA256 {
+		t.Fatalf("sha256 = %q (%v), want %q", got, err, full.SHA256)
+	}
+	if _, err := c.FreezeRootfs(ctx, "d1", rootfs, "delta", "full", c.HostFamily, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.GenerationBase(ctx, "delta"); err != nil || got != fp {
+		t.Fatalf("base = %q (%v), want %q", got, err, fp)
+	}
+	// A generation this host did not write still reads from the store.
+	fresh := &Coordinator{Store: unreadableStore{Store: backing, allow: map[string]bool{"whole": true}}, BaseImage: c.BaseImage, HostFamily: c.HostFamily}
+	if got, err := fresh.GenerationImage(ctx, "whole"); err != nil || got != "ubuntu-24.04" {
+		t.Fatalf("stored generation image = %q (%v), want ubuntu-24.04", got, err)
+	}
+}
+
+// Fail closed: a manifest that is neither remembered nor readable is an error, never an empty
+// base, checksum or image the control plane would act on (export_base_unsupported, wrong placement).
+func TestGenerationAnswersFailClosedWhenTheManifestIsUnreadable(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, _ := fullFixture(t)
+	if _, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "whole", "full", c.HostFamily, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A restarted or different coordinator has no memory of the capture and the store refuses it.
+	fresh := &Coordinator{Store: unreadableStore{Store: c.Store}, BaseImage: c.BaseImage, HostFamily: c.HostFamily}
+	if got, err := fresh.GenerationImage(ctx, "whole"); err == nil {
+		t.Fatalf("image = %q with no error, want an error", got)
+	}
+	if got, err := fresh.GenerationSHA256(ctx, "whole"); err == nil {
+		t.Fatalf("sha256 = %q with no error, want an error", got)
+	}
+	if got, err := fresh.GenerationBase(ctx, "whole"); err == nil {
+		t.Fatalf("base = %q with no error, want an error", got)
 	}
 }

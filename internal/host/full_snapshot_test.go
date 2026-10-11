@@ -74,14 +74,14 @@ func TestSnapshotCreateFullWritesAWholeImageWithItsChecksum(t *testing.T) {
 	stored, _ := io.ReadAll(rc)
 	_ = rc.Close()
 	sum := sha256.Sum256(stored)
-	if got := h.GenerationSHA256(ctx, id); got != hex.EncodeToString(sum[:]) {
-		t.Fatalf("GenerationSHA256 = %q, want %x", got, sum)
+	if got, err := h.GenerationSHA256(ctx, id); err != nil || got != hex.EncodeToString(sum[:]) {
+		t.Fatalf("GenerationSHA256 = %q (%v), want %x", got, err, sum)
 	}
 	if size != int64(len(stored)) || manifest.SizeBytes != size {
 		t.Fatalf("size = %d, manifest sizeBytes = %d, stored = %d", size, manifest.SizeBytes, len(stored))
 	}
-	if got := h.GenerationBase(ctx, id); got != "" {
-		t.Fatalf("a whole image must not name a base fingerprint, got %q", got)
+	if got, err := h.GenerationBase(ctx, id); err != nil || got != "" {
+		t.Fatalf("a whole image must not name a base fingerprint, got %q (%v)", got, err)
 	}
 }
 
@@ -96,8 +96,8 @@ func TestGenerationImageNamesTheDockyardBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := h.GenerationImage(ctx, id); got != "" {
-		t.Fatalf("host-built base reported image %q", got)
+	if got, err := h.GenerationImage(ctx, id); err != nil || got != "" {
+		t.Fatalf("host-built base reported image %q (%v)", got, err)
 	}
 	// Pulled from Dockyard: reported by name.
 	if err := disk.RecordBaseSource(pointer, fp, apiv1.DefaultImage, "2026.10"); err != nil {
@@ -107,8 +107,8 @@ func TestGenerationImageNamesTheDockyardBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := h.GenerationImage(ctx, id); got != apiv1.DefaultImage {
-		t.Fatalf("image = %q, want %q", got, apiv1.DefaultImage)
+	if got, err := h.GenerationImage(ctx, id); err != nil || got != apiv1.DefaultImage {
+		t.Fatalf("image = %q (%v), want %q", got, err, apiv1.DefaultImage)
 	}
 }
 
@@ -118,7 +118,9 @@ func TestSnapshotCreateFullRefusesContainerDocks(t *testing.T) {
 	if _, _, _, err := h.SnapshotCreateFull(ctx, "dock-1", nil, apiv1.SnapshotFull, false, false); err == nil || !strings.Contains(err.Error(), "microvm") {
 		t.Fatalf("err = %v, want a microvm-only refusal", err)
 	}
-	if h.GenerationImage(ctx, "x") != "" || h.GenerationSHA256(ctx, "x") != "" {
+	image, ierr := h.GenerationImage(ctx, "x")
+	sum, serr := h.GenerationSHA256(ctx, "x")
+	if image != "" || sum != "" || ierr != nil || serr != nil {
 		t.Fatal("a container host reports no image or checksum")
 	}
 }

@@ -493,13 +493,35 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		resp := apiv1.SnapshotCreateResponse{SnapshotID: id, SizeBytes: size, CPUFamily: family, BaseFingerprint: s.deps.Host.GenerationBase(lifecycleCtx(r), id)}
-		if req.Full {
-			resp.SHA256 = s.deps.Host.GenerationSHA256(lifecycleCtx(r), id)
-			resp.BaseImage = s.deps.Host.GenerationImage(lifecycleCtx(r), id)
-		}
-		return resp, nil
+		return snapshotAnswer(lifecycleCtx(r), s.deps.Host, id, size, family, req.Full)
 	})
+}
+
+// generationDescriber reads what a capture's manifest records.
+type generationDescriber interface {
+	GenerationBase(ctx context.Context, snapshotID string) (string, error)
+	GenerationSHA256(ctx context.Context, snapshotID string) (string, error)
+	GenerationImage(ctx context.Context, snapshotID string) (string, error)
+}
+
+// snapshotAnswer describes a capture from its manifest; an unreadable manifest fails the capture
+// rather than answering an empty base, checksum or image the control plane would act on.
+func snapshotAnswer(ctx context.Context, h generationDescriber, id string, size int64, family string, full bool) (apiv1.SnapshotCreateResponse, error) {
+	resp := apiv1.SnapshotCreateResponse{SnapshotID: id, SizeBytes: size, CPUFamily: family}
+	var err error
+	if resp.BaseFingerprint, err = h.GenerationBase(ctx, id); err != nil {
+		return resp, fmt.Errorf("describe generation %s: %w", id, err)
+	}
+	if !full {
+		return resp, nil
+	}
+	if resp.SHA256, err = h.GenerationSHA256(ctx, id); err != nil {
+		return resp, fmt.Errorf("describe generation %s: %w", id, err)
+	}
+	if resp.BaseImage, err = h.GenerationImage(ctx, id); err != nil {
+		return resp, fmt.Errorf("describe generation %s: %w", id, err)
+	}
+	return resp, nil
 }
 
 func (s *Server) handleSnapshotLoad(w http.ResponseWriter, r *http.Request) {
