@@ -35,14 +35,49 @@ func pidAlive(pid int) bool {
 	return code == stillActive
 }
 
-func killPid(pid int) error {
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+// exited reports whether pid is verifiably gone: no such pid, or a process
+// whose exit code is not STILL_ACTIVE. A pid we cannot even query is not
+// reported as exited, so a failed kill of a live process is never hidden.
+func exited(pid int) bool {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		// Already gone.
-		return nil
+		return err == windows.ERROR_INVALID_PARAMETER
 	}
 	defer windows.CloseHandle(h)
-	return windows.TerminateProcess(h, 1)
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err != nil {
+		return false
+	}
+	return code != stillActive
+}
+
+// killPid terminates pid. A process that already exited is a no-op: while an
+// exited process is torn down, OpenProcess and TerminateProcess can fail with
+// ERROR_ACCESS_DENIED, so a failure only counts as success if the process is
+// verifiably gone. The caller has already checked the pid's start stamp.
+func killPid(pid int) error {
+	if pid <= 0 || exited(pid) {
+		return nil
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		if exited(pid) {
+			return nil
+		}
+		return err
+	}
+	defer windows.CloseHandle(h)
+	var code uint32
+	if err := windows.GetExitCodeProcess(h, &code); err == nil && code != stillActive {
+		return nil
+	}
+	if err := windows.TerminateProcess(h, 1); err != nil {
+		if exited(pid) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // procStart is the creation time of pid as a FILETIME.

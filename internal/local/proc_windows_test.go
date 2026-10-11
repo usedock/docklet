@@ -30,6 +30,14 @@ func TestPidLivenessAndKillOnWindows(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(done) }()
+	pid := cmd.Process.Pid
+	// Hold our own handle so the process object outlives cmd.Wait and we can
+	// wait for it to be fully signalled before asserting.
+	hp, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(hp)
 	if !pidAlive(cmd.Process.Pid) {
 		t.Fatal("a running process must be alive")
 	}
@@ -40,6 +48,9 @@ func TestPidLivenessAndKillOnWindows(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("process not killed")
+	}
+	if ev, err := windows.WaitForSingleObject(hp, 10000); err != nil || ev != windows.WAIT_OBJECT_0 {
+		t.Fatalf("process did not fully exit: %v %v", ev, err)
 	}
 	if pidAlive(cmd.Process.Pid) {
 		t.Fatal("a killed process must not be alive")
