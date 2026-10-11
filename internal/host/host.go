@@ -750,7 +750,6 @@ func writeGateFiles(dir string, guestIP, gateway, mask, mac string, resetKeys bo
 			return err
 		}
 	}
-	}
 	unit := "[Match]\nMACAddress=" + mac + "\n\n[Network]\nAddress=" + guestIP + "/" + mask + "\nGateway=" + gateway + "\nDNS=1.1.1.1\nDHCP=no\n"
 	if err := g.WriteFile("etc/systemd/network/10-dock.network", []byte(unit), 0o644); err != nil {
 		return err
