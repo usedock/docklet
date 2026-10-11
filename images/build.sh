@@ -89,7 +89,10 @@ deb %s %s-security main universe
   chroot_exec "$tree" apt-get -y dist-upgrade
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 docker.io \
-    cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping
+    cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping systemd-resolved
+  # The package may replace resolv.conf; keep the build's working copy for later apt steps.
+  rm -f "$tree/etc/resolv.conf"
+  cp /etc/resolv.conf "$tree/etc/resolv.conf"
   ensure_fw_cfg "$tree"
   # Same user as scripts/build-image.sh: sudo and Docker without a password.
   chroot_exec "$tree" useradd -m -s /bin/bash -G sudo,docker user
@@ -104,14 +107,14 @@ deb %s %s-security main universe
   install -m 0644 "$HERE/overlay/dock-guest-init.service" "$HERE/overlay/dock-fast-agent.service" "$tree/etc/systemd/system/"
   install -m 0644 "$HERE/overlay/99-dock-dhcp.network" "$tree/etc/systemd/network/"
   chroot_exec "$tree" systemctl enable dock-guest-init.service dock-fast-agent.service docker.service \
-    systemd-networkd.service ssh.service
+    systemd-networkd.service systemd-resolved.service ssh.service
   chroot_exec "$tree" systemctl mask apt-daily.service apt-daily.timer apt-daily-upgrade.timer \
     motd-news.timer e2scrub_all.timer e2scrub_reap.service systemd-networkd-wait-online.service || true
   umount_chroot "$tree"
 }
 
 build_tree() {
-  local name="$1" tree="$WORK/trees/$1" base setup
+  local name="$1" tree="$WORK/trees/$1" base setup data
   [ -d "$tree" ] && return 0
   mkdir -p "$WORK/trees"
   base="$(catalog_get "$name" base)"
@@ -125,12 +128,15 @@ build_tree() {
   cp -a "$WORK/trees/$base" "$tree"
   if [ -n "$setup" ]; then
     install -m 0755 "$HERE/$setup" "$tree/tmp/dock-setup.sh"
+    # Optional data for the script (e.g. a lockfile): images/<setup name without .sh and setup- prefix>/.
+    data="$HERE/$(basename "${setup#setup-}" .sh)"
+    [ -d "$data" ] && cp -a "$data" "$tree/tmp/dock-setup-data"
     mount_chroot "$tree"
     # apt and downloads need DNS inside the chroot.
     cp /etc/resolv.conf "$tree/etc/resolv.conf" 2>/dev/null || true
     chroot_exec "$tree" /tmp/dock-setup.sh
     umount_chroot "$tree"
-    rm -f "$tree/tmp/dock-setup.sh"
+    rm -rf "$tree/tmp/dock-setup.sh" "$tree/tmp/dock-setup-data"
   fi
 }
 

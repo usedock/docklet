@@ -47,6 +47,17 @@ def main():
         "agent config mode": ("stat -c %a /etc/dock-fast-agent.json", lambda out: out.strip() == "600"),
         "docker client": ("docker version --format '{{.Client.Version}}'", lambda out: out.strip() != ""),
         "user in docker group": ("id -nG user", lambda out: "docker" in out.split()),
+        # DNS must come from the DHCP-offered server (QEMU user networking: 10.0.2.3),
+        # not a hard-coded resolver. The lease can land just after the agent starts.
+        "dhcp dns server": (
+            "for i in $(seq 30); do resolvectl dns 2>/dev/null | grep -qF 10.0.2.3 && break; sleep 1; done; "
+            "resolvectl dns; readlink /etc/resolv.conf; grep -q '^nameserver 127.0.0.53' /etc/resolv.conf",
+            lambda out: "10.0.2.3" in out,
+        ),
+        "resolves a name": (
+            "for i in $(seq 15); do getent hosts github.com && exit 0; sleep 2; done; exit 1",
+            lambda out: out.strip() != "",
+        ),
         # The daemon may still be starting when the agent first answers.
         "docker daemon": (
             "for i in $(seq 45); do systemctl is-active -q docker && break; sleep 1; done; "
