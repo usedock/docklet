@@ -13,6 +13,11 @@ on:
         type: choice
         options: [build, ghcr]
         default: ghcr
+      push_pull:
+        description: "dock push / dock pull round trip: auto (run when the control plane supports it, else skip), skip, or require (fail when unsupported). Pull requests and the schedule use require."
+        type: choice
+        options: [auto, skip, require]
+        default: auto
   schedule:
     - cron: "17 4 * * 1"
   pull_request:
@@ -37,13 +42,14 @@ concurrency:
 jobs:
   selfhost:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     defaults:
       run:
         shell: bash
     env:
       LOGS: /home/runner/selfhost-logs
       DOCK_URL: http://localhost:8088
+      PUSH_PULL: ${{ inputs.push_pull || 'require' }}
     steps:
       # The 80 GiB dock needs more free disk than the runner has; drop toolchains this job never uses.
       - name: free disk for the 80 GiB dock
@@ -64,6 +70,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      - name: QEMU for the local engine (dock push / dock pull)
+        if: env.PUSH_PULL != 'skip'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-x86 qemu-utils
       - name: allow /dev/kvm
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
