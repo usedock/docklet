@@ -8,6 +8,11 @@ on:
       dock_ref:
         description: usedock/dock ref (branch, tag or sha) that provides deploy/self-host
         default: main
+      images:
+        description: "Control plane images: build (from the checked-out ref) or ghcr (pull the published release)"
+        type: choice
+        options: [build, ghcr]
+        default: build
   schedule:
     - cron: "17 4 * * 1"
   pull_request:
@@ -71,13 +76,13 @@ jobs:
           cd dock-src/deploy/self-host
           git -C ../.. rev-parse HEAD | tee "$LOGS/dock-ref.txt"
           s=$(date +%s)
-          # Public GHCR images first; if they cannot be pulled, build from the checked-out repo.
-          if ! ./setup.sh 2>&1 | tee "$LOGS/setup.log"; then
-            echo "pull failed; building from source" | tee -a "$LOGS/setup.log"
-            echo "build" > "$LOGS/setup-mode.txt"
-            ./setup.sh --build 2>&1 | tee -a "$LOGS/setup.log"
+          # The GHCR packages are not public yet, so build from the checked-out ref unless asked to pull.
+          mode="${{ inputs.images || 'build' }}"
+          echo "$mode" > "$LOGS/setup-mode.txt"
+          if [ "$mode" = ghcr ]; then
+            ./setup.sh 2>&1 | tee "$LOGS/setup.log"
           else
-            echo "ghcr" > "$LOGS/setup-mode.txt"
+            ./setup.sh --build 2>&1 | tee "$LOGS/setup.log"
           fi
           printf 'control plane up (%s)  %ss\n' "$(cat "$LOGS/setup-mode.txt")" "$(( $(date +%s) - s ))" | tee -a "$LOGS/timings.txt"
       - name: bootstrap this runner as a docklet host
