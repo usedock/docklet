@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/usedock/docklet/internal/dockyard"
 )
 
 // TempDir creates a private working directory under the data dir for a push or pull.
@@ -110,25 +111,49 @@ func (e *Engine) CheckPushSpace(rec Record) error {
 	if rec.ImageDir != "" {
 		data += allocatedBytes(filepath.Join(rec.ImageDir, "base.qcow2"))
 	}
-	note := ""
-	if !sparseTemp {
-		note = " (on Windows the flattened disk is written at its full size, see docklet#76)"
-	}
-	return e.checkFreeSpace(pushSpaceNeed(int64(min(max(rec.DiskGiB, 0), 1<<30))<<30, data, sparseTemp), "push", note)
+	return e.checkFreeSpace(pushSpaceNeed(int64(min(max(rec.DiskGiB, 0), 1<<30))<<30, data), "push", "")
 }
 
 // pushSpaceNeed estimates the peak space of a push: the flattened raw disk plus its zstd copy.
-// The raw disk takes its data (overlay plus base, at most the disk size) when written sparse,
-// else the whole disk; the zstd copy is given half the data as headroom.
-func pushSpaceNeed(diskBytes, dataBytes int64, sparse bool) int64 {
+// The raw disk is written sparse, so it takes its data (overlay plus base, at most the disk
+// size); the zstd copy is given half the data as headroom.
+func pushSpaceNeed(diskBytes, dataBytes int64) int64 {
 	if diskBytes > 0 {
 		dataBytes = min(dataBytes, diskBytes)
 	}
-	raw := dataBytes
-	if !sparse {
-		raw = max(diskBytes, dataBytes)
+	return dataBytes + dataBytes/2
+}
+
+// rawDataRatio is how many times larger than its zstd file a disk's data is assumed to be
+// when pulling, where only the compressed size is known.
+const rawDataRatio = 3
+
+// PullSpaceNeed estimates the peak space of a pull. The downloaded zstd file and the sparse raw
+// disk (its data) coexist, then the raw disk and the qcow2 made from it do. A base image
+// that is not cached yet is downloaded, decompressed and converted first, and what stays of it
+// (kernel, initrd, base) is held through the pull.
+func (e *Engine) PullSpaceNeed(ctx context.Context, exportBytes, diskBytes int64, image string) int64 {
+	imgPeak, imgKept := int64(0), int64(0)
+	if im, err := e.ResolveImage(ctx, image); err == nil && !e.Cache.Cached(im) {
+		var files int64
+		for _, f := range im.Files {
+			files += f.Size
+		}
+		rootfs := im.Files[dockyard.FileRootfs].Size
+		data := rootfs * rawDataRatio
+		imgPeak = files + data
+		imgKept = files - rootfs + data
 	}
-	return raw + dataBytes/2
+	return pullSpaceNeed(exportBytes, diskBytes, imgPeak, imgKept)
+}
+
+func pullSpaceNeed(exportBytes, diskBytes, imgPeak, imgKept int64) int64 {
+	exportBytes = min(exportBytes, 1<<50) // keeps the arithmetic far from overflow
+	data := exportBytes * rawDataRatio
+	if diskBytes > 0 {
+		data = min(data, diskBytes)
+	}
+	return max(imgPeak, imgKept+data+max(exportBytes, data))
 }
 
 func (e *Engine) checkFreeSpace(need int64, what, note string) error {

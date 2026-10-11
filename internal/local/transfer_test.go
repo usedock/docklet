@@ -13,18 +13,36 @@ import (
 )
 
 func TestFlattenDiskArgv(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "out.raw")
 	var got []string
 	q := &QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img",
 		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			got = append([]string{name}, args...)
 			return nil, nil
 		}}
-	if err := q.FlattenDisk(context.Background(), "disk.qcow2", "out.raw"); err != nil {
+	if err := q.FlattenDisk(context.Background(), "disk.qcow2", raw); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/q/qemu-img", "convert", "-f", "qcow2", "-O", "raw", "disk.qcow2", "out.raw"}
+	want := []string{"/q/qemu-img", "convert", "-f", "qcow2", "-O", "raw", "disk.qcow2", raw}
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv %v, want %v", got, want)
+	}
+}
+
+func TestFlattenDiskPreCreatesTarget(t *testing.T) {
+	raw := filepath.Join(t.TempDir(), "out.raw")
+	seen := false
+	q := &QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img",
+		Run: func(context.Context, string, ...string) ([]byte, error) {
+			_, err := os.Stat(raw)
+			seen = err == nil
+			return nil, nil
+		}}
+	if err := q.FlattenDisk(context.Background(), "disk.qcow2", raw); err != nil {
+		t.Fatal(err)
+	}
+	if !seen {
+		t.Fatal("the raw target must exist (flagged sparse) before qemu-img runs")
 	}
 }
 
@@ -251,18 +269,34 @@ func TestCleanStaleTemp(t *testing.T) {
 	}
 }
 
-func TestPushSpaceNeedCountsDataWhenSparse(t *testing.T) {
+func TestPushSpaceNeedCountsData(t *testing.T) {
 	const gib = int64(1) << 30
-	// A 20 GiB disk holding 2 GiB: sparse needs the data plus zstd headroom, not 20 GiB.
-	if got := pushSpaceNeed(20*gib, 2*gib, true); got != 3*gib {
-		t.Fatalf("sparse need %d, want %d", got, 3*gib)
-	}
-	if got := pushSpaceNeed(20*gib, 2*gib, false); got != 21*gib {
-		t.Fatalf("non-sparse need %d, want %d", got, 21*gib)
+	// A 20 GiB disk holding 2 GiB: the data plus zstd headroom, not 20 GiB.
+	if got := pushSpaceNeed(20*gib, 2*gib); got != 3*gib {
+		t.Fatalf("need %d, want %d", got, 3*gib)
 	}
 	// Overlay plus base can count more than the disk holds; the disk size bounds it.
-	if got := pushSpaceNeed(4*gib, 6*gib, true); got != 6*gib {
+	if got := pushSpaceNeed(4*gib, 6*gib); got != 6*gib {
 		t.Fatalf("capped need %d, want %d", got, 6*gib)
+	}
+}
+
+func TestPullSpaceNeed(t *testing.T) {
+	const gib = int64(1) << 30
+	// 1 GiB export of a 20 GiB disk: data ~3 GiB; peak is data plus the larger of export and data.
+	if got := pullSpaceNeed(gib, 20*gib, 0, 0); got != 6*gib {
+		t.Fatalf("need %d, want %d", got, 6*gib)
+	}
+	// The data cannot exceed the disk.
+	if got := pullSpaceNeed(10*gib, 4*gib, 0, 0); got != 14*gib {
+		t.Fatalf("capped need %d, want %d", got, 14*gib)
+	}
+	// A base image still to fetch is held through the pull, and its own peak can dominate.
+	if got := pullSpaceNeed(gib, 20*gib, 0, 2*gib); got != 8*gib {
+		t.Fatalf("with kept image %d, want %d", got, 8*gib)
+	}
+	if got := pullSpaceNeed(gib, 20*gib, 9*gib, 2*gib); got != 9*gib {
+		t.Fatalf("image peak %d, want %d", got, 9*gib)
 	}
 }
 
@@ -275,14 +309,7 @@ func TestCheckPushSpaceUsesAllocatedData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = e.CheckPushSpace(rec)
-	if sparseTemp {
-		if err != nil {
-			t.Fatalf("a 1 PiB disk holding a few bytes must fit when the raw is sparse: %v", err)
-		}
-		return
-	}
-	if codeOf(err) != "insufficient_space" || !strings.Contains(err.Error(), "docklet#76") {
-		t.Fatalf("got %v", err)
+	if err := e.CheckPushSpace(rec); err != nil {
+		t.Fatalf("a 1 PiB disk holding a few bytes must fit when the raw is sparse: %v", err)
 	}
 }

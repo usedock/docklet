@@ -337,8 +337,10 @@ func decompress(ctx context.Context, src, dest string, max int64) error {
 	if err != nil {
 		return errf("cache_error", "%v", err)
 	}
+	// Zero runs are skipped, not written, so a mostly-empty disk takes only its data.
+	_ = markSparse(out)
 	// One byte past the cap proves the stream is larger than allowed.
-	n, err := io.Copy(out, io.LimitReader(ctxReader{ctx, zr}, max+1))
+	n, err := copySparse(out, io.LimitReader(ctxReader{ctx, zr}, max+1))
 	if err == nil && n > max {
 		err = fmt.Errorf("the decompressed disk is larger than the %s limit", humanBytes(max))
 	}
@@ -351,6 +353,69 @@ func decompress(ctx context.Context, src, dest string, max int64) error {
 		return errf("decompress_failed", "%v", err)
 	}
 	return out.Close()
+}
+
+// sparseBlock is the granularity at which all-zero input is skipped instead of written.
+const sparseBlock = 64 << 10
+
+// copySparse copies r to f (an empty file at offset 0) and returns the bytes copied. Blocks
+// of zeros are seeked over so the file stays sparse; its size is set at the end.
+func copySparse(f *os.File, r io.Reader) (int64, error) {
+	buf := make([]byte, sparseBlock)
+	var total int64
+	holeEnd := false
+	for {
+		n, err := readBlock(r, buf)
+		if n > 0 {
+			if isZero(buf[:n]) {
+				if _, serr := f.Seek(int64(n), io.SeekCurrent); serr != nil {
+					return total, serr
+				}
+				holeEnd = true
+			} else {
+				if _, werr := f.Write(buf[:n]); werr != nil {
+					return total, werr
+				}
+				holeEnd = false
+			}
+			total += int64(n)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+	if holeEnd {
+		if err := f.Truncate(total); err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// readBlock fills buf and returns r's own error: io.ReadFull would turn a truncated stream's
+// io.ErrUnexpectedEOF into what looks like a clean short final block.
+func readBlock(r io.Reader, buf []byte) (int, error) {
+	n := 0
+	for n < len(buf) {
+		m, err := r.Read(buf[n:])
+		n += m
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func isZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Arch is the image architecture for this machine.
