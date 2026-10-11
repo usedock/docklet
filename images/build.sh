@@ -55,7 +55,11 @@ chroot_exec() { local t="$1"; shift; chroot "$t" env DEBIAN_FRONTEND=noninteract
 build_base() {
   local tree="$1"
   debootstrap --arch="$ARCH" "$UBUNTU_RELEASE" "$tree" "$MIRROR"
-  sed -i 's/^Components:.*/Components: main universe/' "$tree/etc/apt/sources.list.d/ubuntu.sources"
+  # debootstrap writes main only; add updates, security and universe.
+  printf 'deb %s %s main universe
+deb %s %s-updates main universe
+deb %s %s-security main universe
+'     "$MIRROR" "$UBUNTU_RELEASE" "$MIRROR" "$UBUNTU_RELEASE" "$MIRROR" "$UBUNTU_RELEASE" > "$tree/etc/apt/sources.list"
   mount_chroot "$tree"
   chroot_exec "$tree" apt-get update
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
