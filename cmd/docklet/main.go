@@ -233,11 +233,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("docklet: egress proxy: %v", err)
 	}
-	go func() {
-		if err := http.Serve(egressListener, egressProxy); err != nil {
-			log.Printf("docklet: egress proxy stopped, confined guests lose egress: %v", err)
-		}
-	}()
+	go serveEgress(egressListener, egressProxy, log.Fatalf)
 
 	idemTTL := idem.DefaultTTL
 	if raw := os.Getenv("DOCKLET_IDEM_TTL"); raw != "" {
@@ -432,4 +428,16 @@ func parseOvercommit(raw string) (float64, error) {
 		return 0, fmt.Errorf("DOCKLET_DISK_OVERCOMMIT %q must be a positive number like 1.0 or 1.5", raw)
 	}
 	return r, nil
+}
+
+// serveEgress runs the egress proxy and calls fatal if it stops for any reason
+// but a clean shutdown. Confined guests lose all egress once the proxy is gone
+// while the host keeps advertising egress-on-resume, so the process exits and
+// the service manager restarts it.
+func serveEgress(l net.Listener, h http.Handler, fatal func(format string, args ...any)) {
+	err := http.Serve(l, h)
+	if err == nil || errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+		return
+	}
+	fatal("docklet: egress proxy stopped, confined guests lose egress: %v", err)
 }
