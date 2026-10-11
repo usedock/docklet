@@ -93,9 +93,8 @@ done
 $DOCK exec e2e-off -- 'echo agent-ok' | grep -q agent-ok
 $DOCK rm e2e-off
 # With the network on, slirp maps 10.0.2.2 to the host's 127.0.0.1. Images from the release that
-# adds block_gateway refuse it in the guest; older images ignore the flag. The pinned release
-# does not have it yet, so the assertion runs only with DOCK_E2E_GATEWAY_BLOCK=1 (set it when the
-# pin moves to an image with the block; images/boot-test.sh in the images workflow already covers it).
+# adds block_gateway refuse it in the guest; older images ignore the flag. CI pins such a release
+# and sets DOCK_E2E_GATEWAY_BLOCK=1; without it the block is only reported, for older images.
 $DOCK exec e2e -- getent hosts github.com >/dev/null
 $DOCK exec e2e -- 'echo agent-ok' | grep -q agent-ok
 if probe e2e 10.0.2.2 "$p4"; then

@@ -100,6 +100,7 @@ jobs:
         env:
           DOCK: ${{ runner.temp }}/dock
           DOCK_DATA_DIR: ${{ runner.temp }}/dockdata
+          DOCK_E2E_GATEWAY_BLOCK: "1"
         run: bash scripts/e2e-local.sh
       - name: engine e2e
         env:
