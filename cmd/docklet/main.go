@@ -59,6 +59,14 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "image" {
+		p, err := newPuller(getenv("DOCKLET_IMAGE_DIR", "/var/lib/docklet/images"))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "docklet: %v\n", err)
+			os.Exit(2)
+		}
+		os.Exit(runImage(os.Args[2:], os.Stdout, os.Stderr, p))
+	}
 	// The SDK gives firecracker 3s to bind its socket by default; cold
 	// binaries on small hosts need longer. Overridable per host.
 	if os.Getenv("FIRECRACKER_GO_SDK_INIT_TIMEOUT_SECONDS") == "" {
@@ -99,6 +107,10 @@ func main() {
 
 	basePointer := filepath.Join(imageDir, "base.ext4")
 	isMicroVM := runtime == apiv1.RuntimeMicroVM
+	if isMicroVM {
+		// Pulled Dockyard images are served from the image dir (gvisor hosts run an OCI image).
+		host.SetImageDir(imageDir)
+	}
 	snaps := &snapmgr.Coordinator{
 		Driver: backend,
 		Store:  objectStore,
@@ -298,6 +310,7 @@ func main() {
 			},
 		}
 		if isMicroVM {
+			fleet.Images = func() []string { return host.ServedImages(imageDir) }
 			fleet.Bases = func() []string {
 				fps, err := disk.ListBases(basePointer)
 				if err != nil {

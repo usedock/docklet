@@ -277,6 +277,35 @@ name. A docklet picks up added bases on its next heartbeat, with no restart.
 To roll the fleet to a new image, install the new base on every host the same
 way; old bases stay for the generations that need them.
 
+### Dockyard images on a microvm host
+
+A host serves `ubuntu-24.04` (its built base) plus any Dockyard image you pull:
+
+```sh
+sudo docklet image pull node-22 python-3.12   # verify, install; no restart needed
+docklet image ls                              # name, release, fingerprint
+# or at provision time:
+sudo DOCKLET_IMAGES="node-22 python-3.12" bash scripts/provision-host.sh
+```
+
+- The pull trusts one pinned release (`internal/dockyard/pin.go`): the
+  `dockyard.json` must hash to the pinned sha256, and the rootfs archive must match
+  the size and sha256 the index states. Anything else installs nothing. To move a
+  host to another release, set both `DOCKLET_DOCKYARD_INDEX_URL` and
+  `DOCKLET_DOCKYARD_INDEX_SHA256`.
+- The decompressed rootfs is installed like any base, at
+  `bases/<sha256>/base.ext4`, and named by `images/<name>/base.ext4` (a symlink)
+  with `images/<name>/image.json`. It never changes `base.ext4`, the base new
+  `ubuntu-24.04` docks clone. Re-pulling a newer release repoints the name and
+  keeps the old base for generations that need it.
+- The host kernel stays. Firecracker boots `vmlinux` and `initrd.img` staged from
+  the host kernel (`scripts/install-kernel.sh`); the image's `vmlinuz` and
+  `initrd.img` release assets are not downloaded.
+- The fleet agent reports the served names in the heartbeat `images` field (the
+  built `ubuntu-24.04` once its base exists, plus every pulled image), so the
+  control plane can place a Dock of that image here. A name this host does not
+  hold is refused with `image_unavailable`.
+
 ---
 
 ## 3. Verify a host

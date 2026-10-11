@@ -136,4 +136,21 @@ if grep -rq "^Vulnerable" /sys/devices/system/cpu/vulnerabilities/ 2>/dev/null; 
   echo "provision-host: WARNING: CPU vulnerabilities report Vulnerable, update microcode + firmware" >&2
 fi
 
+# Optional Dockyard images (microvm hosts): DOCKLET_IMAGES="node-22 python-3.12".
+# Each is verified against the pinned index before install; the host kernel stays.
+if [ -n "${DOCKLET_IMAGES:-}" ]; then
+  if [ "${DOCKLET_RUNTIME:-microvm}" = "gvisor" ]; then
+    echo "provision-host: DOCKLET_IMAGES applies to microvm hosts only" >&2
+    exit 1
+  fi
+  DOCKLET_BIN="${DOCKLET_BIN:-$(command -v docklet || echo /usr/local/bin/docklet)}"
+  if [ ! -x "${DOCKLET_BIN}" ]; then
+    echo "provision-host: DOCKLET_IMAGES set but docklet binary not found (set DOCKLET_BIN)" >&2
+    exit 1
+  fi
+  # Word splitting is intended: one image name per word.
+  # shellcheck disable=SC2086
+  DOCKLET_IMAGE_DIR="${DOCKLET_IMAGE_DIR:-/var/lib/docklet/images}" "${DOCKLET_BIN}" image pull ${DOCKLET_IMAGES}
+fi
+
 echo "provision-host: done (firecracker ${FC_VERSION})"

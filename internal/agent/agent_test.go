@@ -459,6 +459,52 @@ func TestHeartbeatReportsHeldBases(t *testing.T) {
 	}
 }
 
+func TestHeartbeatReportsServedImages(t *testing.T) {
+	transport := &fakeTransport{}
+	transport.handler = func(recorded) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{"ok":true,"data":{"hostId":"host-1"}}`), nil
+	}
+	cfg := testAgent(t, transport, inventory{})
+	cfg.Images = func() []string { return []string{"node-22", "ubuntu-24.04"} }
+	cfg.heartbeat(context.Background())
+	cfg.Images = func() []string { return []string{} }
+	cfg.heartbeat(context.Background())
+	cfg.Images = nil
+	cfg.heartbeat(context.Background())
+
+	calls := transport.callsMatching("/v1/fleet/heartbeat")
+	if len(calls) != 3 {
+		t.Fatalf("heartbeat calls = %d, want 3", len(calls))
+	}
+	if !strings.Contains(string(calls[0].body), `"images":["node-22","ubuntu-24.04"]`) {
+		t.Fatalf("first heartbeat = %s, want the served images", calls[0].body)
+	}
+	if !strings.Contains(string(calls[1].body), `"images":[]`) {
+		t.Fatalf("second heartbeat = %s, want an explicit empty list", calls[1].body)
+	}
+	if strings.Contains(string(calls[2].body), `"images"`) {
+		t.Fatalf("third heartbeat = %s, want no images field", calls[2].body)
+	}
+}
+
+func TestHeartbeatDropsImagesForOlderBackends(t *testing.T) {
+	transport := &fakeTransport{}
+	transport.handler = func(call recorded) (*http.Response, error) {
+		if strings.Contains(string(call.body), `"images"`) {
+			return jsonResponse(http.StatusBadRequest, `{"ok":false,"code":"validation_error","message":"property images should not exist"}`), nil
+		}
+		return jsonResponse(http.StatusOK, `{"ok":true,"data":{"hostId":"host-1"}}`), nil
+	}
+	cfg := testAgent(t, transport, inventory{})
+	cfg.Images = func() []string { return []string{"node-22"} }
+	cfg.heartbeat(context.Background())
+
+	calls := transport.callsMatching("/v1/fleet/heartbeat")
+	if len(calls) != 2 || strings.Contains(string(calls[1].body), `"images"`) {
+		t.Fatalf("heartbeat calls = %d, want a retry without images", len(calls))
+	}
+}
+
 func TestHeartbeatDropsBasesForOlderBackends(t *testing.T) {
 	transport := &fakeTransport{}
 	transport.handler = func(call recorded) (*http.Response, error) {

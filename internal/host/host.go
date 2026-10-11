@@ -392,12 +392,16 @@ const baseKernelArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw 
 // ErrImageUnavailable refuses an image this host does not serve.
 var ErrImageUnavailable = errors.New("image_unavailable")
 
-// ResolveImage defaults an empty image and rejects any but the one base image.
+// ResolveImage defaults an empty image and serves the built base image plus any
+// Dockyard image pulled onto this host (see images.go); others are unavailable.
 func ResolveImage(image string) (string, error) {
 	switch image {
 	case "":
 		return apiv1.DefaultImage, nil
 	case apiv1.DefaultImage:
+		return image, nil
+	}
+	if dir := servedDir.Load(); dir != nil && installedImage(*dir, image) {
 		return image, nil
 	}
 	return "", fmt.Errorf("%w: %q", ErrImageUnavailable, image)
@@ -452,7 +456,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 				return "", err
 			}
 		} else {
-			if err := disk.ProvisionFromBase(h.cfg.NetRunner, h.cfg.ImageBase, rootfs); err != nil {
+			if err := disk.ProvisionFromBase(h.cfg.NetRunner, basePointerFor(h.cfg.ImageBase, image), rootfs); err != nil {
 				return "", err
 			}
 		}
