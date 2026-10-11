@@ -172,7 +172,7 @@ func TestSpecValidationAndDefaults(t *testing.T) {
 	if err != nil || s.CPUs != DefaultCPUs || s.MemoryMiB != DefaultMemoryMiB || s.DiskGiB != DefaultDiskGiB || s.Network != "on" {
 		t.Fatalf("defaults %+v %v", s, err)
 	}
-	for _, bad := range []Spec{{CPUs: 99}, {MemoryMiB: 10}, {Network: "maybe"}} {
+	for _, bad := range []Spec{{Name: "a/b"}, {CPUs: 99}, {MemoryMiB: 10}, {Network: "maybe"}} {
 		if _, err := bad.withDefaults(); codeOf(err) != "invalid_argument" {
 			t.Errorf("%+v must be invalid, got %v", bad, err)
 		}

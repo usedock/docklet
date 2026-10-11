@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -213,6 +214,8 @@ func (e *Engine) Get(ctx context.Context, ref string) (Dock, error) {
 	return e.view(ctx, r), nil
 }
 
+var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+
 func (s Spec) withDefaults() (Spec, error) {
 	if s.CPUs == 0 {
 		s.CPUs = DefaultCPUs
@@ -227,6 +230,8 @@ func (s Spec) withDefaults() (Spec, error) {
 		s.Network = "on"
 	}
 	switch {
+	case s.Name != "" && !nameRE.MatchString(s.Name):
+		return s, errf("invalid_argument", "invalid dock name %q (letters, digits, '.', '_', '-')", s.Name)
 	case s.CPUs < 1 || s.CPUs > 64:
 		return s, errf("invalid_argument", "cpus must be 1-64")
 	case s.MemoryMiB < 256:
