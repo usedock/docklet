@@ -58,9 +58,18 @@ func TestFlattenNeedsAStoppedDock(t *testing.T) {
 	if len(drv.flattens) != 0 {
 		t.Fatal("nothing may be flattened from a running dock")
 	}
+	before, _ := os.ReadFile(e.file(d.ID, "token"))
 	flat, err := e.Flatten(ctx, "web", dir, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The flattened disk holds the guest's copy of the token, so the local token rotates.
+	after, _ := os.ReadFile(e.file(d.ID, "token"))
+	if len(after) == 0 || string(after) == string(before) {
+		t.Fatalf("flatten must rotate the agent token (before %q after %q)", before, after)
+	}
+	if _, err := os.Stat(e.file(d.ID, "token.tmp")); err == nil {
+		t.Fatal("token.tmp left behind")
 	}
 	if e.alive(d.ID) {
 		t.Fatal("--stop must stop the dock")

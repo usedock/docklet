@@ -59,7 +59,25 @@ func (e *Engine) Flatten(ctx context.Context, ref, dir string, stop bool) (*Flat
 	if err := e.Driver.FlattenDisk(ctx, e.file(rec.ID, "disk.qcow2"), raw); err != nil {
 		return nil, err
 	}
+	// The guest keeps its agent config, token included, in /etc/dock-fast-agent.json on this
+	// disk; rotating the token kills the copy that leaves. The next boot sends the new one.
+	if err := e.rotateToken(rec.ID); err != nil {
+		return nil, err
+	}
 	return &Flat{Record: rec, RawPath: raw}, nil
+}
+
+// rotateToken replaces a stopped dock's agent token, atomically so a crash never leaves it empty.
+func (e *Engine) rotateToken(id string) error {
+	tmp := e.file(id, "token.tmp")
+	if err := os.WriteFile(tmp, []byte(NewToken()), 0o600); err != nil {
+		return errf("store_error", "%v", err)
+	}
+	if err := os.Rename(tmp, e.file(id, "token")); err != nil {
+		_ = os.Remove(tmp)
+		return errf("store_error", "%v", err)
+	}
+	return nil
 }
 
 // ctxReader fails reads once ctx is done so a long file copy stops on Ctrl-C.

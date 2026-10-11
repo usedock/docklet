@@ -549,3 +549,76 @@ func TestPullNameCollisionFailsBeforeExporting(t *testing.T) {
 		t.Fatalf("stderr %q", te.errb)
 	}
 }
+
+// abort closes the connection without an HTTP answer, so the client sees a transport error.
+func abort(w http.ResponseWriter, _ *http.Request) { panic(http.ErrAbortHandler) }
+
+func TestPresignedURLsStayOutOfErrors(t *testing.T) {
+	const sig = "X-Amz-Signature=presigned-secret"
+	t.Run("pull", func(t *testing.T) {
+		te, p := transferEnv(t, "direct")
+		p.readyExport(zstdOf(t, diskBytes), "ubuntu-24.04")
+		mux := p.srv.Config.Handler
+		p.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/v1/docks/exports/"+exportID:
+				st := map[string]any{}
+				for k, v := range p.exportState {
+					st[k] = v
+				}
+				st["url"] = p.srv.URL + "/dl/export?" + sig
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": st})
+			case strings.HasPrefix(r.URL.Path, "/dl/"):
+				abort(w, r)
+			default:
+				mux.ServeHTTP(w, r)
+			}
+		})
+		mustExit(t, te, 1, "pull", remoteID, "--from", "lab", "--name", "back", "--json")
+		if out := te.out.String() + te.errb.String(); strings.Contains(out, "presigned-secret") || !strings.Contains(out, "download_failed") {
+			t.Fatalf("the presigned url must not be printed: %q", out)
+		}
+	})
+	t.Run("push", func(t *testing.T) {
+		te, p := transferEnv(t, "direct")
+		stoppedLocalDock(t, te)
+		mux := p.srv.Config.Handler
+		p.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/v1/docks/import":
+				parts := []any{map[string]any{"number": 1, "url": p.srv.URL + "/s3/part/1?" + sig}}
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "data": map[string]any{"importId": importID,
+					"upload": map[string]any{"mode": "direct", "partSize": 1 << 20, "parts": parts}}})
+			case strings.HasPrefix(r.URL.Path, "/s3/"):
+				abort(w, r)
+			default:
+				mux.ServeHTTP(w, r)
+			}
+		})
+		mustExit(t, te, 1, "push", "web", "--to", "lab", "--json")
+		if out := te.out.String() + te.errb.String(); strings.Contains(out, "presigned-secret") || !strings.Contains(out, "upload_failed") {
+			t.Fatalf("the presigned url must not be printed: %q", out)
+		}
+	})
+}
+
+func TestPushRotatesTheLocalToken(t *testing.T) {
+	te, _ := transferEnv(t, "direct")
+	id := stoppedLocalDock(t, te)
+	path := filepath.Join(te.app.Engine.Dir, "docks", id, "token")
+	before, _ := os.ReadFile(path)
+	mustExit(t, te, 0, "push", "web", "--to", "lab")
+	after, _ := os.ReadFile(path)
+	if len(after) == 0 || bytes.Equal(before, after) {
+		t.Fatal("the pushed disk carries the guest's copy of the token; the local token must rotate")
+	}
+	// The dock still boots with the new token.
+	mustExit(t, te, 0, "resume", "web")
+}
+
+func TestPushAcceptsAnIdleRemoteDock(t *testing.T) {
+	te, p := transferEnv(t, "direct")
+	stoppedLocalDock(t, te)
+	p.dockState = "idle"
+	mustExit(t, te, 0, "push", "web", "--to", "lab")
+}

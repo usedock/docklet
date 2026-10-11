@@ -303,7 +303,7 @@ func (a *App) putPart(ctx context.Context, cl *Client, target string, direct boo
 	}
 	resp, err := a.transferHTTP().Do(req)
 	if err != nil {
-		return "", errors.New(redact(err.Error(), cl.Key))
+		return "", errors.New(redact(stripURL(err).Error(), cl.Key))
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -337,6 +337,20 @@ func (a *App) putPart(ctx context.Context, cl *Client, target string, direct boo
 	return etag, nil
 }
 
+// stripURL drops the URL from a transport error: a presigned URL is a credential for the
+// object and must not reach the terminal, logs or --json output.
+func stripURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		host := ""
+		if u, perr := url.Parse(ue.URL); perr == nil {
+			host = u.Host
+		}
+		return fmt.Errorf("%s %s: %w", ue.Op, host, ue.Err)
+	}
+	return err
+}
+
 func redact(s, secret string) string {
 	if secret == "" {
 		return s
@@ -358,7 +372,7 @@ func (a *App) waitRemoteRunning(ctx context.Context, cl *Client, id string, quie
 		var d dock
 		_ = json.Unmarshal(raw, &d)
 		switch d.State {
-		case "ready", "running":
+		case "ready", "idle", "running":
 			return raw, nil
 		case "error", "failed", "destroyed", "deleted":
 			return nil, newError("push_failed", fmt.Sprintf("the remote dock %s ended in state %q", id, d.State))
@@ -612,7 +626,7 @@ func (a *App) fetchRange(ctx context.Context, info exportInfo, part string, pr *
 	}
 	resp, err := a.transferHTTP().Do(req)
 	if err != nil {
-		return false, err
+		return false, stripURL(err)
 	}
 	defer resp.Body.Close()
 	flags := os.O_CREATE | os.O_WRONLY
