@@ -48,6 +48,8 @@ type fakePlane struct {
 	partStatus int                 // every part PUT answers this status when set
 	partPuts   int
 	completed  []donePart
+	completeFail  []string // the next complete calls answer these error codes (503)
+	completeCalls int
 	dockState  string
 
 	// pull
@@ -59,6 +61,7 @@ type fakePlane struct {
 	downloads     []string
 	downloadsAuth []string
 	flakyURL      bool // first GET of the export carries a url that 403s
+	relativeURL   bool // the export url is the control plane's own download route
 }
 
 func newFakePlane(t *testing.T, mode string) *fakePlane {
@@ -121,6 +124,14 @@ func newFakePlane(t *testing.T, mode string) *fakePlane {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		p.mu.Lock()
+		p.completeCalls++
+		if len(p.completeFail) > 0 {
+			code := p.completeFail[0]
+			p.completeFail = p.completeFail[1:]
+			p.mu.Unlock()
+			fail(w, 503, code, "later")
+			return
+		}
 		p.completed = b.Parts
 		p.mu.Unlock()
 		env(w, 202, map[string]any{"id": remoteID, "name": "web", "state": "creating"})
@@ -148,12 +159,34 @@ func newFakePlane(t *testing.T, mode string) *fakePlane {
 		}
 		if st["state"] == "ready" {
 			st["url"] = p.srv.URL + "/dl/export"
+			if p.relativeURL {
+				st["url"] = "/v1/docks/exports/" + exportID + "/download"
+			}
 			if p.flakyURL {
 				p.flakyURL = false
 				st["url"] = p.srv.URL + "/dl/expired"
 			}
 		}
 		env(w, 200, st)
+	})
+	mux.HandleFunc("/v1/docks/exports/"+exportID+"/download", func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		p.downloads = append(p.downloads, r.Header.Get("Range"))
+		p.downloadsAuth = append(p.downloadsAuth, r.Header.Get("Authorization"))
+		cut := p.cutFirst
+		p.cutFirst = false
+		p.mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+labKey {
+			fail(w, 401, "unauthorized", "no key")
+			return
+		}
+		if cut {
+			w.Header().Set("Content-Length", strconv.Itoa(len(p.payload)))
+			_, _ = w.Write(p.payload[:len(p.payload)/2])
+			_ = http.NewResponseController(w).Flush()
+			panic(http.ErrAbortHandler)
+		}
+		http.ServeContent(w, r, "export", time.Time{}, bytes.NewReader(p.payload))
 	})
 	mux.HandleFunc("/dl/expired", func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
@@ -621,4 +654,55 @@ func TestPushAcceptsAnIdleRemoteDock(t *testing.T) {
 	stoppedLocalDock(t, te)
 	p.dockState = "idle"
 	mustExit(t, te, 0, "push", "web", "--to", "lab")
+}
+
+func TestPullDownloadsThroughTheControlPlaneWithTheKey(t *testing.T) {
+	te, p := transferEnv(t, "direct")
+	want := strings.Repeat(diskBytes, 50)
+	p.readyExport(zstdOf(t, want), "ubuntu-24.04")
+	p.relativeURL, p.cutFirst = true, true
+	mustExit(t, te, 0, "pull", remoteID, "--from", "lab", "--name", "back")
+	if len(p.downloads) != 2 || !strings.HasPrefix(p.downloads[1], "bytes=") {
+		t.Fatalf("the proxied download must resume with Range, got %q", p.downloads)
+	}
+	for _, a := range p.downloadsAuth {
+		if a != "Bearer "+labKey {
+			t.Fatalf("the control plane download needs the API key, got %q", a)
+		}
+	}
+	rec, _ := te.app.Engine.Lookup("back")
+	disk, _ := os.ReadFile(filepath.Join(te.app.Engine.Dir, "docks", rec.ID, "disk.qcow2"))
+	if string(disk) != want {
+		t.Fatal("proxied download produced a different disk")
+	}
+}
+
+func TestPushRetriesCompleteWithoutReuploading(t *testing.T) {
+	te, p := transferEnv(t, "direct")
+	stoppedLocalDock(t, te)
+	p.completeFail = []string{"no_host_capacity", "service_unavailable"}
+	mustExit(t, te, 0, "push", "web", "--to", "lab")
+	parts := len(p.parts)
+	if p.completeCalls != 3 || p.partPuts != parts {
+		t.Fatalf("complete calls %d, part PUTs %d for %d parts", p.completeCalls, p.partPuts, parts)
+	}
+}
+
+func TestPushDoesNotRetryAPermanentCompleteFailure(t *testing.T) {
+	te, p := transferEnv(t, "direct")
+	stoppedLocalDock(t, te)
+	p.completeFail = []string{"import_checksum_mismatch", "import_checksum_mismatch"}
+	mustExit(t, te, 1, "push", "web", "--to", "lab")
+	if p.completeCalls != 1 || !strings.Contains(te.errb.String(), "checksum mismatch") {
+		t.Fatalf("complete calls %d stderr %q", p.completeCalls, te.errb)
+	}
+}
+
+func TestPullShowsFailedExportCodes(t *testing.T) {
+	te, p := transferEnv(t, "direct")
+	p.exportState = map[string]any{"state": "failed", "error": "export_interrupted", "url": nil, "sizeBytes": nil, "sha256": nil, "baseImage": nil}
+	mustExit(t, te, 1, "pull", remoteID, "--from", "lab", "--name", "back")
+	if !strings.Contains(te.errb.String(), "export_interrupted") || !strings.Contains(te.errb.String(), "interrupted on the control plane") {
+		t.Fatalf("stderr %q", te.errb)
+	}
 }

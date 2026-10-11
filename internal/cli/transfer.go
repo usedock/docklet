@@ -20,6 +20,7 @@ import (
 // Tuning for push and pull; tests shorten the waits.
 const (
 	partAttempts     = 5
+	completeAttempts = 6
 	downloadAttempts = 6
 	defaultBackoff   = time.Second
 	defaultPoll      = 2 * time.Second
@@ -33,6 +34,18 @@ var contractMessages = map[string]string{
 	"import_checksum_mismatch": "the control plane received different bytes than were sent (checksum mismatch); try again",
 	"runtime_unsupported":      "the control plane has no microVM host to run an imported dock; push needs a microVM host",
 	"export_base_unsupported":  "this dock cannot be pulled: its base is not a Dockyard image (only docks built from a Dockyard image can move)",
+	"export_failed":            "the host could not export the dock; try again",
+	"export_interrupted":       "the export was interrupted on the control plane; try again",
+	"zdr_blocks_exports":       "exports are disabled in this organization while zero data retention is on",
+	"import_limit_reached":     "too many imports are open in this organization; wait for one to finish or expire",
+	"export_limit_reached":     "too many exports are live in this organization; they expire after 24 hours",
+}
+
+// retryableComplete are failures of complete that a later call can fix without re-uploading:
+// the control plane keeps the assembled upload and complete is idempotent.
+var retryableComplete = map[string]bool{
+	"request_failed": true, "internal_error": true, "bad_gateway": true, "service_unavailable": true,
+	"no_host_capacity": true, "capacity_exhausted": true, "base_image_unavailable": true, "image_unavailable": true,
 }
 
 // contractError replaces the message of a known contract code with a readable one.
@@ -211,9 +224,9 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	raw, err = cl.Do(ctx, "POST", "/docks/import/"+url.PathEscape(plan.ImportID)+"/complete", nil, map[string]any{"parts": parts})
+	raw, err = a.completeImport(ctx, cl, plan.ImportID, parts)
 	if err != nil {
-		return contractError(err)
+		return err
 	}
 	var d dock
 	if err := json.Unmarshal(raw, &d); err != nil || d.ID == "" {
@@ -281,6 +294,24 @@ func (a *App) uploadParts(ctx context.Context, cl *Client, plan importPlan, zst 
 		pr.update(off+length, i == n)
 	}
 	return out, nil
+}
+
+// completeImport finishes the upload, retrying transient failures; the parts are not sent again.
+func (a *App) completeImport(ctx context.Context, cl *Client, importID string, parts []donePart) (json.RawMessage, error) {
+	for attempt := 1; ; attempt++ {
+		raw, err := cl.Do(ctx, "POST", "/docks/import/"+url.PathEscape(importID)+"/complete", nil, map[string]any{"parts": parts})
+		if err == nil {
+			return raw, nil
+		}
+		var ae *Error
+		if !errors.As(err, &ae) || !(retryableComplete[ae.Code] || strings.HasPrefix(ae.Code, "http_5")) ||
+			ctx.Err() != nil || attempt >= completeAttempts {
+			return nil, contractError(err)
+		}
+		if err := sleepCtx(ctx, a.backoff()<<(attempt-1)); err != nil {
+			return nil, err
+		}
+	}
 }
 
 // permanentError is a failure a retry cannot fix.
@@ -568,7 +599,7 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 			}
 			info.URL = fresh.URL
 		}
-		done, err := a.fetchRange(ctx, info, part, pr)
+		done, err := a.fetchRange(ctx, cl, info, part, pr)
 		if err == nil && done {
 			break
 		}
@@ -603,7 +634,7 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 
 // fetchRange makes one request that continues part from its current size. done reports
 // that part now holds the whole export.
-func (a *App) fetchRange(ctx context.Context, info exportInfo, part string, pr *progress) (bool, error) {
+func (a *App) fetchRange(ctx context.Context, cl *Client, info exportInfo, part string, pr *progress) (bool, error) {
 	var have int64
 	if st, err := os.Stat(part); err == nil {
 		have = st.Size()
@@ -617,7 +648,7 @@ func (a *App) fetchRange(ctx context.Context, info exportInfo, part string, pr *
 	if have == info.SizeBytes {
 		return true, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
+	req, err := exportRequest(ctx, cl, info.URL)
 	if err != nil {
 		return false, &permanentError{err.Error()}
 	}
@@ -663,6 +694,27 @@ func (a *App) fetchRange(ctx context.Context, info exportInfo, part string, pr *
 		return false, err
 	}
 	return have+n == info.SizeBytes, nil
+}
+
+// exportRequest builds the GET for an export url. A relative url is the control plane's own
+// download route and carries the API key; an absolute one is presigned and carries nothing.
+func exportRequest(ctx context.Context, cl *Client, raw string) (*http.Request, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, errors.New("the export url is not valid")
+	}
+	if u.IsAbs() {
+		return http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
+	}
+	if !strings.HasPrefix(raw, "/") || u.Host != "" {
+		return nil, errors.New("the export url is not valid")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cl.BaseURL, "/")+raw, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+cl.Key)
+	return req, nil
 }
 
 type progressReader struct {
