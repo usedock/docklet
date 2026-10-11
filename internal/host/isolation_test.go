@@ -485,10 +485,24 @@ func TestPeriodicSweepFreesLeakedUIDAndSkipsBusyDock(t *testing.T) {
 		t.Fatal(err)
 	}
 	unlock := iso.h.lockDock("dock-1")
+	swept := make(chan struct{}, 1)
+	iso.h.afterSweep = func() {
+		select {
+		case swept <- struct{}{}:
+		default:
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { iso.h.RunSweeper(ctx, 20*time.Millisecond); close(done) }()
-	time.Sleep(150 * time.Millisecond)
+	// Two completed passes while the lock is held prove the sweep ran and skipped the dock.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-swept:
+		case <-time.After(3 * time.Second):
+			t.Fatal("sweeper did not run")
+		}
+	}
 	if _, ok := iso.h.uids.Get("dock-1"); !ok {
 		t.Fatal("sweep freed the uid of a dock being provisioned")
 	}

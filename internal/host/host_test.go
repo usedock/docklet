@@ -505,3 +505,44 @@ func TestBaseKernelArgsSkipsCloudInit(t *testing.T) {
 		}
 	}
 }
+
+// A dock whose lock is held (Destroy, SnapshotLoad) is not adopted by Rescan; a later pass adopts it.
+func TestRescanSkipsLockedDockAndAdoptsAfterRelease(t *testing.T) {
+	dir := t.TempDir()
+	jailBase := filepath.Join(dir, "jail")
+	live := filepath.Join(jailBase, "firecracker", "dock-live", "root")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := stdnet.Listen("unix", filepath.Join(live, "api.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.WriteFile(filepath.Join(live, "spec.json"), []byte(`{"dockId":"dock-live","resources":{"cpus":1,"memoryMiB":2048,"diskGiB":10}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(Config{
+		HostID: "h1", Family: "fam-1",
+		ImageBase: filepath.Join(dir, "base.ext4"),
+		VMsDir:    filepath.Join(dir, "vms"), Subnet: "192.168.127.0/24",
+		UID: os.Getuid(), GID: os.Getgid(),
+		Driver: &fakeDriver{adoptPid: 4242}, Snaps: &snapmgr.Coordinator{},
+		Stats: stats.Reader{}, NetRunner: func(name string, args ...string) error { return nil },
+		Mount: fakeMount{}, JailBase: jailBase,
+	}, filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.vms = map[string]*vm{}
+	h.mu.Unlock()
+	unlock := h.lockDock("dock-live")
+	if got := h.Rescan(); len(got) != 0 {
+		t.Fatalf("rescan adopted %v while the dock lock was held", got)
+	}
+	unlock()
+	if got := h.Rescan(); len(got) != 1 || got[0] != "dock-live" {
+		t.Fatalf("adopted = %v, want [dock-live] after release", got)
+	}
+}

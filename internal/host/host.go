@@ -135,6 +135,8 @@ type Host struct {
 	uids      *uid.Allocator
 	lockMu    sync.Mutex
 	dockLocks map[string]*dockLock
+	// afterSweep, when set, runs after each timed uid sweep; tests use it to synchronise.
+	afterSweep func()
 }
 
 // growDisk is disk.Grow; tests swap it for a scaled-down grow so no test
@@ -171,7 +173,9 @@ func New(cfg Config, stateDir string) (*Host, error) {
 // Rescan re-tracks microVMs that outlived a docklet restart or were missed
 // while booting during the last pass: a dialable API socket plus the sidecar
 // spec rebuilds the driver client. Anything else stays untracked for the
-// reconciler to fence. Returns newly adopted dock ids. Safe to run often.
+// reconciler to fence. A dock whose lock is held (provision, destroy or
+// snapshot load) is skipped and adopted on a later pass. Returns newly
+// adopted dock ids. Safe to run often.
 func (h *Host) Rescan() []string {
 	var adopted []string
 	assigned := h.alloc.ByDock()
@@ -183,53 +187,65 @@ func (h *Host) Rescan() []string {
 		if !entry.IsDir() {
 			continue
 		}
-		dockID := entry.Name()
-		jail := filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
-		// A claimed pool slot is tracked under its runtime id, never as the slot itself.
-		owner := readClaim(jail)
-		if owner == "" {
-			owner = dockID
+		if owner := h.rescanOne(entry.Name(), assigned); owner != "" {
+			adopted = append(adopted, owner)
 		}
-		h.mu.Lock()
-		_, tracked := h.vms[owner]
-		for _, v := range h.vms {
-			tracked = tracked || v.backing == dockID
-		}
-		h.mu.Unlock()
-		if tracked {
-			continue
-		}
-		iface := TapFor(dockID)
-		if h.usesVeth() {
-			iface = net.VethFor(dockID)
-		} else {
-			sock := filepath.Join(jail, fc.SocketName)
-			conn, err := stdnet.DialTimeout("unix", sock, time.Second)
-			if err != nil {
-				continue
-			}
-			_ = conn.Close()
-		}
-		res, err := fc.ReadSidecar(jail)
-		if err != nil {
-			continue
-		}
-		handle, err := h.cfg.Driver.Adopt(dockID, jail, res)
-		if err != nil {
-			continue
-		}
-		token, workspace := readExecAgent(jail)
-		live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
-		if owner != dockID {
-			live.backing = dockID
-			live.ephemeral = true
-		}
-		h.mu.Lock()
-		h.vms[owner] = live
-		h.mu.Unlock()
-		adopted = append(adopted, owner)
 	}
 	return adopted
+}
+
+// rescanOne adopts one dock under its lock and returns the tracked runtime
+// id, or empty when the dock is busy, already tracked or not adoptable.
+func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
+	unlock, ok := h.tryLockDock(dockID)
+	if !ok {
+		return ""
+	}
+	defer unlock()
+	jail := filepath.Join(h.cfg.JailBase, "firecracker", dockID, "root")
+	// A claimed pool slot is tracked under its runtime id, never as the slot itself.
+	owner := readClaim(jail)
+	if owner == "" {
+		owner = dockID
+	}
+	h.mu.Lock()
+	_, tracked := h.vms[owner]
+	for _, v := range h.vms {
+		tracked = tracked || v.backing == dockID
+	}
+	h.mu.Unlock()
+	if tracked {
+		return ""
+	}
+	iface := TapFor(dockID)
+	if h.usesVeth() {
+		iface = net.VethFor(dockID)
+	} else {
+		sock := filepath.Join(jail, fc.SocketName)
+		conn, err := stdnet.DialTimeout("unix", sock, time.Second)
+		if err != nil {
+			return ""
+		}
+		_ = conn.Close()
+	}
+	res, err := fc.ReadSidecar(jail)
+	if err != nil {
+		return ""
+	}
+	handle, err := h.cfg.Driver.Adopt(dockID, jail, res)
+	if err != nil {
+		return ""
+	}
+	token, workspace := readExecAgent(jail)
+	live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
+	if owner != dockID {
+		live.backing = dockID
+		live.ephemeral = true
+	}
+	h.mu.Lock()
+	h.vms[owner] = live
+	h.mu.Unlock()
+	return owner
 }
 
 // claimSidecar names the runtime id a claimed pool slot serves, so a restart re-tracks it under that id.
