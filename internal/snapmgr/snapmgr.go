@@ -81,12 +81,6 @@ func (c *Coordinator) putManifest(ctx context.Context, manifest store.Manifest) 
 
 // capturedManifest is the manifest of a generation this host wrote, else the stored one.
 func (c *Coordinator) capturedManifest(ctx context.Context, snapshotID string) (store.Manifest, error) {
-	c.capturedMu.Lock()
-	m, ok := c.captured[snapshotID]
-	c.capturedMu.Unlock()
-	if ok {
-		return m, nil
-	}
 	return store.GetManifest(ctx, c.Store, snapshotID)
 }
 
