@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -115,7 +116,7 @@ func TestStopDoesNotKillAPidWhoseStampChangedDuringTheWait(t *testing.T) {
 	drv := newStampedDriver()
 	drv.ignorePoweroff = true
 	e.Driver = drv
-	e.StopTimeout = 800 * time.Millisecond
+	e.StopTimeout = 10 * time.Second
 	d, err := e.New(ctx, Spec{Name: "reused"})
 	if err != nil {
 		t.Fatal(err)
@@ -124,11 +125,16 @@ func TestStopDoesNotKillAPidWhoseStampChangedDuringTheWait(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		drv.stamp.Store(8) // the pid now belongs to another process, which is alive
 	}()
+	start := time.Now()
 	if err := e.stopVM(ctx, d.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if n := drv.kills.Load(); n != 0 {
 		t.Fatalf("killed a process that is no longer the VM (%d kills)", n)
+	}
+	// The wait ends once the pid is no longer the VM, not at the stop timeout.
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("stop waited %s for a pid that is no longer the VM", took)
 	}
 	if e.readInt(d.ID, "pid") != 0 {
 		t.Fatal("runtime files must be cleared")
@@ -155,5 +161,56 @@ func TestStopKillsTheVMWhenItsStampIsUnchanged(t *testing.T) {
 	}
 	if e.alive(d.ID) {
 		t.Fatal("the VM must be stopped")
+	}
+}
+
+// flipDriver is a stamped VM whose agent refuses every ping at once and whose pid goes to
+// another process after the first two stamp reads (boot record, first readiness check).
+type flipDriver struct {
+	*stampedDriver
+	reads atomic.Int32
+}
+
+func (d *flipDriver) StartStamp(int) (uint64, bool) {
+	if d.reads.Add(1) > 2 {
+		return 8, true
+	}
+	return 7, true
+}
+
+func (d *flipDriver) Start(ctx context.Context, spec LaunchSpec) (int, error) {
+	pid, err := d.fakeDriver.Start(ctx, spec)
+	if err != nil {
+		return 0, err
+	}
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(spec.HostPort)))
+	if err != nil {
+		return 0, err
+	}
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	return pid, nil
+}
+
+// If the pid stops being the VM right as the boot times out, the timeout must not kill it.
+func TestBootTimeoutDoesNotKillAPidWhoseStampChanged(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	drv := &flipDriver{stampedDriver: newStampedDriver()}
+	drv.neverAnswer = true
+	e.Driver = drv
+	e.BootTimeout = 100 * time.Millisecond
+	_, err := e.New(context.Background(), Spec{Name: "flip"})
+	if codeOf(err) != "boot_timeout" {
+		t.Fatalf("got %v", err)
+	}
+	if n := drv.kills.Load(); n != 0 {
+		t.Fatalf("killed a process that is no longer the VM (%d kills)", n)
 	}
 }

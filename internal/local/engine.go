@@ -579,7 +579,7 @@ func (e *Engine) stopVM(ctx context.Context, id string, force bool) error {
 			cancel()
 		}
 		deadline := time.Now().Add(e.stopTimeout())
-		for e.Driver.Alive(pid) && time.Now().Before(deadline) {
+		for e.livePID(id) == pid && time.Now().Before(deadline) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
