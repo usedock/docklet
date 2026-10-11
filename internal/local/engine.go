@@ -399,7 +399,7 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 	}
 	for attempt := 1; ; attempt++ {
 		err := e.bootOnce(ctx, rec, kernel, initrd, cfg, tok)
-		if err == nil && resetKeys {
+		if err == nil && opts.ResetHostKeys {
 			_ = os.Remove(e.file(rec.ID, resetKeysMarker))
 		}
 		if err == nil || attempt >= bootAttempts || ErrCode(err) != "boot_failed" || !strings.Contains(e.logTail(rec.ID), "host forwarding") {
