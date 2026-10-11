@@ -455,7 +455,10 @@ func (e *Engine) waitReady(ctx context.Context, id string, pid int) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			_ = e.Driver.Kill(pid)
+			// Same rule as stopVM: never kill a pid that is no longer our VM.
+			if e.livePID(id) == pid {
+				_ = e.Driver.Kill(pid)
+			}
 			return errf("boot_timeout", "the guest agent did not answer within %s.%s", e.bootTimeout(), e.logTail(id))
 		case <-tick.C:
 		}
@@ -576,7 +579,7 @@ func (e *Engine) stopVM(ctx context.Context, id string, force bool) error {
 			cancel()
 		}
 		deadline := time.Now().Add(e.stopTimeout())
-		for e.Driver.Alive(pid) && time.Now().Before(deadline) {
+		for e.livePID(id) == pid && time.Now().Before(deadline) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -584,12 +587,15 @@ func (e *Engine) stopVM(ctx context.Context, id string, force bool) error {
 			}
 		}
 	}
-	if e.Driver.Alive(pid) {
+	// The VM may have exited during the wait and its pid been given to an unrelated process,
+	// so the identity (start stamp included) is checked again right before the kill; a
+	// changed or missing identity means the VM is already stopped.
+	if e.livePID(id) == pid {
 		if err := e.Driver.Kill(pid); err != nil {
 			return errf("stop_failed", "%v", err)
 		}
 		for range 50 {
-			if !e.Driver.Alive(pid) {
+			if e.livePID(id) != pid {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
