@@ -25,7 +25,10 @@ dock exec demo -- uname -a
 
 The first `dock new` downloads the default `ubuntu-24.04` Dockyard image once. On Windows, install with the PowerShell line above.
 
-<!-- recording: owner adds a 30-second quickstart recording here -->
+![dock quickstart: install, dock doctor, dock new api, dock exec, dock branch, dock ls](docs/assets/quickstart.gif)
+
+
+The first `dock new` downloads the image; the recording skips that wait.
 
 Docs: [quickstart](https://docs.usedock.io/quickstart), [CLI](https://docs.usedock.io/cli), [local docks](https://docs.usedock.io/local-docks), [Windows](https://docs.usedock.io/local-docks/windows), [Dockyard images](https://docs.usedock.io/dockyard).
 
