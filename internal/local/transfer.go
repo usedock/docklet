@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -24,11 +27,123 @@ func (e *Engine) TempDir() (string, error) {
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return "", errf("store_error", "%v", err)
 	}
-	d, err := os.MkdirTemp(tmp, "xfer-")
+	// The pid in the name lets a later run tell a live transfer from a crashed one.
+	d, err := os.MkdirTemp(tmp, "xfer-"+strconv.Itoa(os.Getpid())+"-")
 	if err != nil {
 		return "", errf("store_error", "%v", err)
 	}
 	return d, nil
+}
+
+const (
+	// StaleTempAge is how old an abandoned transfer directory must be before it is removed.
+	StaleTempAge = 24 * time.Hour
+)
+
+// CleanStaleTemp removes tmp/xfer-* directories nothing has touched for StaleTempAge whose
+// owning process (named in the directory) is gone (a crash or SIGKILL skips the normal cleanup). It returns how many
+// it removed; a directory it cannot remove is left for the next run.
+func (e *Engine) CleanStaleTemp() int {
+	tmp := filepath.Join(e.Dir, "tmp")
+	ents, err := os.ReadDir(tmp)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, ent := range ents {
+		if !ent.IsDir() || !strings.HasPrefix(ent.Name(), "xfer-") {
+			continue
+		}
+		dir := filepath.Join(tmp, ent.Name())
+		if e.now().Sub(newestModTime(dir)) < StaleTempAge {
+			continue
+		}
+		if pid, ok := xferOwner(ent.Name()); ok && pidAlive(pid) {
+			continue
+		}
+		if os.RemoveAll(dir) == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
+// xferOwner parses the pid out of a name made by TempDir (xfer-<pid>-<random>).
+func xferOwner(name string) (int, bool) {
+	rest, ok := strings.CutPrefix(name, "xfer-")
+	if !ok {
+		return 0, false
+	}
+	pidStr, _, ok := strings.Cut(rest, "-")
+	if !ok {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(pidStr)
+	return pid, err == nil
+}
+
+// newestModTime is the latest modification time of dir and the files directly inside it.
+func newestModTime(dir string) time.Time {
+	var newest time.Time
+	if st, err := os.Stat(dir); err == nil {
+		newest = st.ModTime()
+	}
+	if ents, err := os.ReadDir(dir); err == nil {
+		for _, ent := range ents {
+			if info, err := ent.Info(); err == nil && info.ModTime().After(newest) {
+				newest = info.ModTime()
+			}
+		}
+	}
+	return newest
+}
+
+// CheckFreeSpace fails with insufficient_space when the data dir's volume has less than need
+// bytes free. A volume whose free space cannot be read is let through.
+func (e *Engine) CheckFreeSpace(need int64, what string) error {
+	return e.checkFreeSpace(need, what, "")
+}
+
+// CheckPushSpace checks there is room to flatten and compress rec's disk.
+func (e *Engine) CheckPushSpace(rec Record) error {
+	data := allocatedBytes(e.file(rec.ID, "disk.qcow2"))
+	if rec.ImageDir != "" {
+		data += allocatedBytes(filepath.Join(rec.ImageDir, "base.qcow2"))
+	}
+	note := ""
+	if !sparseTemp {
+		note = " (on Windows the flattened disk is written at its full size, see docklet#76)"
+	}
+	return e.checkFreeSpace(pushSpaceNeed(int64(min(max(rec.DiskGiB, 0), 1<<30))<<30, data, sparseTemp), "push", note)
+}
+
+// pushSpaceNeed estimates the peak space of a push: the flattened raw disk plus its zstd copy.
+// The raw disk takes its data (overlay plus base, at most the disk size) when written sparse,
+// else the whole disk; the zstd copy is given half the data as headroom.
+func pushSpaceNeed(diskBytes, dataBytes int64, sparse bool) int64 {
+	if diskBytes > 0 {
+		dataBytes = min(dataBytes, diskBytes)
+	}
+	raw := dataBytes
+	if !sparse {
+		raw = max(diskBytes, dataBytes)
+	}
+	return raw + dataBytes/2
+}
+
+func (e *Engine) checkFreeSpace(need int64, what, note string) error {
+	if need <= 0 {
+		return nil
+	}
+	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
+		return errf("store_error", "%v", err)
+	}
+	free, err := freeBytes(e.Dir)
+	if err != nil || free >= uint64(need) {
+		return nil
+	}
+	return errf("insufficient_space", "%s needs about %s free in %s but only %s is available%s; free some space or set DOCK_DATA_DIR to a larger drive",
+		what, HumanBytes(need), e.Dir, HumanBytes(int64(free)), note)
 }
 
 // Flat is a stopped dock's disk flattened to a raw image. Only the disk is ever read: the
@@ -136,21 +251,23 @@ func (c *countWriter) Write(p []byte) (int, error) {
 }
 
 // FileSHA256 returns the hex sha256 of a file.
-func FileSHA256(path string) (string, error) {
+func FileSHA256(ctx context.Context, path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, ctxReader{ctx, f}); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // DecompressFile expands a zstd file to dst, refusing output larger than max bytes.
-func DecompressFile(src, dst string, max int64) error { return decompress(src, dst, max) }
+func DecompressFile(ctx context.Context, src, dst string, max int64) error {
+	return decompress(ctx, src, dst, max)
+}
 
 // EnsureImage resolves a Dockyard image by name and makes sure its kernel, initrd and base are cached.
 func (e *Engine) EnsureImage(ctx context.Context, name string) (CachedImage, error) {
@@ -175,6 +292,9 @@ type Import struct {
 func (e *Engine) CheckName(name string) error {
 	if name == "" {
 		return nil
+	}
+	if !nameRE.MatchString(name) {
+		return errf("invalid_argument", "invalid dock name %q (letters, digits, '.', '_', '-'); pass --name to pick another", name)
 	}
 	if _, err := e.Lookup(name); err == nil {
 		return errf("dock_name_taken", "a local dock named %q already exists; pass --name to pick another", name)

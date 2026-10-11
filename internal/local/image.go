@@ -234,7 +234,7 @@ func (c *Cache) Ensure(ctx context.Context, im dockyard.Image) (CachedImage, err
 	defer os.Remove(raw)
 	tmpBase := p.Base + "." + tag + ".part"
 	defer os.Remove(tmpBase)
-	if err := decompress(filepath.Join(p.Dir, dockyard.FileRootfs), raw, c.maxRaw()); err != nil {
+	if err := decompress(ctx, filepath.Join(p.Dir, dockyard.FileRootfs), raw, c.maxRaw()); err != nil {
 		if c.Cached(im) {
 			return p, nil
 		}
@@ -322,7 +322,7 @@ func (c *Cache) maxRaw() int64 {
 	return DefaultMaxRawBytes
 }
 
-func decompress(src, dest string, max int64) error {
+func decompress(ctx context.Context, src, dest string, max int64) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return errf("cache_error", "%v", err)
@@ -338,13 +338,16 @@ func decompress(src, dest string, max int64) error {
 		return errf("cache_error", "%v", err)
 	}
 	// One byte past the cap proves the stream is larger than allowed.
-	n, err := io.Copy(out, io.LimitReader(zr, max+1))
+	n, err := io.Copy(out, io.LimitReader(ctxReader{ctx, zr}, max+1))
 	if err == nil && n > max {
 		err = fmt.Errorf("the decompressed disk is larger than the %s limit", humanBytes(max))
 	}
 	if err != nil {
 		out.Close()
 		_ = os.Remove(dest)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errf("decompress_failed", "%v", err)
 	}
 	return out.Close()

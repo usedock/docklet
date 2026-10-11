@@ -38,6 +38,8 @@ type App struct {
 
 	// xferBackoff and xferPoll override the push and pull waits (tests).
 	xferBackoff, xferPoll time.Duration
+	// xferIdle and xferHeaderWait override the transfer idle and header timeouts (tests).
+	xferIdle, xferHeaderWait time.Duration
 }
 
 // NewApp returns an App wired to the process streams.
