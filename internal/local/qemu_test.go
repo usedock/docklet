@@ -99,7 +99,7 @@ func TestNoSecretInAnyArgv(t *testing.T) {
 
 func TestWriteGuestConfigIsPlainJSONForTheOwnerOnly(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "guest.json")
-	if err := WriteGuestConfig(p, "tok", "my-dock", false); err != nil {
+	if err := WriteGuestConfig(p, "tok", "my-dock", GuestOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(p)
@@ -291,7 +291,7 @@ func TestGuestConfigShapeMatchesTheHostAgentFile(t *testing.T) {
 func TestGuestConfigHostnameOnlyWhenValid(t *testing.T) {
 	for name, want := range map[string]string{"web": "web", "my.dock": "", "a_b": "", "": "", "-x": ""} {
 		p := filepath.Join(t.TempDir(), "g.json")
-		if err := WriteGuestConfig(p, "t", name, false); err != nil {
+		if err := WriteGuestConfig(p, "t", name, GuestOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		raw, _ := os.ReadFile(p)
@@ -310,5 +310,18 @@ func TestResizeBelowTheImageSizeExplains(t *testing.T) {
 		}}
 	if err := q.ResizeDisk(context.Background(), "d.qcow2", 1); codeOf(err) != "invalid_argument" {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestGuestConfigAsksToBlockTheGatewayOnlyWhenNetworkIsOn(t *testing.T) {
+	for blocked, want := range map[bool]bool{true: true, false: false} {
+		p := filepath.Join(t.TempDir(), "g.json")
+		if err := WriteGuestConfig(p, "t", "web", GuestOptions{BlockGateway: blocked}); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := os.ReadFile(p)
+		if got := strings.Contains(string(raw), `"block_gateway":true`); got != want {
+			t.Errorf("blockGateway=%v: config %s", blocked, raw)
+		}
 	}
 }

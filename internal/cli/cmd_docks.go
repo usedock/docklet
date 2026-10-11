@@ -166,7 +166,7 @@ func (a *App) cmdNew(ctx context.Context, args []string) error {
 	c := a.flags("new", "new [name] [--cpus N] [--memory 8gb] [--disk 40gb] [--image X] [--env E] [--workspace ID] [--network on|off]")
 	sf := registerSpecFlags(c)
 	ws := c.fs.String("workspace", "", "workspace id (default: the context's, else your only workspace)")
-	network := c.fs.String("network", "on", "local only: off blocks the dock's access to the network; on lets it reach host localhost services via 10.0.2.2 (see README)")
+	network := c.fs.String("network", "on", "local only: off blocks all network access (QEMU restrict); on lets the dock reach the internet, with the guest refusing the host-loopback gateway 10.0.2.2 (a guest-side block that root in the dock can undo, see README)")
 	pos, err := c.parse(args, 0, 1)
 	if err != nil {
 		return err

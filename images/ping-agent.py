@@ -3,10 +3,12 @@
 
 Usage: ping-agent.py HOST PORT TOKEN TIMEOUT_SECONDS MODE
 MODE is fwcfg or cmdline: how the boot test passed the guest config.
+PROBE_PORT (env) is a host 127.0.0.1 listener port for the gateway check.
 Speaks the agent JSON-line protocol (see internal/host/fast.go).
 """
 import base64
 import json
+import os
 import socket
 import sys
 import time
@@ -41,6 +43,13 @@ def main():
             "t=$(echo %s | base64 -d); ! grep -qF \"$t\" /proc/cmdline && ! journalctl -b --no-pager | grep -qF \"$t\"" % enc,
             lambda out: True,
         )
+    # slirp maps 10.0.2.2 to the host loopback; block_gateway (fwcfg mode) must stop it, and
+    # without the flag (cmdline mode) it stays reachable, which proves the probe itself works.
+    probe = "timeout 8 bash -c 'exec 3<>/dev/tcp/10.0.2.2/%s'" % os.environ["PROBE_PORT"]
+    checks["gateway loopback " + ("blocked" if mode == "fwcfg" else "reachable without the flag")] = (
+        probe + "; echo rc=$?",
+        lambda out: ("rc=0" not in out) if mode == "fwcfg" else ("rc=0" in out),
+    )
     checks.update({
         "hostname": ("hostname", lambda out: out.strip() == "boot-test"),
         "root grown": ("df -BM --output=size / | tail -1", lambda out: int(out.strip().rstrip("M")) > 5000),

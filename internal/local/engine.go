@@ -393,13 +393,13 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 	cfg := e.file(rec.ID, "guest.json")
 	// A copied disk carries its source's sshd host keys: the first boot after the copy drops them.
 	_, resetErr := os.Stat(e.file(rec.ID, resetKeysMarker))
-	resetKeys := resetErr == nil
-	if err := WriteGuestConfig(cfg, tok, rec.Name, resetKeys); err != nil {
+	opts := GuestOptions{ResetHostKeys: resetErr == nil, BlockGateway: rec.Network != "off"}
+	if err := WriteGuestConfig(cfg, tok, rec.Name, opts); err != nil {
 		return errf("store_error", "%v", err)
 	}
 	for attempt := 1; ; attempt++ {
 		err := e.bootOnce(ctx, rec, kernel, initrd, cfg, tok)
-		if err == nil && resetKeys {
+		if err == nil && opts.ResetHostKeys {
 			_ = os.Remove(e.file(rec.ID, resetKeysMarker))
 		}
 		if err == nil || attempt >= bootAttempts || ErrCode(err) != "boot_failed" || !strings.Contains(e.logTail(rec.ID), "host forwarding") {
