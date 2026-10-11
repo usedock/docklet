@@ -48,12 +48,14 @@ echo "e2e: resume took $(( $(date +%s) - t0 ))s"
 
 # Host keys: a branch gets its own, and every dock keeps its keys across stop/resume. Needs a guest-init that
 # knows resetHostKeys, so images from before that change are skipped.
-fp() { $DOCK exec "$1" -- "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f2"; }
-hk_src="$(fp e2e)"; [ -n "$hk_src" ]
+# ssh.service makes missing keys at boot (ssh-keygen -A), so wait for them after each boot.
+fp() { $DOCK exec "$1" -- "for i in \$(seq 60); do [ -s /etc/ssh/ssh_host_ed25519_key.pub ] && break; sleep 1; done; ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f2"; }
+hk=0
+if $DOCK exec e2e -- grep -q resetHostKeys /usr/local/libexec/dock-guest-init; then hk=1; hk_src="$(fp e2e)"; [ -n "$hk_src" ]; fi
 $DOCK branch e2e --name e2e-b
 [ "$($DOCK exec e2e-b -- cat /home/user/work/marker)" = kept ]
-hk_b="$(fp e2e-b)"; [ -n "$hk_b" ]
-if $DOCK exec e2e -- grep -q resetHostKeys /usr/local/libexec/dock-guest-init; then
+if [ "$hk" = 1 ]; then
+  hk_b="$(fp e2e-b)"; [ -n "$hk_b" ]
   [ "$hk_b" != "$hk_src" ] || { echo "branch kept its source ssh host keys" >&2; exit 1; }
   $DOCK stop e2e-b; $DOCK resume e2e-b
   [ "$(fp e2e-b)" = "$hk_b" ] || { echo "branch ssh host keys changed across stop/resume" >&2; exit 1; }
