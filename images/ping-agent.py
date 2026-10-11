@@ -45,7 +45,8 @@ def main():
         "hostname": ("hostname", lambda out: out.strip() == "boot-test"),
         "root grown": ("df -BM --output=size / | tail -1", lambda out: int(out.strip().rstrip("M")) > 5000),
         "agent config mode": ("stat -c %a /etc/dock-fast-agent.json", lambda out: out.strip() == "600"),
-        "docker client": ("docker version --format '{{.Client.Version}}'", lambda out: out.strip() != ""),
+        # Client only: `docker version` also waits for the daemon, which is still starting under TCG; "docker daemon" checks that.
+        "docker client": ("docker --version", lambda out: out.strip().startswith("Docker version")),
         "user in docker group": ("id -nG user", lambda out: "docker" in out.split()),
         # DNS must come from the DHCP-offered server (QEMU user networking: 10.0.2.3),
         # not a hard-coded resolver. The lease can land just after the agent starts.
