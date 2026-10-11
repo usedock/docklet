@@ -12,7 +12,7 @@ Set Width 1200
 Set Height 600
 Set Padding 28
 Set Framerate 15
-Set TypingSpeed 45ms
+Set TypingSpeed 30ms
 Set LineHeight 1.25
 Set WindowBar Colorful
 Set WindowBarSize 36
@@ -28,29 +28,29 @@ Show
 Sleep 800ms
 Type "curl -fsSL https://usedock.io/install | sh" Enter
 Wait+Screen@120s /installed dock/
-Sleep 1500ms
+Sleep 800ms
 
 Type "clear" Enter
 Type "dock doctor" Enter
 Wait+Screen@60s /try: dock new/
-Sleep 2500ms
+Sleep 800ms
 
 Type "clear" Enter
 Type "dock new api" Enter
 Wait+Screen@180s /created api/
-Sleep 1500ms
+Sleep 800ms
 
 Type "dock exec api -- uname -a" Enter
 Wait+Screen@60s /GNU\/Linux/
-Sleep 1s
+Sleep 500ms
 Type "dock exec api -- docker --version" Enter
 Wait+Screen@60s /Docker version/
-Sleep 1500ms
+Sleep 800ms
 
 Type "clear" Enter
 Type "dock branch api --count 2" Enter
 Wait+Screen@180s /(?s)branched api.*branched api/
-Sleep 1s
+Sleep 500ms
 Type "dock ls" Enter
 Wait+Screen@60s /STATE/
-Sleep 4s
+Sleep 3s
