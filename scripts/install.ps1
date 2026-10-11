@@ -139,6 +139,11 @@ function Install-Dock {
       Write-Host "install: added $dest to your user PATH; open a new terminal to use 'dock'"
     }
   }
+
+  Write-Host "install: next: run 'dock doctor' to check this machine, then 'dock new' to start a dock (no account needed)"
+  Write-Host 'install: local docks on Windows need QEMU and Windows Hypervisor Platform:'
+  Write-Host '  winget install SoftwareFreedomConservancy.QEMU'
+  Write-Host '  Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform   (elevated PowerShell, then reboot)'
 }
 
 Install-Dock

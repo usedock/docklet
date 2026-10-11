@@ -84,7 +84,7 @@ func (s *specFlags) overlay(c *cmdFlags, spec *dockSpec) error {
 
 // resolveWorkspace returns the given workspace, the context default, or the caller's only workspace.
 // It never picks one of several: the API's organization order is not stable.
-func (a *App) resolveWorkspace(ctx context.Context, cl *Client, given string, quiet bool) (string, error) {
+func (a *App) resolveWorkspace(ctx context.Context, cl *target, given string, quiet bool) (string, error) {
 	if given == "" {
 		given = cl.Workspace
 	}
@@ -134,8 +134,8 @@ func (a *App) resolveWorkspace(ctx context.Context, cl *Client, given string, qu
 }
 
 // resolveDock turns a name or id into a dock id.
-func (a *App) resolveDock(ctx context.Context, cl *Client, ref string) (string, error) {
-	if uuidRE.MatchString(ref) {
+func (a *App) resolveDock(ctx context.Context, cl *target, ref string) (string, error) {
+	if cl.Local != nil || uuidRE.MatchString(ref) {
 		return ref, nil
 	}
 	raw, err := cl.Do(ctx, "GET", "/docks?all=true", nil, nil)
@@ -163,9 +163,10 @@ func (a *App) resolveDock(ctx context.Context, cl *Client, ref string) (string, 
 }
 
 func (a *App) cmdNew(ctx context.Context, args []string) error {
-	c := a.flags("new", "new [name] [--cpus N] [--memory 8gb] [--disk 40gb] [--image X] [--env E] [--workspace ID]")
+	c := a.flags("new", "new [name] [--cpus N] [--memory 8gb] [--disk 40gb] [--image X] [--env E] [--workspace ID] [--network on|off]")
 	sf := registerSpecFlags(c)
 	ws := c.fs.String("workspace", "", "workspace id (default: the context's, else your only workspace)")
+	network := c.fs.String("network", "on", "local only: off blocks the dock's access to the network")
 	pos, err := c.parse(args, 0, 1)
 	if err != nil {
 		return err
@@ -188,12 +189,24 @@ func (a *App) cmdNew(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	wsID, err := a.resolveWorkspace(ctx, cl, *ws, *c.json)
-	if err != nil {
-		return err
-	}
 	body := spec.body()
-	body["workspaceId"] = wsID
+	if cl.Local != nil {
+		if *ws != "" {
+			return usagef("--workspace does not apply to the local context")
+		}
+		if c.isSet("network") {
+			body["network"] = *network
+		}
+	} else {
+		if c.isSet("network") {
+			return usagef("--network is only supported by the local context")
+		}
+		wsID, err := a.resolveWorkspace(ctx, cl, *ws, *c.json)
+		if err != nil {
+			return err
+		}
+		body["workspaceId"] = wsID
+	}
 	raw, err := cl.Do(ctx, "POST", "/docks", nil, body)
 	if err != nil {
 		return err
@@ -217,6 +230,9 @@ func (a *App) cmdLs(ctx context.Context, args []string) error {
 	cl, err := a.client()
 	if err != nil {
 		return err
+	}
+	if cl.Local != nil && *filter != "" {
+		return usagef("--filter is not supported by local docks; use --all to include stopped docks")
 	}
 	path := "/docks"
 	switch {
@@ -345,6 +361,12 @@ func (a *App) cmdSSH(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cl.Local != nil {
+		if *printOnly || *c.json {
+			return usagef("--print and --json do not apply to local docks: ssh opens a shell through the guest agent")
+		}
+		return a.localShell(ctx, cl.Local, id)
+	}
 	raw, err := cl.Do(ctx, "GET", "/config", nil, nil)
 	if err != nil {
 		return err
@@ -388,8 +410,9 @@ func (a *App) cmdSSH(ctx context.Context, args []string) error {
 }
 
 func (a *App) cmdPort(ctx context.Context, args []string) error {
-	c := a.flags("port", "port <dock> <port> [--rm]")
+	c := a.flags("port", "port <dock> <port> [--rm] [--local-port N]")
 	rm := c.fs.Bool("rm", false, "stop exposing the port")
+	localPort := c.fs.Int("local-port", 0, "local only: 127.0.0.1 port to listen on (default: the same port)")
 	pos, err := c.parse(args, 2, 2)
 	if err != nil {
 		return err
@@ -405,6 +428,16 @@ func (a *App) cmdPort(ctx context.Context, args []string) error {
 	id, err := a.resolveDock(ctx, cl, pos[0])
 	if err != nil {
 		return err
+	}
+	if cl.Local != nil {
+		if *rm {
+			return usagef("--rm does not apply to local docks: stop 'dock port' with Ctrl+C")
+		}
+		lp := *localPort
+		if lp == 0 {
+			lp = port
+		}
+		return a.localPortForward(ctx, cl.Local, id, port, lp, *c.json)
 	}
 	if *rm {
 		raw, err := cl.Do(ctx, "DELETE", "/docks/"+id+"/ports/"+strconv.Itoa(port), nil, nil)
@@ -514,22 +547,35 @@ func (a *App) cmdBranch(ctx context.Context, args []string) error {
 	}
 	var out []json.RawMessage
 	var failure error
-	for i := 0; i < *count; i++ {
-		raw, err := cl.Do(ctx, "POST", "/docks/"+id+"/branch", nil, spec.body())
-		if err != nil {
-			failure = err
-			break
+	if cl.Local != nil {
+		// One stop-copy-resume for all branches, not one per branch.
+		docks, berr := cl.Local.Branch(ctx, id, *count, *name, spec.localSpec())
+		for _, d := range docks {
+			raw, _ := json.Marshal(d)
+			out = append(out, raw)
+			if !*c.json {
+				fmt.Fprintf(a.Stdout, "branched %s -> %s (%s)\n", pos[0], dock{ID: d.ID, Name: d.Name}.label(), d.ID)
+			}
 		}
-		out = append(out, raw)
-		if !*c.json {
-			var d dock
-			_ = json.Unmarshal(raw, &d)
-			fmt.Fprintf(a.Stdout, "branched %s -> %s (%s)\n", pos[0], d.label(), d.ID)
+		failure = localError(berr)
+	} else {
+		for i := 0; i < *count; i++ {
+			raw, err := cl.Do(ctx, "POST", "/docks/"+id+"/branch", nil, spec.body())
+			if err != nil {
+				failure = err
+				break
+			}
+			out = append(out, raw)
+			if !*c.json {
+				var d dock
+				_ = json.Unmarshal(raw, &d)
+				fmt.Fprintf(a.Stdout, "branched %s -> %s (%s)\n", pos[0], d.label(), d.ID)
+			}
 		}
 	}
 	if *c.json && len(out) > 0 {
 		var raw json.RawMessage
-		if *count == 1 {
+		if *count == 1 && len(out) == 1 {
 			raw = out[0]
 		} else {
 			raw, _ = json.Marshal(out)

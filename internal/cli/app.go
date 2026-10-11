@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"golang.org/x/term"
+
+	"github.com/usedock/docklet/internal/local"
 )
 
 // App is one CLI invocation environment; tests replace its fields.
@@ -30,6 +32,8 @@ type App struct {
 	RunSSH func(ctx context.Context, argv []string) error
 	// ReadSecret reads a line without echo from the terminal; nil reads a line from Stdin.
 	ReadSecret func() (string, error)
+	// Engine is the local engine; nil builds the real one on first use.
+	Engine *local.Engine
 }
 
 // NewApp returns an App wired to the process streams.
@@ -53,17 +57,26 @@ Commands:
   new [name]            create a dock (reads ./dock.toml)
   ls                    list docks
   exec <dock> -- <cmd>  run a command in a dock
-  ssh <dock>            open an ssh session through the Dock gateway
-  port <dock> <port>    expose a dock port at a public URL
+  ssh <dock>            open a shell (local: through the guest agent; cloud: the Dock SSH gateway)
+  port <dock> <port>    cloud: expose a dock port at a public URL; local: forward it to 127.0.0.1
   stop <dock>           stop a dock
   resume <dock>         resume a stopped dock
-  branch <dock>         start independent docks from a dock's state
+  branch <dock>         start independent docks from a dock's state (local: a copy of its disk)
   rm <dock>             delete a dock
+  images                list Dockyard images; 'images pull <name>' downloads one
+  doctor                check what local docks need (QEMU, accelerator, disk, Dockyard)
   login                 store an API key for a context (read from stdin)
-  context add|use|ls|rm manage control plane contexts (and a default workspace)
+  context add|use|ls|rm manage contexts (and a default workspace)
+
+Contexts: 'local' runs docks on this machine with QEMU and needs no account; it is the default
+until you run 'dock login' or set DOCK_API_KEY. 'cloud' and added URLs use a control plane.
+Switch with 'dock context use local|cloud|<name>'.
 
 Every command accepts --json. <dock> is a dock name or id.
 Environment: DOCK_API_URL, DOCK_API_KEY and DOCK_WORKSPACE override the active context.
+Local: DOCK_QEMU (qemu-system binary), DOCK_DATA_DIR, DOCK_DOCKYARD_URL + DOCK_DOCKYARD_SHA256
+(an unpinned image index), DOCK_LOCAL_ACCEL=tcg
+(slow software emulation, tests only).
 `
 
 // Run executes args (without the program name) and returns the exit code.
@@ -118,6 +131,10 @@ func (a *App) run(ctx context.Context, args []string) error {
 		return a.cmdBranch(ctx, rest)
 	case "rm":
 		return a.cmdRm(ctx, rest)
+	case "images":
+		return a.cmdImages(ctx, rest)
+	case "doctor":
+		return a.cmdDoctor(ctx, rest)
 	case "login":
 		return a.cmdLogin(rest)
 	case "context":
@@ -196,8 +213,22 @@ func (a *App) env(k string) string {
 	return a.Getenv(k)
 }
 
-// client builds the API client from the active context and env overrides.
-func (a *App) client() (*Client, error) {
+// doer is what the commands talk to: the HTTP Client or the local engine, behind one call shape.
+type doer interface {
+	Do(ctx context.Context, method, path string, headers map[string]string, body any) (json.RawMessage, error)
+}
+
+// target is the active context's backend.
+type target struct {
+	doer
+	// Workspace is the context's default workspace id; empty means discover it.
+	Workspace string
+	// Local is set for the local context.
+	Local *local.Engine
+}
+
+// client builds the backend from the active context and env overrides.
+func (a *App) client() (*target, error) {
 	path, err := a.configPath()
 	if err != nil {
 		return nil, err
@@ -206,7 +237,14 @@ func (a *App) client() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	name := cfg.current()
+	name := cfg.active(a.Getenv)
+	if name == LocalContext {
+		e, err := a.engine()
+		if err != nil {
+			return nil, err
+		}
+		return &target{doer: localAPI{e}, Local: e}, nil
+	}
 	cx, ok := cfg.lookup(name)
 	if !ok {
 		return nil, newError("context_not_found", fmt.Sprintf("context %q does not exist", name))
@@ -230,7 +268,20 @@ func (a *App) client() (*Client, error) {
 	if v := a.env("DOCK_WORKSPACE"); v != "" {
 		ws = strings.TrimSpace(v)
 	}
-	return &Client{BaseURL: base, Key: key, HTTP: a.HTTP, Workspace: ws}, nil
+	return &target{doer: &Client{BaseURL: base, Key: key, HTTP: a.HTTP}, Workspace: ws}, nil
+}
+
+// engine returns the local engine, building the real one on first use.
+func (a *App) engine() (*local.Engine, error) {
+	if a.Engine != nil {
+		return a.Engine, nil
+	}
+	e, err := local.NewEngine(a.env, a.Stderr)
+	if err != nil {
+		return nil, localError(err)
+	}
+	a.Engine = e
+	return e, nil
 }
 
 func (a *App) printJSON(raw json.RawMessage) error {

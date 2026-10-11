@@ -51,7 +51,7 @@ func TestNewSeveralWorkspacesNeedsAChoice(t *testing.T) {
 		t.Fatalf("body %v", te.api.last().Body)
 	}
 	mustExit(t, te, 0, "context", "ls", "--json")
-	if rows := jsonOut(t, te).([]any); rows[0].(map[string]any)["workspace"] != wsOther {
+	if rows := jsonOut(t, te).([]any); rows[1].(map[string]any)["workspace"] != wsOther {
 		t.Fatalf("context ls %v", rows)
 	}
 	// DOCK_WORKSPACE beats the context, --workspace beats both

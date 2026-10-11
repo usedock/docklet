@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/usedock/docklet/internal/guestagent"
 )
 
 // dialAgentTunnel opens a tcp stream through the real guest agent at addr.
@@ -20,12 +22,11 @@ func dialAgentTunnel(t *testing.T, addr, token string, port int) (net.Conn, erro
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := handshakeAgentStream(conn, fastAgentRequest{Token: token, Op: "tcp", Port: port})
+	tunnel, err := guestagent.NewTunnel(conn, token, port)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	tunnel := &tunnelConn{Conn: conn, r: r}
 	t.Cleanup(func() { tunnel.Close() })
 	return tunnel, nil
 }
@@ -74,8 +75,7 @@ func TestGuestTunnelReportsAClosedPort(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	listener.Close()
 	_, err = dialAgentTunnel(t, addr, "tok", port)
-	var refused agentRefusal
-	if !errors.As(err, &refused) || refused != "port_closed" {
+	if !errors.Is(err, ErrPortClosed) {
 		t.Fatalf("closed port must be refused as port_closed, got %v", err)
 	}
 }

@@ -33,8 +33,8 @@ func (a *App) cmdContext(args []string) error {
 		if err := validateContextName(name); err != nil {
 			return err
 		}
-		if name == CloudContext {
-			return newError("invalid_argument", "cloud is built in; use another name")
+		if name == CloudContext || name == LocalContext {
+			return newError("invalid_argument", name+" is built in; use another name")
 		}
 		norm, err := normalizeURL(*u)
 		if err != nil {
@@ -95,6 +95,7 @@ func (a *App) cmdContext(args []string) error {
 		if err != nil {
 			return err
 		}
+		active := cfg.active(a.Getenv)
 		type row struct {
 			Name      string `json:"name"`
 			URL       string `json:"url"`
@@ -105,7 +106,7 @@ func (a *App) cmdContext(args []string) error {
 		var rows []row
 		for _, n := range cfg.names() {
 			cx, _ := cfg.lookup(n)
-			rows = append(rows, row{n, cx.URL, cx.Workspace, n == cfg.current(), cx.APIKey != ""})
+			rows = append(rows, row{n, cx.URL, cx.Workspace, n == active, cx.APIKey != ""})
 		}
 		if *c.json {
 			return a.printValue(rows)
@@ -130,8 +131,8 @@ func (a *App) cmdContext(args []string) error {
 			return err
 		}
 		name := pos[0]
-		if name == CloudContext {
-			return newError("invalid_argument", "the built-in cloud context cannot be removed")
+		if name == CloudContext || name == LocalContext {
+			return newError("invalid_argument", "the built-in "+name+" context cannot be removed")
 		}
 		cfg, err := LoadConfig(path)
 		if err != nil {
@@ -173,8 +174,15 @@ func (a *App) cmdLogin(args []string) error {
 		return err
 	}
 	name := *target
+	switchToCloud := false
 	if name == "" {
-		name = cfg.current()
+		// Logging in always means a control plane: from the local context it targets cloud.
+		if name = cfg.active(a.Getenv); name == LocalContext {
+			name, switchToCloud = CloudContext, true
+		}
+	}
+	if name == LocalContext {
+		return newError("invalid_argument", "the local context has no API key; use 'dock login --context cloud' or a context you added")
 	}
 	if _, ok := cfg.lookup(name); !ok {
 		return newError("context_not_found", fmt.Sprintf("context %q does not exist", name))
@@ -198,6 +206,9 @@ func (a *App) cmdLogin(args []string) error {
 	cx := cfg.Contexts[name]
 	cx.APIKey = key
 	cfg.Contexts[name] = cx
+	if switchToCloud {
+		cfg.Current = name
+	}
 	if err := cfg.Save(path); err != nil {
 		return err
 	}

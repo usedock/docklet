@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -17,9 +15,10 @@ import (
 	apiv1 "github.com/usedock/docklet/api/v1"
 	"github.com/usedock/docklet/internal/disk"
 	"github.com/usedock/docklet/internal/egress"
+	"github.com/usedock/docklet/internal/guestagent"
 )
 
-const fastAgentPort = 2222
+const fastAgentPort = guestagent.Port
 
 // FastAgentProgramText exposes the guest-agent source so the OCI image
 // build bakes the identical protocol (ping/exec/read/rekey) as a
@@ -377,40 +376,14 @@ RestartSec=1
 WantedBy=multi-user.target
 `
 
-type fastAgentRequest struct {
-	Token          string            `json:"token"`
-	Op             string            `json:"op"`
-	Script         string            `json:"script,omitempty"`
-	Path           string            `json:"path,omitempty"`
-	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"`
-	NewToken       string            `json:"newToken,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	OutputLimit    int               `json:"outputLimit,omitempty"`
-	Cols           int               `json:"cols,omitempty"`
-	Rows           int               `json:"rows,omitempty"`
-	Port           int               `json:"port,omitempty"`
-}
-
-type fastAgentResponse struct {
-	OK        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-	ExitCode  int    `json:"exitCode,omitempty"`
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
-	Content   string `json:"content,omitempty"`
-	SizeBytes int64  `json:"sizeBytes,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
-	TimedOut  bool   `json:"timedOut,omitempty"`
-}
+// The wire types live in guestagent so the CLI's local engine speaks the same protocol.
+type (
+	fastAgentRequest  = guestagent.Request
+	fastAgentResponse = guestagent.Response
+)
 
 // MaxExecOutput bounds stdout and stderr each; the guest keeps the head.
-const MaxExecOutput = 1 << 20
-
-// Guest replies are read through these caps so a misbehaving guest cannot balloon host memory.
-const (
-	maxExecReply = 16 << 20
-	maxReadReply = 64 << 20
-)
+const MaxExecOutput = guestagent.MaxExecOutput
 
 // ErrExecUnavailable marks a machine running without a guest exec agent.
 var ErrExecUnavailable = errors.New("exec_unavailable")
@@ -629,37 +602,7 @@ func (h *Host) agentCall() func(ctx context.Context, ip, token string, req fastA
 }
 
 func (h *Host) fastAgentCall(ctx context.Context, ip, token string, request fastAgentRequest) (fastAgentResponse, error) {
-	request.Token = token
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return fastAgentResponse{}, err
-	}
-	dialer := net.Dialer{Timeout: time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprint(fastAgentPort)))
-	if err != nil {
-		return fastAgentResponse{}, err
-	}
-	defer conn.Close()
-	// Exec holds the connection for the script's own budget plus slack.
-	deadline := time.Now().Add(time.Duration(request.TimeoutSeconds)*time.Second + time.Minute)
-	if err := conn.SetDeadline(deadline); err != nil {
-		return fastAgentResponse{}, err
-	}
-	if _, err := conn.Write(append(payload, '\n')); err != nil {
-		return fastAgentResponse{}, err
-	}
-	limit := int64(maxExecReply)
-	if request.Op == "read" {
-		limit = maxReadReply
-	}
-	var response fastAgentResponse
-	if err := json.NewDecoder(io.LimitReader(conn, limit)).Decode(&response); err != nil {
-		return fastAgentResponse{}, err
-	}
-	if !response.OK {
-		return fastAgentResponse{}, fmt.Errorf("fast guest agent: %s", response.Error)
-	}
-	return response, nil
+	return guestagent.Call(ctx, guestagent.Addr(ip), token, request)
 }
 
 func (h *Host) installFastAgent(rootfs, token, workspace string) error {

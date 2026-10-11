@@ -110,6 +110,15 @@ resolve_version() {
   valid_version "$version" || die "invalid release version '${version}'; expected v<major>.<minor>.<patch>"
 }
 
+# next_steps prints what to do after the install; it never fails the install.
+next_steps() {
+  log "next: run 'dock doctor' to check this machine, then 'dock new' to start a dock (no account needed)"
+  case "$1" in
+    linux) log "local docks need QEMU and /dev/kvm access (for example: sudo apt install qemu-system-x86 qemu-utils)" ;;
+    darwin) log "local docks on macOS (Hypervisor.framework) are untested; install QEMU with: brew install qemu" ;;
+  esac
+}
+
 main() {
   command -v curl >/dev/null 2>&1 || die "curl is required"
   detect_platform
@@ -141,6 +150,7 @@ main() {
     *":${dest}:"*) ;;
     *) log "${dest} is not on your PATH; add it with: export PATH=\"${dest}:\$PATH\"" ;;
   esac
+  next_steps "$os"
 }
 
 main "$@"

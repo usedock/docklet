@@ -17,13 +17,13 @@ func TestContextLifecycle(t *testing.T) {
 	mustExit(t, te, 0, "context", "add", "self", "--url", "http://localhost:3000/")
 	mustExit(t, te, 0, "context", "ls", "--json")
 	rows := jsonOut(t, te).([]any)
-	if len(rows) != 2 || rows[1].(map[string]any)["url"] != "http://localhost:3000" {
+	if len(rows) != 3 || rows[2].(map[string]any)["url"] != "http://localhost:3000" {
 		t.Fatalf("rows %v", rows)
 	}
 	mustExit(t, te, 0, "context", "use", "self")
 	mustExit(t, te, 0, "context", "ls", "--json")
 	rows = jsonOut(t, te).([]any)
-	if rows[0].(map[string]any)["current"] != false || rows[1].(map[string]any)["current"] != true {
+	if rows[1].(map[string]any)["current"] != false || rows[2].(map[string]any)["current"] != true {
 		t.Fatalf("rows %v", rows)
 	}
 	mustExit(t, te, 1, "context", "use", "ghost")
@@ -35,7 +35,7 @@ func TestContextLifecycle(t *testing.T) {
 	mustExit(t, te, 0, "context", "rm", "self")
 	mustExit(t, te, 0, "context", "ls", "--json")
 	rows = jsonOut(t, te).([]any)
-	if len(rows) != 1 || rows[0].(map[string]any)["current"] != true {
+	if len(rows) != 2 || rows[1].(map[string]any)["current"] != true {
 		t.Fatalf("removing the current context falls back to cloud: %v", rows)
 	}
 	mustExit(t, te, 1, "context", "rm", "self")

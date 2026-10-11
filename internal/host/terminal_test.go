@@ -83,7 +83,7 @@ func dialAgentTerminal(t *testing.T, addr, token string, cols, rows int) *Termin
 // readUntil collects shell output until want appears, failing on exit or timeout.
 func readUntil(t *testing.T, term *Terminal, want string) string {
 	t.Helper()
-	_ = term.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = term.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var out strings.Builder
 	for !strings.Contains(out.String(), want) {
 		kind, payload, err := term.ReadFrame()
