@@ -329,7 +329,21 @@ func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
 	if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
 		return fail(errf("store_error", "%v", err))
 	}
-	if err := e.store().Update(func(recs *[]Record) error {
+	if err := e.addRecord(rec); err != nil {
+		return fail(err)
+	}
+	e.logf("booting %s", rec.ID)
+	if err := e.boot(ctx, rec); err != nil {
+		_ = e.Remove(ctx, rec.ID)
+		return Dock{}, err
+	}
+	return e.view(ctx, rec), nil
+}
+
+// addRecord stores rec, re-checking name uniqueness under the store lock: another dock
+// command may have taken the name since the early check.
+func (e *Engine) addRecord(rec Record) error {
+	return e.store().Update(func(recs *[]Record) error {
 		if rec.Name != "" {
 			for _, r := range *recs {
 				if r.Name == rec.Name {
@@ -339,15 +353,7 @@ func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
 		}
 		*recs = append(*recs, rec)
 		return nil
-	}); err != nil {
-		return fail(err)
-	}
-	e.logf("booting %s", rec.ID)
-	if err := e.boot(ctx, rec); err != nil {
-		_ = e.Remove(ctx, rec.ID)
-		return Dock{}, err
-	}
-	return e.view(ctx, rec), nil
+	})
 }
 
 func freePort() (int, error) {
@@ -359,19 +365,37 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
+// bootAttempts bounds retries when QEMU cannot bind the forwarded port because another
+// process took it between choosing it and QEMU starting.
+const bootAttempts = 3
+
 // boot starts the VM for rec and waits for its agent.
 func (e *Engine) boot(ctx context.Context, rec Record) error {
 	kernel, initrd := filepath.Join(rec.ImageDir, dockyard.FileKernel), filepath.Join(rec.ImageDir, dockyard.FileInitrd)
 	if _, err := os.Stat(kernel); err != nil {
 		return errf("image_missing", "the image files of %s are gone (%s); run: dock images pull %s", rec.ID, rec.ImageDir, rec.Image)
 	}
-	port, err := freePort()
-	if err != nil {
-		return errf("start_failed", "no free local port: %v", err)
-	}
 	tok, err := e.token(rec.ID)
 	if err != nil {
 		return err
+	}
+	cfg := e.file(rec.ID, "guest.json")
+	if err := WriteGuestConfig(cfg, tok); err != nil {
+		return errf("store_error", "%v", err)
+	}
+	for attempt := 1; ; attempt++ {
+		err := e.bootOnce(ctx, rec, kernel, initrd, cfg, tok)
+		if err == nil || attempt >= bootAttempts || ErrCode(err) != "boot_failed" || !strings.Contains(e.logTail(rec.ID), "host forwarding") {
+			return err
+		}
+		e.logf("port taken, retrying with another one")
+	}
+}
+
+func (e *Engine) bootOnce(ctx context.Context, rec Record, kernel, initrd, cfg, tok string) error {
+	port, err := freePort()
+	if err != nil {
+		return errf("start_failed", "no free local port: %v", err)
 	}
 	if err := os.WriteFile(e.file(rec.ID, "port"), []byte(strconv.Itoa(port)), 0o600); err != nil {
 		return errf("store_error", "%v", err)
@@ -379,7 +403,7 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 	pid, err := e.Driver.Start(ctx, LaunchSpec{
 		Kernel: kernel, Initrd: initrd, Disk: e.file(rec.ID, "disk.qcow2"),
 		SerialLog: e.file(rec.ID, "serial.log"), StderrLog: e.file(rec.ID, "qemu.log"),
-		HostPort: port, Token: tok, CPUs: rec.CPUs, MemoryMiB: rec.MemoryMiB, Network: rec.Network,
+		HostPort: port, ConfigFile: cfg, Token: tok, CPUs: rec.CPUs, MemoryMiB: rec.MemoryMiB, Network: rec.Network,
 	})
 	if err != nil {
 		return err
@@ -408,11 +432,13 @@ func (e *Engine) waitReady(ctx context.Context, id string, pid int) error {
 	tick := time.NewTicker(300 * time.Millisecond)
 	defer tick.Stop()
 	for {
+		// The pid must still be our VM before anything is trusted on the forwarded port:
+		// if QEMU died (for example it could not bind the port) another process may hold it.
+		if e.livePID(id) != pid {
+			return errf("boot_failed", "the VM exited during boot.%s", e.logTail(id))
+		}
 		if e.ping(ctx, id) {
 			return nil
-		}
-		if !e.Driver.Alive(pid) {
-			return errf("boot_failed", "the VM exited during boot.%s", e.logTail(id))
 		}
 		select {
 		case <-ctx.Done():
@@ -639,10 +665,7 @@ func (e *Engine) Branch(ctx context.Context, ref string, count int, name string,
 				_ = e.removeFiles(rec.ID)
 				return errf("store_error", "%v", err)
 			}
-			if err := e.store().Update(func(recs *[]Record) error {
-				*recs = append(*recs, rec)
-				return nil
-			}); err != nil {
+			if err := e.addRecord(rec); err != nil {
 				_ = e.removeFiles(rec.ID)
 				return err
 			}

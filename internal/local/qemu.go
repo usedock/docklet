@@ -3,7 +3,6 @@ package local
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -30,10 +29,17 @@ func DefaultGuestConfig(token string) GuestConfig {
 	return GuestConfig{Token: token, Workspace: "/home/user/work", Roots: []string{"/home/user/work", "/run/dock-fast"}}
 }
 
-// CmdlineValue is the dock.cfg= value: base64 of the JSON config.
-func (c GuestConfig) CmdlineValue() string {
-	raw, _ := json.Marshal(c)
-	return base64.StdEncoding.EncodeToString(raw)
+// FWCfgName is the fw_cfg entry the guest reads its agent config from, at
+// /sys/firmware/qemu_fw_cfg/by_name/opt/usedock/cfg/raw.
+const FWCfgName = "opt/usedock/cfg"
+
+// WriteGuestConfig writes the guest agent config as JSON, readable by the owner only.
+func WriteGuestConfig(path, token string) error {
+	raw, err := json.Marshal(DefaultGuestConfig(token))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o600)
 }
 
 // LaunchSpec is everything needed to boot one dock.
@@ -41,7 +47,11 @@ type LaunchSpec struct {
 	Kernel, Initrd, Disk string
 	SerialLog, StderrLog string
 	HostPort             int
-	Token                string
+	// ConfigFile holds the guest agent config as JSON; it reaches the guest through
+	// fw_cfg, never the command line, because other users can read a process argv.
+	ConfigFile string
+	// Token is the agent token. It is not part of the argv.
+	Token string
 	CPUs, MemoryMiB      int
 	// Network is "on" or "off"; off restricts the guest from the outside world.
 	Network string
@@ -93,7 +103,7 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 	if l.Network == "off" {
 		netdev += ",restrict=on"
 	}
-	cmdline := "console=" + console + " root=/dev/vda rw dock.cfg=" + DefaultGuestConfig(l.Token).CmdlineValue()
+	cmdline := "console=" + console + " root=/dev/vda rw"
 	args = append(args,
 		"-smp", strconv.Itoa(l.CPUs),
 		"-m", strconv.Itoa(l.MemoryMiB),
@@ -103,6 +113,7 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 		"-kernel", l.Kernel,
 		"-initrd", l.Initrd,
 		"-append", cmdline,
+		"-fw_cfg", "name="+FWCfgName+",file="+strings.ReplaceAll(l.ConfigFile, ",", ",,"),
 		"-drive", "file="+strings.ReplaceAll(l.Disk, ",", ",,")+",if=virtio,format=qcow2",
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",

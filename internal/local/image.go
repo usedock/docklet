@@ -143,6 +143,33 @@ type Cache struct {
 	HTTP   *http.Client
 	// Progress receives human progress lines; nil is silent.
 	Progress io.Writer
+	// MaxRawBytes caps the decompressed rootfs so a bad index cannot fill the disk; zero means 32 GiB.
+	MaxRawBytes int64
+}
+
+// DefaultMaxRawBytes is the decompressed rootfs cap when Cache.MaxRawBytes is zero.
+const DefaultMaxRawBytes = 32 << 30
+
+// staleDownload is how old a .part file must be before it is considered abandoned.
+const staleDownload = time.Hour
+
+// cleanStale removes abandoned partial downloads and conversions under the cache dir.
+func (c *Cache) cleanStale() {
+	dirs, _ := os.ReadDir(c.Dir)
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(c.Dir, d.Name()))
+		for _, f := range files {
+			if !strings.HasSuffix(f.Name(), ".part") {
+				continue
+			}
+			if info, err := f.Info(); err == nil && time.Since(info.ModTime()) > staleDownload {
+				_ = os.Remove(filepath.Join(c.Dir, d.Name(), f.Name()))
+			}
+		}
+	}
 }
 
 func (c *Cache) logf(format string, a ...any) {
@@ -177,6 +204,7 @@ func (c *Cache) Ensure(ctx context.Context, im dockyard.Image) (CachedImage, err
 	if c.Cached(im) {
 		return p, nil
 	}
+	c.cleanStale()
 	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
 		return p, errf("cache_error", "%v", err)
 	}
@@ -206,7 +234,7 @@ func (c *Cache) Ensure(ctx context.Context, im dockyard.Image) (CachedImage, err
 	defer os.Remove(raw)
 	tmpBase := p.Base + "." + tag + ".part"
 	defer os.Remove(tmpBase)
-	if err := decompress(filepath.Join(p.Dir, dockyard.FileRootfs), raw); err != nil {
+	if err := decompress(filepath.Join(p.Dir, dockyard.FileRootfs), raw, c.maxRaw()); err != nil {
 		if c.Cached(im) {
 			return p, nil
 		}
@@ -287,7 +315,14 @@ func (c *Cache) download(ctx context.Context, f dockyard.File, dest string) erro
 	return nil
 }
 
-func decompress(src, dest string) error {
+func (c *Cache) maxRaw() int64 {
+	if c.MaxRawBytes > 0 {
+		return c.MaxRawBytes
+	}
+	return DefaultMaxRawBytes
+}
+
+func decompress(src, dest string, max int64) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return errf("cache_error", "%v", err)
@@ -302,8 +337,14 @@ func decompress(src, dest string) error {
 	if err != nil {
 		return errf("cache_error", "%v", err)
 	}
-	if _, err := io.Copy(out, zr); err != nil {
+	// One byte past the cap proves the stream is larger than allowed.
+	n, err := io.Copy(out, io.LimitReader(zr, max+1))
+	if err == nil && n > max {
+		err = fmt.Errorf("the decompressed disk is larger than the %s limit", humanBytes(max))
+	}
+	if err != nil {
 		out.Close()
+		_ = os.Remove(dest)
 		return errf("decompress_failed", "%v", err)
 	}
 	return out.Close()

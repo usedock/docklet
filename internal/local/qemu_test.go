@@ -2,9 +2,11 @@ package local
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -13,7 +15,7 @@ import (
 
 func spec() LaunchSpec {
 	return LaunchSpec{Kernel: "/k/vmlinuz", Initrd: "/k/initrd.img", Disk: "/d/disk.qcow2", SerialLog: "/d/serial.log",
-		HostPort: 41234, Token: "tok", CPUs: 4, MemoryMiB: 3072, Network: "on"}
+		HostPort: 41234, ConfigFile: "/d/guest.json", Token: "tok", CPUs: 4, MemoryMiB: 3072, Network: "on"}
 }
 
 func argAfter(t *testing.T, args []string, flag string) string {
@@ -68,17 +70,55 @@ func TestArgvBootNetworkAndConsole(t *testing.T) {
 	if argAfter(t, args, "-display") != "none" {
 		t.Fatal("no display")
 	}
-	cmdline := argAfter(t, args, "-append")
-	if !strings.HasPrefix(cmdline, "console=ttyS0 root=/dev/vda rw dock.cfg=") {
-		t.Fatalf("cmdline %q", cmdline)
+	if got := argAfter(t, args, "-append"); got != "console=ttyS0 root=/dev/vda rw" {
+		t.Fatalf("cmdline %q must carry no config", got)
 	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(cmdline, "console=ttyS0 root=/dev/vda rw dock.cfg="))
-	if err != nil {
+	if got := argAfter(t, args, "-fw_cfg"); got != "name=opt/usedock/cfg,file=/d/guest.json" {
+		t.Fatalf("fw_cfg %q", got)
+	}
+}
+
+func TestNoSecretInAnyArgv(t *testing.T) {
+	s := spec()
+	s.Token = "SECRET-TOKEN-VALUE"
+	for _, goarch := range []string{"amd64", "arm64"} {
+		for _, accel := range []string{"kvm", "hvf", "whpx", "tcg"} {
+			for _, network := range []string{"on", "off"} {
+				s.Network = network
+				joined := strings.Join(BuildArgv(s, goarch, accel), " ")
+				if strings.Contains(joined, "SECRET") || strings.Contains(joined, "dock.cfg") {
+					t.Fatalf("%s/%s/%s: the token must not reach the argv: %s", goarch, accel, network, joined)
+				}
+				if !strings.Contains(joined, "-fw_cfg name=opt/usedock/cfg,file=/d/guest.json") {
+					t.Fatalf("%s/%s/%s: guest config must go through fw_cfg: %s", goarch, accel, network, joined)
+				}
+			}
+		}
+	}
+}
+
+func TestWriteGuestConfigIsPlainJSONForTheOwnerOnly(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "guest.json")
+	if err := WriteGuestConfig(p, "tok"); err != nil {
 		t.Fatal(err)
 	}
+	raw, _ := os.ReadFile(p)
 	var cfg GuestConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil || cfg.Token != "tok" || cfg.Workspace != "/home/user/work" || len(cfg.Roots) != 2 {
-		t.Fatalf("guest config %+v %v", cfg, err)
+		t.Fatalf("guest config %q %v", raw, err)
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+			t.Fatalf("mode %v", st.Mode().Perm())
+		}
+	}
+}
+
+func TestArgvEscapesCommasInConfigPath(t *testing.T) {
+	s := spec()
+	s.ConfigFile = `C:\Users\a,b\guest.json`
+	if got := argAfter(t, BuildArgv(s, "amd64", "whpx"), "-fw_cfg"); got != `name=opt/usedock/cfg,file=C:\Users\a,,b\guest.json` {
+		t.Fatalf("fw_cfg %q", got)
 	}
 }
 

@@ -190,3 +190,80 @@ func TestNetworkOffIsPassedToTheLaunch(t *testing.T) {
 		t.Fatalf("launch %+v", drv.starts[0])
 	}
 }
+
+func TestBootRetriesWithANewPortWhenQEMUCannotBind(t *testing.T) {
+	e, drv, _ := newTestEngine(t)
+	drv.bindFailures = 1
+	d, err := e.New(context.Background(), Spec{Name: "x"})
+	if err != nil || d.State != "ready" {
+		t.Fatalf("a lost port race must be retried: %+v %v", d, err)
+	}
+	if len(drv.starts) != 2 {
+		t.Fatalf("want 2 starts, got %d", len(drv.starts))
+	}
+	// A VM that keeps dying for other reasons is not retried forever.
+	e2, drv2, _ := newTestEngine(t)
+	drv2.dieOnStart = true
+	if _, err := e2.New(context.Background(), Spec{}); codeOf(err) != "boot_failed" || len(drv2.starts) != 1 {
+		t.Fatalf("got %v after %d starts", err, len(drv2.starts))
+	}
+	e3, drv3, _ := newTestEngine(t)
+	drv3.bindFailures = 10
+	if _, err := e3.New(context.Background(), Spec{}); codeOf(err) != "boot_failed" || len(drv3.starts) != bootAttempts {
+		t.Fatalf("retries must be bounded: %v after %d starts", err, len(drv3.starts))
+	}
+}
+
+func TestBootWritesGuestConfigAndKeepsTheTokenOffTheLaunchArgv(t *testing.T) {
+	e, drv, _ := newTestEngine(t)
+	d, err := e.New(context.Background(), Spec{Name: "cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(e.file(d.ID, "guest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := e.token(d.ID)
+	if !strings.Contains(string(raw), tok) || drv.starts[0].ConfigFile != e.file(d.ID, "guest.json") {
+		t.Fatalf("guest.json %q, launch %+v", raw, drv.starts[0])
+	}
+}
+
+func TestAddRecordRechecksTheNameUnderTheLock(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	if err := e.addRecord(Record{ID: "dk_1", Name: "same"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.addRecord(Record{ID: "dk_2", Name: "same"}); codeOf(err) != "dock_name_taken" {
+		t.Fatalf("got %v", err)
+	}
+	if err := e.addRecord(Record{ID: "dk_3"}); err != nil {
+		t.Fatalf("unnamed docks never collide: %v", err)
+	}
+	if err := e.addRecord(Record{ID: "dk_4"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBranchLosingTheNameRaceCleansUp(t *testing.T) {
+	ctx := context.Background()
+	e, _, _ := newTestEngine(t)
+	if _, err := e.New(ctx, Spec{Name: "src"}); err != nil {
+		t.Fatal(err)
+	}
+	// Another command takes the name after Branch's early check: simulate it with the
+	// early check passing because the other dock appears while the source is copied.
+	if err := e.addRecord(Record{ID: "dk_other", Name: "taken"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Branch(ctx, "src", 1, "taken", Spec{}); codeOf(err) != "dock_name_taken" {
+		t.Fatalf("got %v", err)
+	}
+	recs, _ := e.store().List()
+	for _, r := range recs {
+		if r.Parent == "src" {
+			t.Fatalf("a refused branch must leave no record: %+v", r)
+		}
+	}
+}

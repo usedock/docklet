@@ -231,6 +231,9 @@ func (a *App) cmdLs(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cl.Local != nil && *filter != "" {
+		return usagef("--filter is not supported by local docks; use --all to include stopped docks")
+	}
 	path := "/docks"
 	switch {
 	case *all:

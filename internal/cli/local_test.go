@@ -421,3 +421,12 @@ func TestImagesWithoutAPinnedReleaseIsClean(t *testing.T) {
 		t.Fatalf("doctor %q", te.out)
 	}
 }
+
+func TestLsFilterIsRejectedForLocal(t *testing.T) {
+	te, _ := newLocalEnv(t)
+	mustExit(t, te, 2, "ls", "--filter", "r")
+	if !strings.Contains(te.errb.String(), "--filter is not supported by local docks") {
+		t.Fatalf("err %q", te.errb)
+	}
+	mustExit(t, te, 0, "ls", "--all")
+}

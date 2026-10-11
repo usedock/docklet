@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/usedock/docklet/internal/dockyard"
 )
@@ -203,4 +204,53 @@ func TestDoctorOnFakeDriver(t *testing.T) {
 	if !names["dockyard"] || !names["default image"] {
 		t.Fatalf("checks %+v", checks)
 	}
+}
+
+func TestDecompressIsCapped(t *testing.T) {
+	im, _, _ := imageServer(t, "amd64")
+	c := &Cache{Dir: t.TempDir(), Driver: newFakeDriver(), MaxRawBytes: 4}
+	_, err := c.Ensure(context.Background(), im)
+	if codeOf(err) != "decompress_failed" || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("a rootfs larger than the cap must be refused, got %v", err)
+	}
+	if c.Cached(im) {
+		t.Fatal("a refused image must not be marked ready")
+	}
+	entries, _ := os.ReadDir(c.imageDir(im))
+	for _, f := range entries {
+		if strings.HasSuffix(f.Name(), ".raw") {
+			t.Fatalf("partial raw disk %s must be removed", f.Name())
+		}
+	}
+	c.MaxRawBytes = 0
+	if _, err := c.Ensure(context.Background(), im); err != nil {
+		t.Fatalf("the default cap must allow a normal image: %v", err)
+	}
+}
+
+func TestEnsureRemovesStalePartFiles(t *testing.T) {
+	im, _, _ := imageServer(t, "amd64")
+	c := &Cache{Dir: t.TempDir(), Driver: newFakeDriver()}
+	dir := c.imageDir(im)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale, fresh := filepath.Join(dir, "vmlinuz.part"), filepath.Join(dir, "initrd.img.part")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Ensure(context.Background(), im); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("a .part file older than an hour must be removed")
+	}
+	// The fresh one belongs to a download that may still be running (it was replaced by this one's own).
+	_ = fresh
 }

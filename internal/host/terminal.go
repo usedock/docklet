@@ -1,7 +1,6 @@
 package host
 
 import (
-	"bufio"
 	"context"
 	"net"
 
@@ -49,13 +48,6 @@ func (h *Host) OpenTerminal(ctx context.Context, dockID string, cols, rows int) 
 
 func handshakeTerminal(conn net.Conn, request fastAgentRequest) (*Terminal, error) {
 	return guestagent.NewTerminal(conn, request)
-}
-
-// agentRefusal is the error code a guest agent answered a stream handshake with.
-type agentRefusal = guestagent.Refusal
-
-func handshakeAgentStream(conn net.Conn, request fastAgentRequest) (*bufio.Reader, error) {
-	return guestagent.Handshake(conn, request)
 }
 
 // agentDial opens raw guest-agent connections, overridable in tests.

@@ -34,6 +34,7 @@ type fakeDriver struct {
 	resizes        []int
 	neverAnswer    bool // VM starts but its agent never answers
 	dieOnStart     bool // VM exits right after start
+	bindFailures   int  // the next N starts exit because the forwarded port could not be bound
 	ignorePoweroff bool
 }
 
@@ -71,6 +72,11 @@ func (f *fakeDriver) Start(_ context.Context, spec LaunchSpec) (int, error) {
 	f.nextPID++
 	pid := f.nextPID
 	f.starts = append(f.starts, spec)
+	if f.bindFailures > 0 {
+		f.bindFailures--
+		_ = os.WriteFile(spec.StderrLog, []byte("qemu-system-x86_64: Could not set up host forwarding rule 'tcp:127.0.0.1:1-:2222'"), 0o600)
+		return pid, nil
+	}
 	if f.dieOnStart {
 		return pid, nil
 	}
