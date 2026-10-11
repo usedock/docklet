@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/usedock/docklet/internal/cli"
 )
@@ -23,11 +24,19 @@ func printVersion(w io.Writer, args []string) bool {
 	return false
 }
 
+// shutdownSignals end a command the way Ctrl-C does, so deferred cleanup (temp files of a
+// push or pull) runs on a service stop or `kill` too.
+var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
+
+func signalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(parent, shutdownSignals...)
+}
+
 func main() {
 	if printVersion(os.Stdout, os.Args[1:]) {
 		return
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signalContext(context.Background())
 	code := cli.NewApp().Run(ctx, os.Args[1:])
 	stop()
 	os.Exit(code)

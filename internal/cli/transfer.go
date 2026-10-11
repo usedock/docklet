@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,10 +21,18 @@ import (
 // Tuning for push and pull; tests shorten the waits.
 const (
 	partAttempts     = 5
+	partBusyAttempts = 20 // part_upload_busy is the control plane queueing parts, not a fault
 	completeAttempts = 6
 	downloadAttempts = 6
 	defaultBackoff   = time.Second
 	defaultPoll      = 2 * time.Second
+	maxBackoff       = 30 * time.Second
+	// defaultIdle is how long a transfer connection may move no bytes before the attempt fails.
+	defaultIdle = time.Minute
+	// defaultHeaderWait is how long a finished request waits for response headers. The control
+	// plane may queue a part for up to 60s before it answers 429 part_upload_busy, so it must
+	// outlast that.
+	defaultHeaderWait = 90 * time.Second
 	pushReadyTimeout = 10 * time.Minute
 	exportTimeout    = 30 * time.Minute
 )
@@ -66,6 +75,39 @@ func (a *App) backoff() time.Duration {
 	return defaultBackoff
 }
 
+// backoffFor is the wait before retry number n (1-based): exponential, capped, and jittered
+// so parallel clients do not retry in step.
+func (a *App) backoffFor(n int) time.Duration {
+	d := a.backoff() << min(max(n-1, 0), 10)
+	if d > maxBackoff || d <= 0 {
+		d = maxBackoff
+	}
+	return jitter(d)
+}
+
+// jitter returns a duration in [d/2, d].
+func jitter(d time.Duration) time.Duration {
+	half := d / 2
+	if half <= 0 {
+		return d
+	}
+	return half + rand.N(half+1)
+}
+
+func (a *App) idleWait() time.Duration {
+	if a.xferIdle > 0 {
+		return a.xferIdle
+	}
+	return defaultIdle
+}
+
+func (a *App) headerWait() time.Duration {
+	if a.xferHeaderWait > 0 {
+		return a.xferHeaderWait
+	}
+	return defaultHeaderWait
+}
+
 func (a *App) pollEvery() time.Duration {
 	if a.xferPoll > 0 {
 		return a.xferPoll
@@ -77,8 +119,94 @@ func (a *App) transferHTTP() *http.Client {
 	if a.HTTP != nil {
 		return a.HTTP
 	}
-	// No overall timeout: parts are large; every request carries the command's context.
+	// No overall timeout: parts are large; transferDo fails a connection that goes idle instead.
 	return &http.Client{}
+}
+
+// errStalled marks an attempt that moved no bytes for too long; it is retried like any
+// transport failure.
+var errStalled = errors.New("the connection stalled")
+
+// watchdog cancels a request when no byte has moved for its current deadline.
+type watchdog struct {
+	t      *time.Timer
+	cancel context.CancelCauseFunc
+}
+
+func (w *watchdog) kick(d time.Duration) { w.t.Reset(d) }
+
+// watchBody feeds the watchdog while the request body is written, then waits for headers.
+type watchBody struct {
+	io.ReadCloser
+	w          *watchdog
+	idle, wait time.Duration
+}
+
+func (b *watchBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.w.kick(b.wait)
+	} else {
+		b.w.kick(b.idle)
+	}
+	return n, err
+}
+
+// watchResp feeds the watchdog as the response body is read and releases the request on Close.
+type watchResp struct {
+	io.ReadCloser
+	w    *watchdog
+	ctx  context.Context
+	idle time.Duration
+}
+
+func (r *watchResp) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if err != nil && err != io.EOF && context.Cause(r.ctx) == errStalled {
+		err = errStalled
+	}
+	if err == nil {
+		r.w.kick(r.idle)
+	}
+	return n, err
+}
+
+func (r *watchResp) Close() error {
+	r.w.t.Stop()
+	err := r.ReadCloser.Close()
+	r.w.cancel(nil)
+	return err
+}
+
+// transferDo sends req with an idle watchdog instead of a total timeout, so a stalled
+// connection fails and is retried while a long transfer that keeps moving is never cut. A
+// finished request waits up to headerWait for headers (the control plane may queue a part).
+func (a *App) transferDo(ctx context.Context, req *http.Request) (*http.Response, error) {
+	idle, wait := a.idleWait(), a.headerWait()
+	wctx, cancel := context.WithCancelCause(ctx)
+	w := &watchdog{cancel: cancel}
+	first := wait
+	if req.Body != nil {
+		first = idle
+	}
+	w.t = time.AfterFunc(first, func() { cancel(errStalled) })
+	req = req.WithContext(wctx)
+	if req.Body != nil {
+		req.Body = &watchBody{ReadCloser: req.Body, w: w, idle: idle, wait: wait}
+	}
+	resp, err := a.transferHTTP().Do(req)
+	if err != nil {
+		w.t.Stop()
+		stalled := context.Cause(wctx) == errStalled
+		cancel(nil)
+		if stalled {
+			return nil, errStalled
+		}
+		return nil, err
+	}
+	w.kick(idle)
+	resp.Body = &watchResp{ReadCloser: resp.Body, w: w, ctx: wctx, idle: idle}
+	return resp, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
@@ -116,6 +244,8 @@ func (p *progress) update(done int64, force bool) {
 }
 
 func (a *App) tempDir(eng *local.Engine) (string, func(), error) {
+	// A crash or SIGKILL skips the deferred cleanup; sweep what an earlier run left behind.
+	eng.CleanStaleTemp()
 	d, err := eng.TempDir()
 	if err != nil {
 		return "", nil, localError(err)
@@ -188,6 +318,10 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 		return err
 	}
 	defer cleanup()
+	// The flattened raw disk is the largest file push writes; its size is the disk size.
+	if err := eng.CheckFreeSpace(gibBytes(rec.DiskGiB), "push"); err != nil {
+		return localError(err)
+	}
 
 	flat, err := eng.Flatten(ctx, pos[0], dir, *stop)
 	if err != nil {
@@ -277,16 +411,27 @@ func (a *App) uploadParts(ctx context.Context, cl *Client, plan importPlan, zst 
 			target = strings.TrimRight(cl.BaseURL, "/") + "/v1/docks/import/" + url.PathEscape(plan.ImportID) + "/parts/" + strconv.Itoa(i)
 		}
 		var etag string
-		for attempt := 1; ; attempt++ {
+		fails, busy := 0, 0
+		for {
 			etag, err = a.putPart(ctx, cl, target, direct, io.NewSectionReader(f, off, length), length)
 			if err == nil {
 				break
 			}
 			var perm *permanentError
-			if errors.As(err, &perm) || ctx.Err() != nil || attempt >= partAttempts {
+			if errors.As(err, &perm) || ctx.Err() != nil {
 				return nil, newError("upload_failed", fmt.Sprintf("part %d of %d: %v", i, n, err))
 			}
-			if err := sleepCtx(ctx, a.backoff()<<(attempt-1)); err != nil {
+			// A busy answer has its own, larger budget: the control plane is only queueing.
+			count, limit := &fails, partAttempts
+			var be *busyError
+			if errors.As(err, &be) {
+				count, limit = &busy, partBusyAttempts
+			}
+			*count++
+			if *count >= limit {
+				return nil, newError("upload_failed", fmt.Sprintf("part %d of %d: %v", i, n, err))
+			}
+			if err := sleepCtx(ctx, a.backoffFor(*count)); err != nil {
 				return nil, err
 			}
 		}
@@ -308,11 +453,21 @@ func (a *App) completeImport(ctx context.Context, cl *Client, importID string, p
 			ctx.Err() != nil || attempt >= completeAttempts {
 			return nil, contractError(err)
 		}
-		if err := sleepCtx(ctx, a.backoff()<<(attempt-1)); err != nil {
+		if err := sleepCtx(ctx, a.backoffFor(attempt)); err != nil {
 			return nil, err
 		}
 	}
 }
+
+// gibBytes is a disk size in GiB as bytes, clamped so a bad record cannot overflow.
+func gibBytes(gib int) int64 {
+	return int64(min(max(gib, 0), 1<<30)) << 30
+}
+
+// busyError is the control plane asking the client to wait (429 part_upload_busy).
+type busyError struct{ msg string }
+
+func (e *busyError) Error() string { return e.msg }
 
 // permanentError is a failure a retry cannot fix.
 type permanentError struct{ msg string }
@@ -332,7 +487,7 @@ func (a *App) putPart(ctx context.Context, cl *Client, target string, direct boo
 		req.Header.Set("Authorization", "Bearer "+cl.Key)
 		req.Header.Set("Accept", "application/json")
 	}
-	resp, err := a.transferHTTP().Do(req)
+	resp, err := a.transferDo(ctx, req)
 	if err != nil {
 		return "", errors.New(redact(stripURL(err).Error(), cl.Key))
 	}
@@ -346,6 +501,9 @@ func (a *App) putPart(ctx context.Context, cl *Client, target string, direct boo
 			if m, ok := contractMessages[env.Code]; ok {
 				msg = m
 			}
+		}
+		if env.Code == "part_upload_busy" {
+			return "", &busyError{msg}
 		}
 		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout {
 			return "", errors.New(msg)
@@ -499,6 +657,10 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if info.BaseImage == "" {
 		return contractError(newError("export_base_unsupported", ""))
 	}
+	// The part file and the raw disk live side by side before the part is removed.
+	if err := eng.CheckFreeSpace(info.SizeBytes+gibBytes(info.DiskGiB), "pull"); err != nil {
+		return localError(err)
+	}
 	if !*c.json {
 		fmt.Fprintf(a.Stderr, "preparing the %s image\n", info.BaseImage)
 	}
@@ -520,7 +682,7 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 		max = local.DefaultMaxRawBytes
 	}
 	rawDisk := filepath.Join(dir, "disk.raw")
-	if err := local.DecompressFile(part, rawDisk, max); err != nil {
+	if err := local.DecompressFile(ctx, part, rawDisk, max); err != nil {
 		return localError(err)
 	}
 	_ = os.Remove(part)
@@ -585,9 +747,13 @@ func (a *App) getExport(ctx context.Context, cl *Client, exportID string) (expor
 // the size and sha256.
 func (a *App) download(ctx context.Context, cl *Client, exportID string, info exportInfo, part string, quiet bool) error {
 	pr := a.newProgress(quiet, "downloaded", info.SizeBytes)
+	var dl dlState
+	// fails counts attempts in a row that moved nothing; an attempt that grew the file resets
+	// it, so a long pull on a flaky link keeps going while it makes progress.
+	fails := 0
 	for attempt := 1; ; attempt++ {
 		if attempt > 1 {
-			if err := sleepCtx(ctx, a.backoff()<<(attempt-2)); err != nil {
+			if err := sleepCtx(ctx, a.backoffFor(max(fails, 1))); err != nil {
 				return err
 			}
 			fresh, err := a.getExport(ctx, cl, exportID)
@@ -599,7 +765,8 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 			}
 			info.URL = fresh.URL
 		}
-		done, err := a.fetchRange(ctx, cl, info, part, pr)
+		before := fileSize(part)
+		done, err := a.fetchRange(ctx, cl, info, part, pr, &dl)
 		if err == nil && done {
 			break
 		}
@@ -610,7 +777,12 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if attempt >= downloadAttempts {
+		if fileSize(part) > before {
+			fails = 0
+			continue
+		}
+		fails++
+		if fails >= downloadAttempts {
 			if err == nil {
 				err = errors.New("the download ended early")
 			}
@@ -621,8 +793,11 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 	if err != nil || st.Size() != info.SizeBytes {
 		return newError("download_failed", fmt.Sprintf("downloaded size does not match the export (%d bytes expected)", info.SizeBytes))
 	}
-	sum, err := local.FileSHA256(part)
+	sum, err := local.FileSHA256(ctx, part)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return newError("download_failed", err.Error())
 	}
 	if !strings.EqualFold(sum, info.SHA256) {
@@ -634,7 +809,7 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 
 // fetchRange makes one request that continues part from its current size. done reports
 // that part now holds the whole export.
-func (a *App) fetchRange(ctx context.Context, cl *Client, info exportInfo, part string, pr *progress) (bool, error) {
+func (a *App) fetchRange(ctx context.Context, cl *Client, info exportInfo, part string, pr *progress, st *dlState) (bool, error) {
 	var have int64
 	if st, err := os.Stat(part); err == nil {
 		have = st.Size()
@@ -654,8 +829,13 @@ func (a *App) fetchRange(ctx context.Context, cl *Client, info exportInfo, part 
 	}
 	if have > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(have, 10)+"-")
+		// If the object changed since the first response the server answers 200 with the whole
+		// new body instead of a range of it.
+		if st.validator != "" {
+			req.Header.Set("If-Range", st.validator)
+		}
 	}
-	resp, err := a.transferHTTP().Do(req)
+	resp, err := a.transferDo(ctx, req)
 	if err != nil {
 		return false, stripURL(err)
 	}
@@ -663,14 +843,29 @@ func (a *App) fetchRange(ctx context.Context, cl *Client, info exportInfo, part 
 	flags := os.O_CREATE | os.O_WRONLY
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
+		// Appending a range that is not the one asked for would corrupt the file: start over.
+		if why := badContentRange(resp.Header, have, info.SizeBytes); why != "" {
+			return false, restartDownload(part, st, why)
+		}
+		if v := validatorOf(resp.Header); st.validator != "" && v != "" && v != st.validator {
+			return false, restartDownload(part, st, "the export changed on the server")
+		}
+		if st.validator == "" {
+			st.validator = validatorOf(resp.Header)
+		}
 		flags |= os.O_APPEND
 	case http.StatusOK:
-		// The server ignored Range: start over.
+		// The server ignored Range, or If-Range said the object changed: start over.
 		flags |= os.O_TRUNC
 		have = 0
+		st.validator = validatorOf(resp.Header)
 	case http.StatusRequestedRangeNotSatisfiable:
-		_ = os.Truncate(part, 0)
-		return false, errors.New(resp.Status)
+		// The range starts past the end of what the server has (it answers bytes */<size>).
+		why := "the server rejected the resume range"
+		if total := parseTotalOnly(resp.Header.Get("Content-Range")); total >= 0 {
+			why = fmt.Sprintf("the server has %d bytes but the resume offset is %d", total, have)
+		}
+		return false, restartDownload(part, st, why)
 	default:
 		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 			return false, errors.New(resp.Status)
@@ -694,6 +889,64 @@ func (a *App) fetchRange(ctx context.Context, cl *Client, info exportInfo, part 
 		return false, err
 	}
 	return have+n == info.SizeBytes, nil
+}
+
+// dlState is what the first response of a download says about the object, kept across
+// attempts (and fresh presigned urls) to guard each resume.
+type dlState struct{ validator string }
+
+// validatorOf is the strong ETag, else the Last-Modified, of a response; If-Range takes either.
+func validatorOf(h http.Header) string {
+	if e := h.Get("ETag"); e != "" && !strings.HasPrefix(e, "W/") {
+		return e
+	}
+	return h.Get("Last-Modified")
+}
+
+// restartDownload discards the partial file so the next attempt starts from zero.
+func restartDownload(part string, st *dlState, why string) error {
+	st.validator = ""
+	if err := os.Truncate(part, 0); err != nil && !os.IsNotExist(err) {
+		return &permanentError{err.Error()}
+	}
+	return fmt.Errorf("%s; restarting from zero", why)
+}
+
+// badContentRange checks a 206 against the open-ended range asked for from offset have. It
+// returns why the response cannot be appended, or "" when it is exactly the rest of the export.
+func badContentRange(h http.Header, have, size int64) string {
+	var start, end, total int64
+	var star string
+	cr := strings.TrimSpace(h.Get("Content-Range"))
+	if n, _ := fmt.Sscanf(cr, "bytes %d-%d/%d", &start, &end, &total); n == 3 {
+		if start != have || end != size-1 || total != size {
+			return fmt.Sprintf("the server answered %q for a resume at %d of %d", cr, have, size)
+		}
+		return ""
+	}
+	if n, _ := fmt.Sscanf(cr, "bytes %d-%d/%1s", &start, &end, &star); n == 3 && star == "*" {
+		if start != have || end != size-1 {
+			return fmt.Sprintf("the server answered %q for a resume at %d of %d", cr, have, size)
+		}
+		return ""
+	}
+	return fmt.Sprintf("the server answered a range without a usable Content-Range (%q)", cr)
+}
+
+// parseTotalOnly reads the size out of "bytes */<size>" (the 416 form), or -1.
+func parseTotalOnly(cr string) int64 {
+	var total int64
+	if n, _ := fmt.Sscanf(strings.TrimSpace(cr), "bytes */%d", &total); n == 1 {
+		return total
+	}
+	return -1
+}
+
+func fileSize(path string) int64 {
+	if st, err := os.Stat(path); err == nil {
+		return st.Size()
+	}
+	return 0
 }
 
 // exportRequest builds the GET for an export url. A relative url is the control plane's own
