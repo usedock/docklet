@@ -2,7 +2,7 @@
 
 The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on each machine that hosts docks. It boots, pauses, snapshots, resumes and destroys docks, and reports what the host actually has.
 
-> **Status:** the docklet is here. The `dock` CLI and its local engine will live in this repo too; they are not built yet.
+> **Status:** the docklet is here. The `dock` CLI and its local engine live in this repo too (early, not released yet).
 
 ## What it does
 
@@ -19,10 +19,27 @@ The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on 
 | --- | --- | --- |
 | Linux with KVM | Firecracker | Target: first release |
 | Linux with Docker | gVisor | Target: first release |
-| Windows x86_64 | libkrun on Windows Hypervisor Platform | Planned |
-| macOS, Apple silicon | libkrun on Hypervisor.framework | Planned |
+| Windows x86_64 (fleet host) | docklet daemon on Windows | Planned |
+| macOS, Apple silicon (fleet host) | docklet daemon on macOS | Planned |
 
 A snapshot moves only between hosts with the same engine and CPU architecture.
+
+### Local docks (the `dock` CLI, no account)
+
+The `dock` binary carries its own engine and runs docks on your own machine with QEMU. The engine needs QEMU and the machine's hardware accelerator; it never falls back to software emulation on its own.
+
+| Machine | Accelerator | Status |
+| --- | --- | --- |
+| Linux x86_64 | KVM (`/dev/kvm`) | Available |
+| Windows x86_64 | Windows Hypervisor Platform (WHPX) | Available |
+| macOS | Hypervisor.framework (HVF) | Untested, planned |
+
+`dock doctor` checks what is missing. On Windows, enable the platform once (elevated PowerShell, then reboot) and install QEMU:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+winget install SoftwareFreedomConservancy.QEMU
+```
 
 ## Layout
 
@@ -61,10 +78,13 @@ Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The scrip
 
 ## dock CLI (early, not released yet)
 
-`cmd/dock` is a client for the Dock control plane `/v1` API (not for this daemon). It builds on Linux, macOS and Windows and is not packaged or versioned yet.
+`cmd/dock` runs docks locally (the built-in `local` context, no account) or talks to the Dock control plane `/v1` API (the `cloud` context and added URLs; not this daemon). It builds on Linux, macOS and Windows and is not packaged or versioned yet.
 
 ```sh
 go build -o dock ./cmd/dock
+dock doctor                              # what local docks need: QEMU, accelerator, disk, Dockyard
+dock images                              # Dockyard images; `dock images pull ubuntu-24.04` downloads one
+dock new web                             # with no account this boots a local dock (downloads the image once)
 dock login                               # prompts without echo; or: echo "$DOCK_API_KEY" | dock login
 dock new web --cpus 4 --memory 8gb --disk 40gb --env staging   # returns once the dock is ready
 dock ls
@@ -78,6 +98,7 @@ dock stop web && dock resume web && dock rm web
 - Every command accepts `--json` and prints the API data. Errors print `error: <code>: <message>` to stderr and exit 1; usage errors exit 2.
 - Sizes: `8gb`, `8g`, `8192mb`; a plain number is MiB for memory and GiB for disk.
 - `<dock>` is a name or id. `dock new` reads `./dock.toml` (`name`, `image`, `cpus`, `memory`, `disk`, `environment`); flags override it and unknown keys are an error.
+- Local context: the default until `dock login` stores a key or `DOCK_API_KEY`/`DOCK_API_URL` is set; switch with `dock context use local|cloud`. Local docks live under `$XDG_DATA_HOME/dock` (Linux), `~/Library/Application Support/dock` (macOS) or `%LOCALAPPDATA%\dock` (Windows) (`DOCK_DATA_DIR` overrides): a qcow2 overlay on the cached Dockyard base image, the agent token, forwarded port and pid. `--json` keeps the API's keys; `runtime` is `qemu` and a stopped dock is `archived`. Local differences: `dock new --network off` blocks the dock's network, `dock port` forwards a dock port to `127.0.0.1` in the foreground (no public URL), `dock ssh` opens a shell through the guest agent, `dock branch` copies the stopped disk (a running dock is stopped, copied and resumed; there is no live fork), and `dock stop` powers the guest off and keeps the disk. `exec` returns when the command ends. Settings: `DOCK_QEMU` (qemu-system binary), `DOCK_DOCKYARD_URL` (image index), `DOCK_LOCAL_ACCEL=tcg` (slow software emulation, for tests only).
 - Contexts: `dock context add|use|ls|rm`. The built-in `cloud` context points at `https://api.usedock.io`. Config lives in `os.UserConfigDir()/dock/config.toml` (mode 0600). `DOCK_API_URL`, `DOCK_API_KEY` and `DOCK_WORKSPACE` override the active context.
 - Workspace for `dock new`: `--workspace`, then `DOCK_WORKSPACE`, then the context default (`dock context use <name> --workspace <id>`), then your only workspace. With several workspaces and none chosen, `dock new` fails and lists them.
 - Not yet: `dock cp` (the API has no file endpoint for live docks) and streaming `exec` output (the exec API returns the bounded result when the command ends).
