@@ -63,7 +63,7 @@ def main():
         # shows as "[FAILED] Failed to start ssh.service" on every boot). Prints
         # the unit state and journal on failure so CI shows the reason.
         "sshd healthy": (
-            "for i in $(seq 60); do systemctl is-active -q ssh.service && break; sleep 1; done; "
+            "for i in $(seq 25); do systemctl is-active -q ssh.service && break; sleep 1; done; "
             "bad=$(systemctl --failed --plain --no-legend | grep -E '^ssh'); "
             "if systemctl is-active -q ssh.service && [ -z \"$bad\" ]; then exit 0; fi; "
             "systemctl --failed --plain --no-pager; systemctl status ssh.service ssh.socket --no-pager; "
