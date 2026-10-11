@@ -953,7 +953,8 @@ func (s unreadableStore) Get(ctx context.Context, snapshotID, name string) (io.R
 func TestCaptureAnswersDoNotDependOnReadingTheManifestBack(t *testing.T) {
 	ctx := context.Background()
 	c, rootfs, _, fp := fullFixture(t)
-	c.Store = unreadableStore{Store: c.Store}
+	backing := c.Store
+	c.Store = unreadableStore{Store: backing}
 	full, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "whole", "full", c.HostFamily, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -971,8 +972,7 @@ func TestCaptureAnswersDoNotDependOnReadingTheManifestBack(t *testing.T) {
 		t.Fatalf("base = %q (%v), want %q", got, err, fp)
 	}
 	// A generation this host did not write still reads from the store.
-	c.Store = unreadableStore{Store: c.Store, allow: map[string]bool{"whole": true}}
-	fresh := &Coordinator{Store: c.Store, BaseImage: c.BaseImage, HostFamily: c.HostFamily}
+	fresh := &Coordinator{Store: unreadableStore{Store: backing, allow: map[string]bool{"whole": true}}, BaseImage: c.BaseImage, HostFamily: c.HostFamily}
 	if got, err := fresh.GenerationImage(ctx, "whole"); err != nil || got != "ubuntu-24.04" {
 		t.Fatalf("stored generation image = %q (%v), want ubuntu-24.04", got, err)
 	}
