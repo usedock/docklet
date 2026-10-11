@@ -98,20 +98,25 @@ func TestCheckRange(t *testing.T) {
 	passwd := write("passwd", "root:x:0:0::/root:/bin/sh\nubuntu:x:1000:1000::/home/ubuntu:/bin/bash\nweird:x:200500:1::/:/bin/false\n")
 	subuid := write("subuid", "ubuntu:100000:65536\nother:165536:65536\n")
 	subgid := write("subgid", "ubuntu:100000:65536\n")
+	group := write("group", "root:x:0:\ndeploy:x:300100:ubuntu\n")
 	missing := filepath.Join(dir, "nope")
-	if err := CheckRange(2000000000, 65536, passwd, subuid, subgid); err != nil {
+	if err := CheckRange(2000000000, 65536, passwd, group, subuid, subgid); err != nil {
 		t.Fatalf("clean range refused: %v", err)
 	}
-	if err := CheckRange(200000, 65536, missing, missing, missing); err != nil {
+	if err := CheckRange(200000, 65536, missing, missing, missing, missing); err != nil {
 		t.Fatalf("missing files must not clash: %v", err)
 	}
-	if err := CheckRange(200000, 65536, passwd, missing, missing); err == nil {
+	if err := CheckRange(200000, 65536, passwd, missing, missing, missing); err == nil {
 		t.Fatal("passwd uid 200500 inside range must be refused")
 	}
-	if err := CheckRange(200000, 65536, missing, subuid, missing); err == nil {
+	if err := CheckRange(200000, 65536, missing, missing, subuid, missing); err == nil {
 		t.Fatal("range overlapping subuid 165536+65536 must be refused")
 	}
-	if err := CheckRange(100000, 10, missing, missing, subgid); err == nil {
+	if err := CheckRange(100000, 10, missing, missing, missing, subgid); err == nil {
 		t.Fatal("range overlapping subgid must be refused")
+	}
+	// The dock's gid equals its uid, so a host group inside the range would grant its files.
+	if err := CheckRange(300000, 65536, missing, group, missing, missing); err == nil {
+		t.Fatal("group gid 300100 inside range must be refused")
 	}
 }

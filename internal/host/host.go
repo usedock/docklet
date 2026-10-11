@@ -1110,6 +1110,8 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	h.mu.Unlock()
 	_ = h.deleteIface(tap)
 	_ = os.RemoveAll(h.jailRoot(backing))
+	// A failed boot's preserved jail holds a disk owned by this dock's uid, which is about to be reused.
+	_ = os.RemoveAll(h.jailRoot(backing) + ".failed")
 	_ = os.RemoveAll(filepath.Join(h.cfg.VMsDir, backing))
 	h.releaseOwner(backing)
 	// A gvisor dock owns a loop-mounted work disk that must be unmounted before it is removed.

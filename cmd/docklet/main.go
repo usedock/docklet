@@ -157,7 +157,7 @@ func main() {
 	}
 	if isMicroVM {
 		if iso.UIDBase > 0 {
-			if err := uid.CheckRange(iso.UIDBase, iso.UIDSize, "/etc/passwd", "/etc/subuid", "/etc/subgid"); err != nil {
+			if err := uid.CheckRange(iso.UIDBase, iso.UIDSize, "/etc/passwd", "/etc/group", "/etc/subuid", "/etc/subgid"); err != nil {
 				log.Fatalf("docklet: %v; pick another DOCKLET_UID_BASE", err)
 			}
 			log.Printf("docklet: jailer uid/gid per dock from %d-%d", iso.UIDBase, iso.UIDBase+iso.UIDSize-1)

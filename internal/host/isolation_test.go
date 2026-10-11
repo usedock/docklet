@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -193,5 +194,31 @@ func TestLegacySharedUIDWithoutRange(t *testing.T) {
 	u, g, err := h.dockOwner("dock-1")
 	if err != nil || u != h.cfg.UID || g != h.cfg.GID {
 		t.Fatalf("owner = %d:%d,%v; want shared %d:%d", u, g, err, h.cfg.UID, h.cfg.GID)
+	}
+}
+
+// A failed boot preserves its jail as root.failed with a disk owned by the dock's
+// uid; destroy must remove it before the uid goes to another dock.
+func TestDestroyRemovesFailedJailBeforeFreeingUID(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	failed := iso.h.jailRoot("dock-1") + ".failed"
+	if err := os.MkdirAll(failed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(failed, fc.RootfsName), []byte("old disk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(failed); !os.IsNotExist(err) {
+		t.Fatalf("failed jail survived destroy: %v", err)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("destroy must free the uid")
 	}
 }

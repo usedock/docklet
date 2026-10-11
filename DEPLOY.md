@@ -497,8 +497,8 @@ forks and branches (the disk is re-chowned at every boot).
 
 - The default range sits above login users, the default `/etc/subuid` ranges
   (from 100000, 65536 each) and the systemd container range (to 1879048191). At
-  startup the docklet refuses a range that overlaps an `/etc/passwd` uid or an
-  `/etc/subuid` / `/etc/subgid` range; set another `DOCKLET_UID_BASE` if you hit it.
+  startup the docklet refuses a range that overlaps an `/etc/passwd` uid, an
+  `/etc/group` gid or an `/etc/subuid` / `/etc/subgid` range; set another `DOCKLET_UID_BASE` if you hit it.
 - Upgrading: docks created under the shared uid keep running untouched. They get
   their own uid and a re-chowned disk the next time they boot (resume or load);
   nothing to migrate. `DOCKLET_UID_BASE=0` is a deprecated escape hatch.

@@ -120,19 +120,21 @@ func (a *Allocator) save() error {
 	return os.Rename(tmp, a.path)
 }
 
-// CheckRange refuses a range that overlaps a passwd user or a subuid/subgid
-// range, so a dock uid never equals a real account or a userns mapping.
-// Missing files mean nothing to clash with.
-func CheckRange(base, size int, passwdPath, subuidPath, subgidPath string) error {
+// CheckRange refuses a range that overlaps a passwd user, a group (the dock's
+// gid equals its uid) or a subuid/subgid range, so a dock id never equals a real
+// account, group or userns mapping. Missing files mean nothing to clash with.
+func CheckRange(base, size int, passwdPath, groupPath, subuidPath, subgidPath string) error {
 	end := base + size - 1
 	overlaps := func(lo, hi int) bool { return lo <= end && hi >= base }
-	if err := scan(passwdPath, 2, func(id, _ int) error {
-		if overlaps(id, id) {
-			return fmt.Errorf("uid range %d-%d contains passwd uid %d (%s)", base, end, id, passwdPath)
+	for _, p := range []string{passwdPath, groupPath} {
+		if err := scan(p, 2, func(id, _ int) error {
+			if overlaps(id, id) {
+				return fmt.Errorf("uid range %d-%d contains id %d (%s)", base, end, id, p)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 	for _, p := range []string{subuidPath, subgidPath} {
 		if err := scan(p, 1, func(start, count int) error {
