@@ -12,9 +12,9 @@ import sys
 import time
 
 
-def call(host, port, request):
+def call(host, port, request, read_timeout=60):
     with socket.create_connection((host, port), timeout=10) as conn:
-        conn.settimeout(60)
+        conn.settimeout(read_timeout)
         conn.sendall((json.dumps(request) + "\n").encode())
         return json.loads(conn.makefile("rb").readline().decode())
 
@@ -45,7 +45,8 @@ def main():
         "hostname": ("hostname", lambda out: out.strip() == "boot-test"),
         "root grown": ("df -BM --output=size / | tail -1", lambda out: int(out.strip().rstrip("M")) > 5000),
         "agent config mode": ("stat -c %a /etc/dock-fast-agent.json", lambda out: out.strip() == "600"),
-        "docker client": ("docker version --format '{{.Client.Version}}'", lambda out: out.strip() != ""),
+        # Client only: `docker version` also waits for the daemon, which is still starting under TCG; "docker daemon" checks that.
+        "docker client": ("docker --version", lambda out: out.strip().startswith("Docker version")),
         "user in docker group": ("id -nG user", lambda out: "docker" in out.split()),
         # DNS must come from the DHCP-offered server (QEMU user networking: 10.0.2.3),
         # not a hard-coded resolver. The lease can land just after the agent starts.
@@ -60,14 +61,16 @@ def main():
         ),
         # The daemon may still be starting when the agent first answers.
         "docker daemon": (
-            "for i in $(seq 45); do systemctl is-active -q docker && break; sleep 1; done; "
+            "for i in $(seq 240); do systemctl is-active -q docker && break; sleep 1; done; "
             "docker version --format '{{.Server.Version}}'",
             lambda out: out.strip() != "",
         ),
     })
     failed = False
     for label, (script, ok) in checks.items():
-        res = call(host, port, {"token": token, "op": "exec", "script": script, "timeoutSeconds": 55})
+        # The daemon check waits longer: dockerd starts slowly under TCG emulation.
+        secs = 270 if label == "docker daemon" else 55
+        res = call(host, port, {"token": token, "op": "exec", "script": script, "timeoutSeconds": secs}, secs + 10)
         good = res.get("ok") and res.get("exitCode") == 0 and ok(res.get("stdout", ""))
         print("ping-agent: %s: %s" % (label, "ok" if good else "FAIL " + json.dumps(res)))
         failed = failed or not good
