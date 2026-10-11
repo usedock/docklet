@@ -502,6 +502,7 @@ type generationDescriber interface {
 	GenerationBase(ctx context.Context, snapshotID string) (string, error)
 	GenerationSHA256(ctx context.Context, snapshotID string) (string, error)
 	GenerationImage(ctx context.Context, snapshotID string) (string, error)
+	GenerationDataBytes(ctx context.Context, snapshotID string) (int64, error)
 }
 
 // snapshotAnswer describes a capture from its manifest; an unreadable manifest fails the capture
@@ -519,6 +520,9 @@ func snapshotAnswer(ctx context.Context, h generationDescriber, id string, size 
 		return resp, fmt.Errorf("describe generation %s: %w", id, err)
 	}
 	if resp.BaseImage, err = h.GenerationImage(ctx, id); err != nil {
+		return resp, fmt.Errorf("describe generation %s: %w", id, err)
+	}
+	if resp.DataBytes, err = h.GenerationDataBytes(ctx, id); err != nil {
 		return resp, fmt.Errorf("describe generation %s: %w", id, err)
 	}
 	return resp, nil

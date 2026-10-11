@@ -80,6 +80,9 @@ func TestSnapshotCreateFullWritesAWholeImageWithItsChecksum(t *testing.T) {
 	if size != int64(len(stored)) || manifest.SizeBytes != size {
 		t.Fatalf("size = %d, manifest sizeBytes = %d, stored = %d", size, manifest.SizeBytes, len(stored))
 	}
+	if got, err := h.GenerationDataBytes(ctx, id); err != nil || got <= 0 {
+		t.Fatalf("GenerationDataBytes = %d (%v), want the disk's allocated bytes", got, err)
+	}
 	if got, err := h.GenerationBase(ctx, id); err != nil || got != "" {
 		t.Fatalf("a whole image must not name a base fingerprint, got %q (%v)", got, err)
 	}
@@ -120,7 +123,8 @@ func TestSnapshotCreateFullRefusesContainerDocks(t *testing.T) {
 	}
 	image, ierr := h.GenerationImage(ctx, "x")
 	sum, serr := h.GenerationSHA256(ctx, "x")
-	if image != "" || sum != "" || ierr != nil || serr != nil {
-		t.Fatal("a container host reports no image or checksum")
+	data, derr := h.GenerationDataBytes(ctx, "x")
+	if image != "" || sum != "" || data != 0 || ierr != nil || serr != nil || derr != nil {
+		t.Fatal("a container host reports no image, checksum or data size")
 	}
 }

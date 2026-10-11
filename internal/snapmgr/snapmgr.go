@@ -171,6 +171,7 @@ func (c *Coordinator) FreezeRootfsFull(ctx context.Context, dockID, rootfsSrc, s
 		Files:      []store.FileEntry{entry},
 		SHA256:     entry.SHA256,
 		SizeBytes:  entry.Size,
+		DataBytes:  entry.DataBytes,
 	}
 	if c.BaseImage != "" {
 		manifest.Image = disk.DockImage(c.BaseImage, rootfsSrc)
@@ -458,4 +459,14 @@ func (c *Coordinator) GenerationSHA256(ctx context.Context, snapshotID string) (
 		return "", err
 	}
 	return manifest.SHA256, nil
+}
+
+// GenerationDataBytes is the decompressed data size a whole-image generation recorded, 0 when it
+// recorded none. An unreadable manifest is an error.
+func (c *Coordinator) GenerationDataBytes(ctx context.Context, snapshotID string) (int64, error) {
+	manifest, err := c.capturedManifest(ctx, snapshotID)
+	if err != nil {
+		return 0, err
+	}
+	return manifest.DataBytes, nil
 }

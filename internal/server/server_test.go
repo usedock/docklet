@@ -496,14 +496,20 @@ func (d describer) GenerationSHA256(_ context.Context, id string) (string, error
 }
 func (d describer) GenerationImage(_ context.Context, id string) (string, error) { return d.get(id, 2) }
 
+// GenerationDataBytes answers the length of the generation's base fingerprint, a stand-in number.
+func (d describer) GenerationDataBytes(_ context.Context, id string) (int64, error) {
+	fp, err := d.get(id, 0)
+	return int64(len(fp)), err
+}
+
 func TestSnapshotAnswerFailsClosedOnAnUnreadableManifest(t *testing.T) {
 	ctx := context.Background()
 	d := describer{"g1": {"fp", "sum", "node-22"}}
 	resp, err := snapshotAnswer(ctx, d, "g1", 7, "fam", true)
-	if err != nil || resp.BaseFingerprint != "fp" || resp.SHA256 != "sum" || resp.BaseImage != "node-22" || resp.SizeBytes != 7 || resp.CPUFamily != "fam" {
+	if err != nil || resp.BaseFingerprint != "fp" || resp.SHA256 != "sum" || resp.BaseImage != "node-22" || resp.DataBytes != 2 || resp.SizeBytes != 7 || resp.CPUFamily != "fam" {
 		t.Fatalf("resp = %+v, err = %v", resp, err)
 	}
-	if resp, err := snapshotAnswer(ctx, d, "g1", 7, "fam", false); err != nil || resp.SHA256 != "" || resp.BaseImage != "" {
+	if resp, err := snapshotAnswer(ctx, d, "g1", 7, "fam", false); err != nil || resp.SHA256 != "" || resp.BaseImage != "" || resp.DataBytes != 0 {
 		t.Fatalf("a delta capture answers no checksum or image: %+v %v", resp, err)
 	}
 	for _, full := range []bool{false, true} {

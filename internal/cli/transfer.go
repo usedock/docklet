@@ -585,6 +585,8 @@ type exportInfo struct {
 	MemoryMiB int    `json:"memoryMiB"`
 	DiskGiB   int    `json:"diskGiB"`
 	SizeBytes int64  `json:"sizeBytes"`
+	// DataBytes is the data size recorded at export; 0 for an export from before it was recorded.
+	DataBytes int64  `json:"dataBytes"`
 	SHA256    string `json:"sha256"`
 	BaseImage string `json:"baseImage"`
 	URL       string `json:"url"`
@@ -659,7 +661,7 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	}
 	// Peak: the part file beside the sparse raw disk, then that raw disk beside the new qcow2,
 	// on top of a base image that may still have to be downloaded.
-	if err := eng.CheckFreeSpace(eng.PullSpaceNeed(ctx, info.SizeBytes, gibBytes(info.DiskGiB), info.BaseImage), "pull"); err != nil {
+	if err := eng.CheckFreeSpace(eng.PullSpaceNeed(ctx, info.SizeBytes, info.DataBytes, gibBytes(info.DiskGiB), info.BaseImage), "pull"); err != nil {
 		return localError(err)
 	}
 	if !*c.json {

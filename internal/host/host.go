@@ -1436,6 +1436,15 @@ func (h *Host) GenerationImage(ctx context.Context, snapshotID string) (string, 
 	return h.cfg.Snaps.GenerationImage(ctx, snapshotID)
 }
 
+// GenerationDataBytes is the decompressed data size a whole-image generation recorded, 0 for
+// deltas and generations that recorded none.
+func (h *Host) GenerationDataBytes(ctx context.Context, snapshotID string) (int64, error) {
+	if h.diskOnly() {
+		return 0, nil
+	}
+	return h.cfg.Snaps.GenerationDataBytes(ctx, snapshotID)
+}
+
 // GenerationSHA256 is the sha256 of a whole-image generation's stored object, "" for deltas.
 func (h *Host) GenerationSHA256(ctx context.Context, snapshotID string) (string, error) {
 	if h.diskOnly() {
