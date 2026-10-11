@@ -85,8 +85,12 @@ jobs:
           s=$(date +%s)
           token="$(sed -n 's/^FLEET_TOKEN=//p' dock-src/deploy/self-host/.env)"
           echo "::add-mask::$token"
+          # The runner is single-use, so accept the CPU vulnerabilities it reports.
+          vulns="$(grep -l '^Vulnerable' /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null | xargs -r -n1 basename | paste -sd, -)"
+          echo "accepting CPU vulnerabilities: ${vulns:-none}"
           sudo env DOCKLET_FLEET_TOKEN="$token" DOCKLET_BIN="$RUNNER_TEMP/docklet" \
             bash scripts/bootstrap-host.sh --fleet-url "$DOCK_URL" --runtime microvm --pool-size 0 \
+            ${vulns:+--allow-vulnerable "$vulns"} \
             2>&1 | tee "$LOGS/bootstrap.log"
           printf 'host bootstrap (image build incl.)  %ss\n' "$(( $(date +%s) - s ))" | tee -a "$LOGS/timings.txt"
       - name: dock CLI end to end
