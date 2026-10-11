@@ -170,9 +170,12 @@ printf '[Resolve]\nFallbackDNS=1.1.1.1 9.9.9.9\n' > "$TREE/etc/systemd/resolved.
 rm -f "$TREE/var/lib/dbus/machine-id" "$TREE"/etc/ssh/ssh_host_*
 printf 'dock\n' > "$TREE/etc/hostname"
 printf '/dev/vda / ext4 defaults 0 1\n' > "$TREE/etc/fstab"
-# Regenerate sshd host keys on first boot.
+# Generate sshd host keys on first boot. The unit's own ExecStartPre=sshd -t
+# fails without host keys, and drop-in ExecStartPre lines run after the unit's,
+# so reset the list and put ssh-keygen -A first. The unit also gets
+# /run/sshd from RuntimeDirectory=sshd, and ssh.socket activates it.
 install -d "$TREE/etc/systemd/system/ssh.service.d"
-printf '[Service]\nExecStartPre=/usr/bin/ssh-keygen -A\n' > "$TREE/etc/systemd/system/ssh.service.d/hostkeys.conf"
+printf '[Service]\nExecStartPre=\nExecStartPre=/usr/bin/ssh-keygen -A\nExecStartPre=/usr/sbin/sshd -t\n' > "$TREE/etc/systemd/system/ssh.service.d/hostkeys.conf"
 
 KERNEL="$(ls "$TREE"/boot/vmlinuz-* | sort -V | tail -1)"
 INITRD="$(ls "$TREE"/boot/initrd.img-* | sort -V | tail -1)"
