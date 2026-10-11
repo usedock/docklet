@@ -33,12 +33,12 @@ Sleep 800ms
 Type "clear" Enter
 Type "dock doctor" Enter
 Wait+Screen@60s /try: dock new/
-Sleep 800ms
+Sleep 2s
 
 Type "clear" Enter
 Type "dock new api" Enter
 Wait+Screen@180s /created api/
-Sleep 800ms
+Sleep 1500ms
 
 Type "dock exec api -- uname -a" Enter
 Wait+Screen@60s /GNU\/Linux/
