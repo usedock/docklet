@@ -25,7 +25,14 @@ func dropOrder(h *Host, log *[]string, setBoot func(func())) {
 
 func assertDropBeforeBoot(t *testing.T, log []string) {
 	t.Helper()
-	if len(log) < 2 || log[0] != "drop" || log[1] != "boot" {
+	boot := -1
+	for i, e := range log {
+		if e == "boot" {
+			boot = i
+			break
+		}
+	}
+	if boot < 1 || log[0] != "drop" {
 		t.Fatalf("egress rules must land before boot, order=%v", log)
 	}
 }
@@ -47,6 +54,7 @@ func TestMicroVMSnapshotLoadConfinesBeforeBoot(t *testing.T) {
 	h, driver, _ := testHost(t)
 	h.cfg.Egress = egress.New()
 	h.cfg.EgressPort = 3128
+	recordIptables(h)
 	snap := snapshotFor(t, h)
 	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work", egress: []string{"github.com"}}
 	var log []string
@@ -76,6 +84,7 @@ func TestGVisorSnapshotLoadConfinesBeforeBoot(t *testing.T) {
 	h.cfg.Egress = egress.New()
 	h.cfg.EgressPort = 3128
 	stubAgent(t, h)
+	recordIptables(h)
 	if _, err := h.Provision(ctx, "dock-1", resSmall, "", ""); err != nil {
 		t.Fatal(err)
 	}
