@@ -32,6 +32,7 @@ import (
 	"github.com/usedock/docklet/internal/snapmgr"
 	"github.com/usedock/docklet/internal/stats"
 	"github.com/usedock/docklet/internal/store"
+	"github.com/usedock/docklet/internal/uid"
 )
 
 // version is set at release build time with -ldflags "-X main.version=<tag>".
@@ -150,6 +151,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("docklet: %v", err)
 	}
+	iso, err := parseIsolation(os.Getenv)
+	if err != nil {
+		log.Fatalf("docklet: %v", err)
+	}
+	if isMicroVM {
+		if iso.UIDBase > 0 {
+			if err := uid.CheckRange(iso.UIDBase, iso.UIDSize, "/etc/passwd", "/etc/group", "/etc/subuid", "/etc/subgid"); err != nil {
+				log.Fatalf("docklet: %v; pick another DOCKLET_UID_BASE", err)
+			}
+			log.Printf("docklet: jailer uid/gid per dock from %d-%d", iso.UIDBase, iso.UIDBase+iso.UIDSize-1)
+			if os.Getenv("DOCKLET_UID") != "" {
+				log.Printf("docklet: DOCKLET_UID/GID no longer set the jailer id; they only own guest workspace files")
+			}
+		} else {
+			log.Printf("docklet: WARNING DOCKLET_UID_BASE=0 runs every microvm as shared uid %d (deprecated), a jailer escape reaches every dock", getint("DOCKLET_UID", 1000))
+		}
+	}
+	for _, cpus := range []int{1, 2, 4} {
+		log.Printf("docklet: limits for %d vcpu: %s", cpus, iso.Limits.For(apiv1.Resources{CPUs: cpus}))
+	}
 	jailBase := getenv("DOCKLET_JAIL_BASE", "/srv/jailer")
 	// Work disks live in the state dir (gvisor); rootfs images live in the jail base (microvm).
 	diskDir := stateDir
@@ -173,6 +194,9 @@ func main() {
 		Subnet:             getenv("DOCKLET_SUBNET", "192.168.127.0/24"),
 		UID:                getint("DOCKLET_UID", 1000),
 		GID:                getint("DOCKLET_GID", 1000),
+		UIDBase:            iso.UIDBase,
+		UIDSize:            iso.UIDSize,
+		Limits:             iso.Limits,
 		PoolSize:           getint("DOCKLET_POOL_SIZE", 0),
 		Egress:             egressProxy,
 		EgressPort:         egressPort,

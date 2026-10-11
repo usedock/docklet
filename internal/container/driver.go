@@ -135,6 +135,11 @@ func (d *Driver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, error) {
 		"--cap-drop=ALL",
 		"--security-opt", "no-new-privileges",
 	}
+	// Process count is bounded per dock. Disk I/O is not throttled for gvisor: docker
+	// needs a block device path for bps limits, and the work disk is a loop mount.
+	if spec.Limits.PidsLimit > 0 {
+		args = append(args, "--pids-limit", strconv.Itoa(spec.Limits.PidsLimit))
+	}
 	// The host stages the pool claim token beside the sidecar; mount it read-only.
 	if host := filepath.Join(spec.JailRoot, "fast-agent.json"); fileExists(host) {
 		args = append(args, "-v", host+":"+apiv1.FastAgentConfigPath+":ro")

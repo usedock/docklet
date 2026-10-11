@@ -29,6 +29,7 @@ import (
 	"github.com/usedock/docklet/internal/net"
 	"github.com/usedock/docklet/internal/snapmgr"
 	"github.com/usedock/docklet/internal/stats"
+	"github.com/usedock/docklet/internal/uid"
 )
 
 // Config wires one host; zero values are rejected by New.
@@ -44,13 +45,21 @@ type Config struct {
 	JailBase       string
 	CgroupBase     string
 	Subnet         string
-	UID            int
-	GID            int
-	Driver         Backend
-	Snaps          *snapmgr.Coordinator
-	Stats          stats.Reader
-	NetRunner      exec.Runner
-	Mount          disk.Mounter
+	// UID/GID own guest workspace files and are the jailer id only when UIDBase is 0.
+	UID int
+	GID int
+	// UIDBase and UIDSize reserve the range each microvm dock draws its jailer uid/gid from; 0 UIDBase keeps the shared UID/GID (deprecated).
+	UIDBase int
+	UIDSize int
+	// Limits are the host-wide I/O, bandwidth and pids limits, resolved per dock size.
+	Limits fc.Limits
+	// Chown overrides os.Chown for dock files (tests only).
+	Chown     func(path string, uid, gid int) error
+	Driver    Backend
+	Snaps     *snapmgr.Coordinator
+	Stats     stats.Reader
+	NetRunner exec.Runner
+	Mount     disk.Mounter
 	// PoolSize pre-boots fast VMs for instant claims; 0 disables the pool.
 	PoolSize int
 	// Egress confines restricted guests to allowlisted hosts via the proxy on EgressPort; nil refuses restricted boots.
@@ -119,6 +128,7 @@ type Host struct {
 	pending   map[string]apiv1.Resources
 	fastSpecs map[string]fastSpec
 	pl        *pool
+	uids      *uid.Allocator
 }
 
 // growDisk is disk.Grow; tests swap it for a scaled-down grow so no test
@@ -135,6 +145,15 @@ func New(cfg Config, stateDir string) (*Host, error) {
 		return nil, err
 	}
 	h := &Host{cfg: cfg, alloc: alloc, vms: map[string]*vm{}, pending: map[string]apiv1.Resources{}, fastSpecs: map[string]fastSpec{}}
+	if cfg.UIDBase > 0 {
+		size := cfg.UIDSize
+		if size == 0 {
+			size = uid.DefaultSize
+		}
+		if h.uids, err = uid.Open(stateDir, cfg.UIDBase, size); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.PoolSize > 0 {
 		h.pl = newPool(cfg.PoolSize)
 	}
@@ -258,12 +277,41 @@ func (h *Host) ifaceFor(dockID string) string {
 	return TapFor(dockID)
 }
 
+// dockOwner returns the uid/gid a microvm dock's jailer, TAP and disk belong to:
+// the dock's own id from the reserved range, or the shared UID/GID when no range is set.
+func (h *Host) dockOwner(dockID string) (int, int, error) {
+	if h.uids == nil {
+		return h.cfg.UID, h.cfg.GID, nil
+	}
+	id, err := h.uids.Assign(dockID)
+	return id, id, err
+}
+
+// releaseOwner frees a destroyed dock's uid for reuse.
+func (h *Host) releaseOwner(dockID string) {
+	if h.uids != nil {
+		_ = h.uids.Release(dockID)
+	}
+}
+
+func (h *Host) chown(path string, owner, group int) error {
+	if h.cfg.Chown != nil {
+		return h.cfg.Chown(path, owner, group)
+	}
+	return os.Chown(path, owner, group)
+}
+
 // ensureIface creates and raises the host-side interface for a dock.
-func (h *Host) ensureIface(iface string) error {
+func (h *Host) ensureIface(iface string, owner int) error {
 	if h.usesVeth() {
 		return net.EnsureVeth(h.cfg.NetRunner, iface)
 	}
-	return net.EnsureTAP(h.cfg.NetRunner, iface, h.cfg.UID)
+	// A TAP left by an older boot keeps its old owner (the shared uid before per-dock ids), and
+	// firecracker cannot open a TAP it does not own: recreate it so the owner always matches.
+	if h.uids != nil {
+		_ = net.DeleteTAP(h.cfg.NetRunner, iface)
+	}
+	return net.EnsureTAP(h.cfg.NetRunner, iface, owner)
 }
 
 // deleteIface removes the host-side interface, ignoring absence.
@@ -386,7 +434,11 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 	_ = os.RemoveAll(h.jailRoot(dockID))
 	rootfs := filepath.Join(h.jailRoot(dockID), fc.RootfsName)
 	isContainer := h.usesVeth()
+	var owner, ownerGID int
 	if !isContainer {
+		if owner, ownerGID, err = h.dockOwner(dockID); err != nil {
+			return "", fmt.Errorf("provision uid: %w", err)
+		}
 		if resolved != "" {
 			if err := h.cfg.Snaps.MaterializeDisk(ctx, resolved, rootfs); err != nil {
 				return "", err
@@ -400,7 +452,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 			return "", err
 		}
 		// The guest runs dropped to UID/GID and needs the disk writable.
-		if err := os.Chown(rootfs, h.cfg.UID, h.cfg.GID); err != nil {
+		if err := h.chown(rootfs, owner, ownerGID); err != nil {
 			return "", err
 		}
 	} else {
@@ -415,7 +467,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 		_ = rootfs
 	}
 	tap := h.ifaceFor(dockID)
-	if err := h.ensureIface(tap); err != nil {
+	if err := h.ensureIface(tap, owner); err != nil {
 		return "", fmt.Errorf("provision network: %w", err)
 	}
 	guestIP, gateway, mask, err := h.alloc.Assign(dockID)
@@ -472,7 +524,7 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 		DockID: dockID, Resources: res,
 		KernelImage: h.cfg.KernelImage, InitrdImage: h.cfg.InitrdImage, JailRoot: h.jailRoot(dockID),
 		Firecracker: h.cfg.FirecrackerBin, Jailer: h.cfg.JailerBin, JailBase: h.cfg.JailBase,
-		UID: h.cfg.UID, GID: h.cfg.GID,
+		UID: owner, GID: ownerGID, Limits: h.cfg.Limits.For(res),
 		TapName: tap, GuestMAC: MacFor(dockID),
 		KernelArgs: baseKernelArgs,
 		TrackDirty: true,
@@ -848,17 +900,21 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 		return h.snapshotLoadContainer(ctx, dockID, res, resolved)
 	}
 	rootfs := filepath.Join(h.jailRoot(dockID), fc.RootfsName)
+	owner, ownerGID, err := h.dockOwner(dockID)
+	if err != nil {
+		return "", fmt.Errorf("load uid: %w", err)
+	}
 	if err := h.cfg.Snaps.MaterializeDisk(ctx, resolved, rootfs); err != nil {
 		return "", err
 	}
 	if err := growDisk(rootfs, res.DiskGiB); err != nil {
 		return "", err
 	}
-	if err := os.Chown(rootfs, h.cfg.UID, h.cfg.GID); err != nil {
+	if err := h.chown(rootfs, owner, ownerGID); err != nil {
 		return "", err
 	}
 	tap := h.ifaceFor(dockID)
-	if err := h.ensureIface(tap); err != nil {
+	if err := h.ensureIface(tap, owner); err != nil {
 		return "", fmt.Errorf("load network: %w", err)
 	}
 	guestIP, gateway, mask, err := h.alloc.Assign(dockID)
@@ -898,7 +954,7 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 		DockID: dockID, Resources: res,
 		KernelImage: h.cfg.KernelImage, InitrdImage: h.cfg.InitrdImage, JailRoot: h.jailRoot(dockID),
 		Firecracker: h.cfg.FirecrackerBin, Jailer: h.cfg.JailerBin, JailBase: h.cfg.JailBase,
-		UID: h.cfg.UID, GID: h.cfg.GID,
+		UID: owner, GID: ownerGID, Limits: h.cfg.Limits.For(res),
 		TapName: tap, GuestMAC: MacFor(dockID),
 		KernelArgs: baseKernelArgs + " clock_realtime=true",
 		TrackDirty: true,
@@ -954,7 +1010,7 @@ func (h *Host) snapshotLoadContainer(ctx context.Context, dockID string, res api
 		}
 	}
 	tap := h.ifaceFor(dockID)
-	if err := h.ensureIface(tap); err != nil {
+	if err := h.ensureIface(tap, 0); err != nil {
 		return "", fmt.Errorf("load network: %w", err)
 	}
 	guestIP, gateway, mask, err := h.alloc.Assign(dockID)
@@ -972,7 +1028,7 @@ func (h *Host) snapshotLoadContainer(ctx context.Context, dockID string, res api
 		return "", fmt.Errorf("load network: %w", err)
 	}
 	bootHandle, err := h.cfg.Driver.Boot(ctx, fc.BootSpec{
-		DockID: dockID, Resources: res, JailRoot: h.jailRoot(dockID),
+		DockID: dockID, Resources: res, JailRoot: h.jailRoot(dockID), Limits: h.cfg.Limits.For(res),
 		AttachNetwork: h.vethAttacher(tap, guestIP, gateway, mask),
 	})
 	if err != nil {
@@ -1054,7 +1110,10 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	h.mu.Unlock()
 	_ = h.deleteIface(tap)
 	_ = os.RemoveAll(h.jailRoot(backing))
+	// A failed boot's preserved jail holds a disk owned by this dock's uid, which is about to be reused.
+	_ = os.RemoveAll(h.jailRoot(backing) + ".failed")
 	_ = os.RemoveAll(filepath.Join(h.cfg.VMsDir, backing))
+	h.releaseOwner(backing)
 	// A gvisor dock owns a loop-mounted work disk that must be unmounted before it is removed.
 	if w, ok := h.cfg.Driver.(interface{ RemoveWorkDisk(dockID string) error }); ok {
 		return w.RemoveWorkDisk(backing)

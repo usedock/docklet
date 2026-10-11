@@ -327,3 +327,36 @@ func TestRestoreStateOwnsTheWorkspaceAsTheDockUser(t *testing.T) {
 		t.Fatalf("chown = %q, want the workspace owned by the dock user", chown)
 	}
 }
+
+func TestBootPassesPidsLimit(t *testing.T) {
+	boot := func(limit int) string {
+		var calls [][]string
+		d := &Driver{
+			Runner: func(name string, args ...string) error {
+				calls = append(calls, append([]string{name}, args...))
+				return nil
+			},
+			Image:      "dock-gvisor:test",
+			InspectPID: func(string) (int, error) { return 4242, nil },
+		}
+		useDisk(d, t.TempDir())
+		spec := fc.BootSpec{DockID: "dock-1", Resources: testRes, JailRoot: t.TempDir(), Limits: fc.Effective{PidsLimit: limit}}
+		if _, err := d.Boot(context.Background(), spec); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range calls {
+			joined := strings.Join(c, " ")
+			if strings.HasPrefix(joined, "docker run") && strings.Contains(joined, "--runtime=runsc") {
+				return joined
+			}
+		}
+		t.Fatal("no runsc docker run")
+		return ""
+	}
+	if got := boot(4096); !strings.Contains(got, "--pids-limit 4096") {
+		t.Fatalf("docker run = %q, want --pids-limit 4096", got)
+	}
+	if got := boot(0); strings.Contains(got, "--pids-limit") {
+		t.Fatalf("0 is unlimited, docker run = %q", got)
+	}
+}

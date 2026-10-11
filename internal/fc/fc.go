@@ -56,6 +56,8 @@ type BootSpec struct {
 	GuestMAC    string
 	KernelArgs  string
 	TrackDirty  bool
+	// Limits are this dock's resolved I/O and process limits; zero is unlimited.
+	Limits Effective
 	// AttachNetwork wires the network namespace held by pid before the guest
 	// starts; container drivers call it, microVM drivers ignore it.
 	AttachNetwork func(pid int) error
@@ -171,6 +173,7 @@ func MachineConfig(spec BootSpec) (firecracker.Config, error) {
 			PathOnHost:   firecracker.String(RootfsName),
 			IsRootDevice: firecracker.Bool(true),
 			IsReadOnly:   firecracker.Bool(false),
+			RateLimiter:  driveLimiter(spec.Limits),
 		}},
 		InitrdPath: initrdName(spec),
 		NetworkInterfaces: firecracker.NetworkInterfaces{{
@@ -178,6 +181,8 @@ func MachineConfig(spec BootSpec) (firecracker.Config, error) {
 				MacAddress:  spec.GuestMAC,
 				HostDevName: spec.TapName,
 			},
+			InRateLimiter:  netLimiter(spec.Limits),
+			OutRateLimiter: netLimiter(spec.Limits),
 		}},
 		VMID: spec.DockID,
 		// Foreground jailer on purpose: with --daemonize the SDK tracks
@@ -302,6 +307,34 @@ func crossDeviceHint(err error) string {
 	return ""
 }
 
+// prepareJail writes the sidecar and the dock-owned log, and stages the
+// kernel and initrd. Firecracker runs dropped to UID/GID and must own its log.
+func prepareJail(spec BootSpec, chown func(path string, uid, gid int) error) error {
+	root := spec.JailRoot
+	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o755); err != nil {
+		return err
+	}
+	if err := WriteSidecar(root, spec.DockID, spec.Resources); err != nil {
+		return err
+	}
+	jailLog := filepath.Join(root, "logs", spec.DockID+".log")
+	if err := os.WriteFile(jailLog, nil, 0o644); err != nil {
+		return err
+	}
+	if err := chown(jailLog, spec.UID, spec.GID); err != nil {
+		return err
+	}
+	if err := link(spec.KernelImage, filepath.Join(root, KernelName)); err != nil {
+		return fmt.Errorf("stage kernel: %w%s", err, crossDeviceHint(err))
+	}
+	if spec.InitrdImage != "" {
+		if err := link(spec.InitrdImage, filepath.Join(root, InitrdName)); err != nil {
+			return fmt.Errorf("stage initrd: %w%s", err, crossDeviceHint(err))
+		}
+	}
+	return nil
+}
+
 // Boot stages kernel/initrd into the jail root and starts one microVM.
 // The rootfs must already be provisioned at JailRoot/RootfsName.
 func (d *SDKDriver) Boot(ctx context.Context, spec BootSpec) (*Handle, error) {
@@ -309,27 +342,8 @@ func (d *SDKDriver) Boot(ctx context.Context, spec BootSpec) (*Handle, error) {
 		return nil, err
 	}
 	root := spec.JailRoot
-	if err := os.MkdirAll(filepath.Join(root, "logs"), 0o755); err != nil {
+	if err := prepareJail(spec, os.Chown); err != nil {
 		return nil, err
-	}
-	if err := WriteSidecar(root, spec.DockID, spec.Resources); err != nil {
-		return nil, err
-	}
-	// Firecracker runs dropped to UID/GID; it must own its log file.
-	jailLog := filepath.Join(root, "logs", spec.DockID+".log")
-	if err := os.WriteFile(jailLog, nil, 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.Chown(jailLog, spec.UID, spec.GID); err != nil {
-		return nil, err
-	}
-	if err := link(spec.KernelImage, filepath.Join(root, KernelName)); err != nil {
-		return nil, fmt.Errorf("stage kernel: %w%s", err, crossDeviceHint(err))
-	}
-	if spec.InitrdImage != "" {
-		if err := link(spec.InitrdImage, filepath.Join(root, InitrdName)); err != nil {
-			return nil, fmt.Errorf("stage initrd: %w%s", err, crossDeviceHint(err))
-		}
 	}
 	cfg, err := MachineConfig(spec)
 	if err != nil {

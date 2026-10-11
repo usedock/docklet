@@ -443,7 +443,7 @@ ensure_state_dirs() {
   if [ "$RUNTIME" = "microvm" ]; then
     # Under the state filesystem so kernel links and reflinks stay same-device.
     mkdir -p "$JAIL_BASE"
-    # Docklet and jailer run as root; only the jail base is handed to the jailer uid.
+    # Docklet and jailer run as root; each dock drops to its own uid at boot.
     # Re-own on every run so hosts installed with the old recursive chown are repaired.
     chown root:root /var/lib/docklet
     for d in images gens idem vms state; do
@@ -456,7 +456,9 @@ ensure_state_dirs() {
     for f in vmlinux initrd.img; do
       [ -e "/var/lib/docklet/images/$f" ] && chmod 0644 "/var/lib/docklet/images/$f"
     done
-    chown "${DOCKLET_UID:-1000}:${DOCKLET_GID:-1000}" "$JAIL_BASE"
+    # Each dock gets its own jailer uid at boot (DOCKLET_UID_BASE range, no passwd entries needed); the base stays root.
+    chown root:root "$JAIL_BASE"
+    chmod 0755 "$JAIL_BASE"
   fi
 }
 

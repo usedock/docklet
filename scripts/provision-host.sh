@@ -114,7 +114,7 @@ fi
 
 # State layout the docklet expects.
 mkdir -p /var/lib/docklet/{images,vms,gens,state/sockets,state/logs,state/idem} /srv/jailer
-# The docklet and jailer run as root; only the jail base is handed to the jailer uid.
+# The docklet and jailer run as root; each dock drops to its own uid at boot.
 # Re-own on every run so hosts installed with the old recursive chown are repaired.
 chown root:root /var/lib/docklet
 for d in images gens idem vms state; do
@@ -127,7 +127,9 @@ chmod 0700 /var/lib/docklet/images /var/lib/docklet/gens /var/lib/docklet/idem /
 for f in vmlinux initrd.img; do
   [ -e "/var/lib/docklet/images/$f" ] && chmod 0644 "/var/lib/docklet/images/$f"
 done
-chown "${DOCKLET_UID}:${DOCKLET_GID}" /srv/jailer
+# Each dock gets its own jailer uid at boot; the base stays root.
+chown root:root /srv/jailer
+chmod 0755 /srv/jailer
 
 # Microcode freshness is a readiness input; warn loudly here, gate at boot.
 if grep -rq "^Vulnerable" /sys/devices/system/cpu/vulnerabilities/ 2>/dev/null; then

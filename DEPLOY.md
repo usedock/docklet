@@ -468,6 +468,12 @@ logs that the credential needs an admin reset.
 | `DOCKLET_EGRESS_ALLOW_PRIVATE` | comma-separated CIDRs that are reachable despite being private, e.g. `10.0.0.0/24`: the egress proxy may dial them and every dock may forward to them (see Guest network isolation); empty refuses every private address |
 | `DOCKLET_IDEM_TTL` | how long an idempotency token stays deduplicated, a Go duration (default `168h`, 7 days; Go has no `d` unit); expired journal entries are dropped when docklet starts and as the journal grows. Responses over 64 KiB and all `fast-run` read results are never written to disk, only a hash marker: a retried token gets `409 result_not_retained` instead of re-executing (the control plane surfaces it as `exec_result_expired` for exec, and re-reads with a fresh token for reads) |
 | `DOCKLET_ALLOW_VULNERABLE` | comma-separated `/sys/devices/system/cpu/vulnerabilities` names readiness accepts (present only when set); empty fails closed on any `Vulnerable` entry |
+| `DOCKLET_UID_BASE` | first uid/gid of the range each microvm dock's jailer drops to (default `2000000000`); `0` restores the deprecated shared `DOCKLET_UID`/`DOCKLET_GID`. See "Per-dock uid" below |
+| `DOCKLET_UID_SIZE` | size of that range (default `65536`, one id per live or stopped dock) |
+| `DOCKLET_UID` / `DOCKLET_GID` | no longer the jailer id (unless `DOCKLET_UID_BASE=0`); they own guest workspace files only (default `1000`) |
+| `DOCKLET_DISK_MBPS`, `DOCKLET_DISK_IOPS` | microvm per-dock disk bandwidth (MB/s) and operations/s limits; unset = per-size default, `0` = unlimited. See "Per-dock limits" below |
+| `DOCKLET_NET_MBPS` | microvm per-dock network bandwidth (MB/s, each direction); unset = per-size default, `0` = unlimited |
+| `DOCKLET_PIDS_LIMIT` | gvisor per-dock `--pids-limit`; default `4096`, `0` = unlimited |
 
 `docklet.service` runs `EnvironmentFile=/etc/docklet/docklet.env`,
 `ExecStart=/usr/local/bin/docklet`, `Restart=always`, `RestartSec=5`,
@@ -478,6 +484,42 @@ the agent; leaving it unset runs the docklet standalone (local API only, no
 control plane), which is useful for manual bring-up but never how a fleet host
 should run.
 
+
+### Per-dock uid (microvm)
+
+Each microvm dock's jailer drops to its own uid and gid (equal numbers) taken from
+`DOCKLET_UID_BASE` .. `+DOCKLET_UID_SIZE-1`, so a VMM escape owns only that dock's
+files. No passwd entry is needed: the jailer takes raw ids. The id is a hash of the
+dock id, probing past ids held by other docks, and is persisted in
+`<state>/uids.json`, so restart, stop and resume reuse it; it is freed when the dock
+is destroyed. The rootfs, log file and TAP device are owned by it, including for
+forks and branches (the disk is re-chowned at every boot).
+
+- The default range sits above login users, the default `/etc/subuid` ranges
+  (from 100000, 65536 each) and the systemd container range (to 1879048191). At
+  startup the docklet refuses a range that overlaps an `/etc/passwd` uid, an
+  `/etc/group` gid or an `/etc/subuid` / `/etc/subgid` range; set another `DOCKLET_UID_BASE` if you hit it.
+- Upgrading: docks created under the shared uid keep running untouched. They get
+  their own uid and a re-chowned disk the next time they boot (resume or load);
+  nothing to migrate. `DOCKLET_UID_BASE=0` is a deprecated escape hatch.
+- The jail base is now `root:root 0755`; bootstrap re-owns it on every run.
+
+### Per-dock limits
+
+Defaults scale with vCPUs and are capped; set the env vars above to override (a
+value applies to every dock regardless of size, `0` removes the limit).
+
+| Limit | Runtime | Default |
+|---|---|---|
+| disk bandwidth | microvm (Firecracker drive rate limiter) | `100 MB/s x cpus`, max 1000 |
+| disk operations | microvm | `2000 IOPS x cpus`, max 20000 |
+| network bandwidth | microvm (rx and tx limiters) | `25 MB/s x cpus`, max 250 |
+| processes | gvisor (`docker run --pids-limit`) | `4096` flat |
+
+Each bucket refills once a second and allows one extra second of burst. The docklet
+logs the effective limits for 1, 2 and 4 vCPU docks at boot. gvisor disk I/O is not
+throttled: Docker needs a block device path for bps limits and the work disk is a
+loop mount resolved at runtime, so only the work disk size bounds it.
 ---
 
 ## 6. Troubleshooting
