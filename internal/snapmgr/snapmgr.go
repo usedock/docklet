@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/usedock/docklet/internal/cpufamily"
 	"github.com/usedock/docklet/internal/disk"
@@ -45,6 +46,48 @@ type Coordinator struct {
 	// base, because shipping the base per dock is what makes a capture slow.
 	// Empty falls back to whole-image generations.
 	BaseImage string
+
+	// captured remembers the manifests this host just wrote, so the answer to a capture does not
+	// depend on reading them back: a fleet host may not read a generation the control plane has not
+	// recorded yet, and the capture would report no base fingerprint, checksum or Dockyard image.
+	capturedMu sync.Mutex
+	captured   map[string]store.Manifest
+	capturedID []string
+}
+
+// maxCaptured bounds the manifests kept for the capture answer; it is read right after the write.
+const maxCaptured = 64
+
+// putManifest uploads manifest and remembers it for the Generation* answers.
+func (c *Coordinator) putManifest(ctx context.Context, manifest store.Manifest) error {
+	if err := store.PutManifest(ctx, c.Store, manifest); err != nil {
+		return err
+	}
+	c.capturedMu.Lock()
+	defer c.capturedMu.Unlock()
+	if c.captured == nil {
+		c.captured = map[string]store.Manifest{}
+	}
+	if _, ok := c.captured[manifest.SnapshotID]; !ok {
+		c.capturedID = append(c.capturedID, manifest.SnapshotID)
+	}
+	c.captured[manifest.SnapshotID] = manifest
+	for len(c.capturedID) > maxCaptured {
+		delete(c.captured, c.capturedID[0])
+		c.capturedID = c.capturedID[1:]
+	}
+	return nil
+}
+
+// capturedManifest is the manifest of a generation this host wrote, else the stored one.
+func (c *Coordinator) capturedManifest(ctx context.Context, snapshotID string) (store.Manifest, error) {
+	c.capturedMu.Lock()
+	m, ok := c.captured[snapshotID]
+	c.capturedMu.Unlock()
+	if ok {
+		return m, nil
+	}
+	return store.GetManifest(ctx, c.Store, snapshotID)
 }
 
 // FreezeRootfs pins the dock rootfs as a generation and uploads it with its
@@ -98,7 +141,7 @@ func (c *Coordinator) FreezeRootfs(ctx context.Context, dockID, rootfsSrc, snaps
 		BaseFingerprint: fingerprint,
 		ImageSize:       info.Size(),
 	}
-	if err := store.PutManifest(ctx, c.Store, manifest); err != nil {
+	if err := c.putManifest(ctx, manifest); err != nil {
 		return store.Manifest{}, err
 	}
 	return manifest, nil
@@ -132,7 +175,7 @@ func (c *Coordinator) FreezeRootfsFull(ctx context.Context, dockID, rootfsSrc, s
 	if c.BaseImage != "" {
 		manifest.Image = disk.DockImage(c.BaseImage, rootfsSrc)
 	}
-	if err := store.PutManifest(ctx, c.Store, manifest); err != nil {
+	if err := c.putManifest(ctx, manifest); err != nil {
 		return store.Manifest{}, err
 	}
 	return manifest, nil
@@ -154,7 +197,7 @@ func (c *Coordinator) baseFor(rootfs string) (string, error) {
 // GenerationBase names the base a stored generation was built against; empty
 // for whole-image and container generations or when the manifest is unreadable.
 func (c *Coordinator) GenerationBase(ctx context.Context, snapshotID string) string {
-	manifest, err := store.GetManifest(ctx, c.Store, snapshotID)
+	manifest, err := c.capturedManifest(ctx, snapshotID)
 	if err != nil {
 		return ""
 	}
@@ -200,7 +243,7 @@ func (c *Coordinator) freezeFiles(ctx context.Context, dockID, genPath, snapshot
 		CPUFamily:  cpuFamily,
 		Files:      []store.FileEntry{entry},
 	}
-	if err := store.PutManifest(ctx, c.Store, manifest); err != nil {
+	if err := c.putManifest(ctx, manifest); err != nil {
 		return store.Manifest{}, err
 	}
 	return manifest, nil
@@ -219,7 +262,7 @@ func (c *Coordinator) freezeFile(ctx context.Context, dockID, genPath, name, sna
 		CPUFamily:  cpuFamily,
 		Files:      []store.FileEntry{entry},
 	}
-	if err := store.PutManifest(ctx, c.Store, manifest); err != nil {
+	if err := c.putManifest(ctx, manifest); err != nil {
 		return store.Manifest{}, err
 	}
 	return manifest, nil
@@ -400,7 +443,7 @@ func verifiedEntry(manifest store.Manifest, entry store.FileEntry) (store.FileEn
 // GenerationImage names the Dockyard image a stored generation's disk derives
 // from; empty for host-built bases, container generations or an unreadable manifest.
 func (c *Coordinator) GenerationImage(ctx context.Context, snapshotID string) string {
-	manifest, err := store.GetManifest(ctx, c.Store, snapshotID)
+	manifest, err := c.capturedManifest(ctx, snapshotID)
 	if err != nil {
 		return ""
 	}
@@ -409,7 +452,7 @@ func (c *Coordinator) GenerationImage(ctx context.Context, snapshotID string) st
 
 // GenerationSHA256 is the sha256 of a stored whole-image generation's object.
 func (c *Coordinator) GenerationSHA256(ctx context.Context, snapshotID string) string {
-	manifest, err := store.GetManifest(ctx, c.Store, snapshotID)
+	manifest, err := c.capturedManifest(ctx, snapshotID)
 	if err != nil {
 		return ""
 	}

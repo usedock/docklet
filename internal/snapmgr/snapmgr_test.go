@@ -935,3 +935,43 @@ func TestMaterializeDiskMarksAWholeImageFromAnUnheldImageUnknown(t *testing.T) {
 		t.Fatalf("dock image = %q, want empty", got)
 	}
 }
+
+// unreadableStore refuses to read back any generation but the allowed ones, as the control plane
+// does for a fleet host and a capture it has not recorded yet.
+type unreadableStore struct {
+	store.Store
+	allow map[string]bool
+}
+
+func (s unreadableStore) Get(ctx context.Context, snapshotID, name string) (io.ReadCloser, error) {
+	if !s.allow[snapshotID] {
+		return nil, errors.New("generation_forbidden")
+	}
+	return s.Store.Get(ctx, snapshotID, name)
+}
+
+func TestCaptureAnswersDoNotDependOnReadingTheManifestBack(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, fp := fullFixture(t)
+	c.Store = unreadableStore{Store: c.Store}
+	full, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "whole", "full", c.HostFamily, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.GenerationImage(ctx, "whole"); got != "ubuntu-24.04" {
+		t.Fatalf("image = %q, want ubuntu-24.04 although the manifest cannot be read back", got)
+	}
+	if got := c.GenerationSHA256(ctx, "whole"); got == "" || got != full.SHA256 {
+		t.Fatalf("sha256 = %q, want %q", got, full.SHA256)
+	}
+	if _, err := c.FreezeRootfs(ctx, "d1", rootfs, "delta", "full", c.HostFamily, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.GenerationBase(ctx, "delta"); got != fp {
+		t.Fatalf("base = %q, want %q", got, fp)
+	}
+	// A generation this host did not write still reads from the store.
+	if got := c.GenerationImage(ctx, "elsewhere"); got != "" {
+		t.Fatalf("unknown generation image = %q", got)
+	}
+}

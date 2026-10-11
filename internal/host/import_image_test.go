@@ -2,6 +2,8 @@ package host
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,6 +54,9 @@ func TestImportedDockReportsItsPulledDockyardImageOnExport(t *testing.T) {
 	if got := diskImage(pointer, rootfs); got != "node-22" {
 		t.Fatalf("restored dock image = %q, want node-22 (label %q)", got, readLabel(rootfs))
 	}
+	// The control plane lets a fleet host read only generations it owns or was told to load, so the
+	// capture's own manifest cannot be read back.
+	h.cfg.Snaps.Store = readOnlyImported{Store: h.cfg.Snaps.Store}
 	id, _, _, err := h.SnapshotCreateFull(ctx, "dock-9", nil, "full", false, false)
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +64,16 @@ func TestImportedDockReportsItsPulledDockyardImageOnExport(t *testing.T) {
 	if got := h.GenerationImage(ctx, id); got != "node-22" {
 		t.Fatalf("exported image = %q, want node-22", got)
 	}
+}
+
+// readOnlyImported reads back only the imported generation.
+type readOnlyImported struct{ store.Store }
+
+func (s readOnlyImported) Get(ctx context.Context, snapshotID, name string) (io.ReadCloser, error) {
+	if snapshotID != "imp" {
+		return nil, errors.New("generation_forbidden")
+	}
+	return s.Store.Get(ctx, snapshotID, name)
 }
 
 func diskImage(pointer, rootfs string) string { return disk.DockImage(pointer, rootfs) }
