@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	apiv1 "github.com/usedock/docklet/api/v1"
 	"github.com/usedock/docklet/internal/exec"
@@ -220,5 +221,111 @@ func TestDestroyRemovesFailedJailBeforeFreeingUID(t *testing.T) {
 	}
 	if _, ok := iso.h.uids.Get("dock-1"); ok {
 		t.Fatal("destroy must free the uid")
+	}
+}
+
+// cgroupFixture makes a jailer cgroup dir for a dock holding one process.
+func cgroupFixture(t *testing.T, h *Host, dockID string, withKill bool) (dir string) {
+	t.Helper()
+	dir = filepath.Join(h.cfg.CgroupBase, "firecracker", dockID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("4242\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if withKill {
+		if err := os.WriteFile(filepath.Join(dir, "cgroup.kill"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestDestroyKeepsUIDWhileCgroupHasProcesses(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 150 * time.Millisecond
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", true)
+	if err := iso.h.Destroy(ctx, "dock-1"); err == nil {
+		t.Fatal("destroy must report a cgroup that cannot be emptied")
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "cgroup.kill")); string(raw) != "1" {
+		t.Fatalf("cgroup.kill = %q, want 1", raw)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); !ok {
+		t.Fatal("uid freed while the cgroup still had processes")
+	}
+	// The processes die; a retry frees the uid and removes the cgroup.
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("uid must be freed once the cgroup is empty")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cgroup survived: %v", err)
+	}
+}
+
+func TestDestroyFreesUIDAfterCgroupEmpties(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 5 * time.Second
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", true)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644)
+	}()
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("uid must be freed after the cgroup empties")
+	}
+}
+
+func TestDestroyKillsListedPidsWithoutCgroupKill(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 2 * time.Second
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", false)
+	var killed []int
+	iso.h.cfg.KillPID = func(pid int) error {
+		killed = append(killed, pid)
+		return os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644)
+	}
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(killed) != 1 || killed[0] != 4242 {
+		t.Fatalf("killed = %v, want [4242]", killed)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("uid must be freed")
+	}
+}
+
+// Lchown never follows a symlink; os.Chown on a dangling link would fail.
+func TestChownDoesNotFollowSymlinks(t *testing.T) {
+	h, _, dir := testHost(t)
+	link := filepath.Join(dir, "rootfs-link")
+	if err := os.Symlink(filepath.Join(dir, "missing"), link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	if err := h.chown(link, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("chown followed the symlink: %v", err)
 	}
 }

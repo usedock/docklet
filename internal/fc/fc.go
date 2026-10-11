@@ -342,7 +342,7 @@ func (d *SDKDriver) Boot(ctx context.Context, spec BootSpec) (*Handle, error) {
 		return nil, err
 	}
 	root := spec.JailRoot
-	if err := prepareJail(spec, os.Chown); err != nil {
+	if err := prepareJail(spec, os.Lchown); err != nil {
 		return nil, err
 	}
 	cfg, err := MachineConfig(spec)

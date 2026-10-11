@@ -8,6 +8,13 @@ import (
 	"github.com/usedock/docklet/internal/uid"
 )
 
+// Upper bounds for limit env values so MBps * MiB cannot overflow and a typo is refused.
+const (
+	maxMBps = 1_000_000
+	maxIOPS = 10_000_000
+	maxPids = 4_194_304
+)
+
 // isolation is the per-dock uid range and the I/O and process limits.
 type isolation struct {
 	// UIDBase 0 means the deprecated shared DOCKLET_UID/GID.
@@ -35,14 +42,18 @@ func parseIsolation(env func(string) string) (isolation, error) {
 	for _, f := range []struct {
 		key string
 		dst *int
+		max int
 	}{
-		{"DOCKLET_DISK_MBPS", &iso.Limits.DiskMBps},
-		{"DOCKLET_DISK_IOPS", &iso.Limits.DiskIOPS},
-		{"DOCKLET_NET_MBPS", &iso.Limits.NetMBps},
-		{"DOCKLET_PIDS_LIMIT", &iso.Limits.PidsLimit},
+		{"DOCKLET_DISK_MBPS", &iso.Limits.DiskMBps, maxMBps},
+		{"DOCKLET_DISK_IOPS", &iso.Limits.DiskIOPS, maxIOPS},
+		{"DOCKLET_NET_MBPS", &iso.Limits.NetMBps, maxMBps},
+		{"DOCKLET_PIDS_LIMIT", &iso.Limits.PidsLimit, maxPids},
 	} {
 		if *f.dst, err = parseNonNeg(env, f.key, fc.LimitAuto); err != nil {
 			return iso, err
+		}
+		if *f.dst > f.max {
+			return iso, fmt.Errorf("%s %d exceeds the maximum %d", f.key, *f.dst, f.max)
 		}
 	}
 	return iso, nil
