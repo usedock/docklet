@@ -803,7 +803,6 @@ func TestMaterializeDiskLabelsAnImportedDiskWithItsDockyardBase(t *testing.T) {
 	}
 }
 
-
 // importedManifest stores raw as the control plane records a dock push (dock#122): source import,
 // manifest-level sha256/sizeBytes/image, the entry's sha256 and size, and the cpuFamily of the host
 // it placed the import on.
