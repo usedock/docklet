@@ -141,8 +141,8 @@ func TestSnapshotLoadConfinesResumedDock(t *testing.T) {
 	h, _, _ := testHost(t)
 	h.cfg.Egress = egress.New()
 	h.cfg.EgressPort = 3128
-	snap := snapshotFor(t, h)
 	calls := recordIptables(h)
+	snap := snapshotFor(t, h)
 	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work", egress: []string{"github.com"}}
 	ip, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap)
 	if err != nil {
@@ -171,14 +171,14 @@ func TestSnapshotLoadWithoutAllowlistStaysOpen(t *testing.T) {
 	h, _, _ := testHost(t)
 	h.cfg.Egress = egress.New()
 	h.cfg.EgressPort = 3128
-	snap := snapshotFor(t, h)
 	calls := recordIptables(h)
+	snap := snapshotFor(t, h)
 	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work"}
 	if _, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range *calls {
-		if strings.HasPrefix(c, "-I") && strings.Contains(c, "DROP") {
+		if strings.HasPrefix(c, "-I") && !strings.Contains(c, "DOCKLET-GUEST") {
 			t.Fatalf("unconfined resume must get no drop rule, got %v", *calls)
 		}
 	}
@@ -190,6 +190,7 @@ func TestSnapshotLoadWithoutAllowlistStaysOpen(t *testing.T) {
 func TestContainerSnapshotLoadConfinement(t *testing.T) {
 	ctx := context.Background()
 	h, _, _, _ := testContainerHost(t)
+	recordIptables(h)
 	if _, err := h.Provision(ctx, "dock-1", resSmall, "", ""); err != nil {
 		t.Fatal(err)
 	}
