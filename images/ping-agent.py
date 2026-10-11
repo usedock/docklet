@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Waits for the Dock guest agent, then pings it and runs a few checks.
 
-Usage: ping-agent.py HOST PORT TOKEN TIMEOUT_SECONDS
+Usage: ping-agent.py HOST PORT TOKEN TIMEOUT_SECONDS MODE
+MODE is fwcfg or cmdline: how the boot test passed the guest config.
 Speaks the agent JSON-line protocol (see internal/host/fast.go).
 """
+import base64
 import json
 import socket
 import sys
@@ -18,7 +20,7 @@ def call(host, port, request):
 
 
 def main():
-    host, port, token, timeout = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+    host, port, token, timeout, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5]
     deadline = time.time() + timeout
     while True:
         try:
@@ -30,7 +32,16 @@ def main():
             print("ping-agent: timed out waiting for the agent", file=sys.stderr)
             return 1
         time.sleep(2)
-    checks = {
+    checks = {}
+    if mode == "fwcfg":
+        # The token must not reach the kernel command line or the journal.
+        # The script decodes it so the check itself does not carry it.
+        enc = base64.b64encode(token.encode()).decode()
+        checks["token not logged"] = (
+            "t=$(echo %s | base64 -d); ! grep -qF \"$t\" /proc/cmdline && ! journalctl -b --no-pager | grep -qF \"$t\"" % enc,
+            lambda out: True,
+        )
+    checks.update({
         "hostname": ("hostname", lambda out: out.strip() == "boot-test"),
         "root grown": ("df -BM --output=size / | tail -1", lambda out: int(out.strip().rstrip("M")) > 5000),
         "agent config mode": ("stat -c %a /etc/dock-fast-agent.json", lambda out: out.strip() == "600"),
@@ -42,7 +53,7 @@ def main():
             "docker version --format '{{.Server.Version}}'",
             lambda out: out.strip() != "",
         ),
-    }
+    })
     failed = False
     for label, (script, ok) in checks.items():
         res = call(host, port, {"token": token, "op": "exec", "script": script, "timeoutSeconds": 55})

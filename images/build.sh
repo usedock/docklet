@@ -67,6 +67,12 @@ deb %s %s-security main universe
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 docker.io \
     cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping
+  # dock-guest-init reads the engine's config from QEMU fw_cfg.
+  if ! ls "$tree"/lib/modules/*/kernel/drivers/firmware/qemu_fw_cfg.ko* >/dev/null 2>&1 &&
+    ! grep -qs '/qemu_fw_cfg\.ko$' "$tree"/lib/modules/*/modules.builtin; then
+    echo "build.sh: kernel has no qemu_fw_cfg (CONFIG_FW_CFG_SYSFS)" >&2
+    exit 1
+  fi
   # Same user as scripts/build-image.sh: sudo and Docker without a password.
   chroot_exec "$tree" useradd -m -s /bin/bash -G sudo,docker user
   echo "user ALL=(ALL) NOPASSWD:ALL" > "$tree/etc/sudoers.d/user"
