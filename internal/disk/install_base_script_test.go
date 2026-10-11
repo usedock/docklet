@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -158,16 +159,43 @@ func TestBuildImageGrowsRootFilesystemAtBoot(t *testing.T) {
 	}
 }
 
-// The scripts are stored without the executable bit, so install-kernel.sh must run its sibling
-// through bash: calling it directly fails with "Permission denied" on a fresh checkout.
-func TestInstallKernelRunsExtractVmlinuxThroughBash(t *testing.T) {
-	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "install-kernel.sh"))
-	if err != nil {
-		t.Fatal(err)
+// The scripts are stored without the executable bit (100644 in git), so a script must never run or
+// gate on a sibling as if it were executable: run it through bash (or source it) and test it with -f.
+// install-kernel.sh calling extract-vmlinux.sh directly died with "Permission denied", and
+// bootstrap-host.sh's [ -x provision-host.sh ] silently skipped provision-host.sh on every host.
+func TestScriptsNeverDependOnTheExecutableBit(t *testing.T) {
+	dir := filepath.Join("..", "..", "scripts")
+	paths, err := filepath.Glob(filepath.Join(dir, "*.sh"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no scripts in %s: %v", dir, err)
 	}
-	for _, line := range strings.Split(string(script), "\n") {
-		if strings.Contains(line, "extract-vmlinux.sh") && !strings.HasPrefix(strings.TrimSpace(line), "#") && !strings.HasPrefix(line, "bash ") {
-			t.Fatalf("install-kernel.sh must run extract-vmlinux.sh with bash: %q", line)
+	sibling := regexp.MustCompile(`"(\$\(dirname "\$0"\)|\$\{?SCRIPT_DIR\}?|\$\{?here\}?)/[A-Za-z0-9._-]+\.sh"`)
+	allowed := map[string]bool{"bash": true, "sh": true, ".": true, "source": true, "-f": true, "-e": true, "cat": true}
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for n, line := range strings.Split(string(body), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			for _, m := range sibling.FindAllStringIndex(line, -1) {
+				before := strings.Fields(line[:m[0]])
+				last := ""
+				if len(before) > 0 {
+					last = before[len(before)-1]
+				}
+				if !allowed[last] && !isArg(last) {
+					t.Errorf("%s:%d: run siblings with bash and test them with -f, never rely on the executable bit: %q", filepath.Base(path), n+1, strings.TrimSpace(line))
+				}
+			}
 		}
 	}
+}
+
+// isArg reports whether tok is a quoted argument (not an env assignment), so the path after it is
+// another argument and not the command.
+func isArg(tok string) bool {
+	return strings.HasSuffix(tok, `"`) && !strings.Contains(tok, "=")
 }

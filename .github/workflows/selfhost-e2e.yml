@@ -24,6 +24,7 @@ on:
       - scripts/install-base.sh
       - scripts/install-kernel.sh
       - scripts/extract-vmlinux.sh
+      - scripts/lib-verify.sh
       - scripts/e2e-selfhost.sh
 
 permissions:
@@ -44,6 +45,10 @@ jobs:
       LOGS: /home/runner/selfhost-logs
       DOCK_URL: http://localhost:8088
     steps:
+      # The 80 GiB dock needs more free disk than the runner has; drop toolchains this job never uses.
+      - name: free disk for the 80 GiB dock
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
       - name: start the clock
         run: |
           mkdir -p "$LOGS"
@@ -101,7 +106,9 @@ jobs:
       - name: dock CLI end to end
         env:
           DOCK: ${{ runner.temp }}/dock
-        run: bash scripts/e2e-selfhost.sh 2>&1 | tee "$LOGS/e2e.log"
+        # fd 3 bypasses tee so the API key mask reaches the runner without landing in the artifact.
+        run: |
+          { bash scripts/e2e-selfhost.sh 2>&1 | tee "$LOGS/e2e.log"; } 3>&1
       - name: summary
         if: always()
         run: |

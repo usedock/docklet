@@ -424,7 +424,7 @@ install_firecracker() {
 
 provision_microvm() {
   [ -e /dev/kvm ] || die "/dev/kvm missing; use --runtime gvisor on hosts without virtualization"
-  if [ -x "${SCRIPT_DIR}/provision-host.sh" ]; then
+  if [ -f "${SCRIPT_DIR}/provision-host.sh" ]; then
     # provision-host.sh owns KVM device setup, cgroupsv2, firecracker and the
     # state layout; calling it keeps one implementation of that.
     log "provisioning microvm host via provision-host.sh"
