@@ -24,7 +24,7 @@ VMs were run for it). Each one is a phase 0 spike item in section 6.
 - With `Network: on`, the engine sets `block_gateway` in the fw_cfg guest config
   (`internal/local/engine.go` `boot`, `GuestOptions{BlockGateway: rec.Network != "off"}`;
   `internal/local/qemu.go` `GuestConfig.BlockGateway`). `images/overlay/dock-guest-init.sh` (lines
-  67 to 82) then refuses NEW connections to 10.0.2.2 with iptables, in OUTPUT for the guest and in
+  67 to 84) then refuses NEW connections to 10.0.2.2 with iptables, in OUTPUT for the guest and in
   mangle PREROUTING for its containers, and lets DHCP to 10.0.2.2:67 through. Root in the guest can
   remove the rule, images released before it ignore the flag, and the README says so (README,
   "Local network isolation, trust properties"; `--network` help in `internal/cli/cmd_docks.go`).
@@ -119,14 +119,19 @@ QEMU backends that can carry frames:
 
 | Backend | Since | Address types | Windows |
 |---|---|---|---|
-| `-netdev socket,fd=N` (or `connect=`/`listen=` TCP) | long before 7.2 | an inherited fd, or TCP | `fd=` needs handle inheritance, which QEMU on Windows does not do for sockets **(unverified)**; TCP works |
-| `-netdev stream` | 7.2 | `inet`, `unix`, `fd` (QAPI `SocketAddress`, through `qio_channel_socket_*` in `net/stream.c`); client or `server=on`; `reconnect-ms` in client mode | built on every host OS (`net/meson.build` lists `stream.c` unconditionally); `unix` on Windows uses native AF_UNIX (QEMU commit d409373b9d, "util/qemu-sockets: Enable unix socket support on Windows", 2022, needs Windows 10 build 17063 or later) |
+| `-netdev socket,fd=N` (or `connect=`/`listen=` TCP) | long before 7.2 | an inherited fd, or TCP | `fd=` is not usable from `dock`: Go's `exec.Cmd.ExtraFiles` is not supported on Windows, so there is no fd 3 to hand over; TCP works |
+| `-netdev stream` | 7.2 | `inet`, `unix`, `fd` (QAPI `SocketAddress`, through `qio_channel_socket_*` in `net/stream.c`); client or `server=on`. Client reconnect: `reconnect` (seconds) since 8.0, replaced by `reconnect-ms` in 9.2 (`reconnect` deprecated) | built on every host OS (`net/meson.build` lists `stream.c` unconditionally); `unix` on Windows uses native AF_UNIX (QEMU commit d409373b9d, "util/qemu-sockets: Enable unix socket support on Windows", August 2022, first released in 7.2, needs Windows 10 build 17063 or later). `unix_listen_saddr`/`unix_connect_saddr` in `util/qemu-sockets.c` have no Windows guard |
 | `-netdev dgram` | 7.2 | `inet`, `unix`, `fd` (`net/dgram.c`) | built everywhere, but the Unix-socket path uses `unlink`/`dup2`-style code without Windows guards **(unverified on Windows)** |
 | `-netdev vhost-user` | old | chardev (unix socket) | not on Windows **(unverified)** |
 
 Framing is the same for `socket` and `stream`: each frame is a 4-byte big-endian length followed by
-the frame (`net/stream_data.c` writes `htonl(size)`; `net_fill_rstate` reassembles). One reader and
-writer in Go covers both.
+the frame (`net/socket.c` and `net/stream_data.c` write `htonl(size)`; `net_fill_rstate` in
+`net/net.c` reassembles). `net/stream_data.c` exists only since 10.1 (commit adf684ce69, "net:
+Refactor stream logic for reuse in '-net passt'"); before that the same code is in `net/stream.c`.
+gvisor-tap-vsock's "qemu" protocol (`pkg/tap/protocols.go`, `qemuProtocol`) is the same 4-byte
+big-endian prefix. Its reader does not bound the length, so ours must: reject any length above
+QEMU's own limit (`NET_BUFSIZE`, 4096 + 65536) and close the stream. One reader and writer in Go
+covers both backends.
 
 **Named pipes.** QEMU's `-netdev stream` takes a `SocketAddress`, which has no named-pipe type.
 Named pipes exist only as the chardev backend `pipe:` (`chardev/char-pipe.c`), which no netdev
@@ -136,8 +141,8 @@ Per-OS transport for option A:
 
 | Host | Transport | Why |
 |---|---|---|
-| Linux, macOS | `socketpair(AF_UNIX, SOCK_STREAM)`: one end stays in the helper, the other is passed to QEMU as fd 3 through `exec.Cmd.ExtraFiles`, `-netdev stream,id=n0,addr.type=fd,addr.str=3` on QEMU 7.2 or later, else `-netdev socket,id=n0,fd=3` | No filesystem name and no listener, so no other process can connect. Works on every QEMU we support. Same approach as gvisor-tap-vsock's `qemu-wrapper` |
-| Windows | AF_UNIX socket file `net.sock` in the dock directory, which already has the protected DACL from `secureDir`. The helper listens, QEMU connects with `-netdev stream,id=n0,server=off,addr.type=unix,addr.path=<path>`. Needs QEMU 7.2 or later | Go's `net.Listen("unix", ...)` works on Windows. A filesystem object is governed by the directory ACL **(unverified: whether Windows checks the socket file ACL on connect; phase 0)**. Path length: `sun_path` is 108 bytes, and `%LOCALAPPDATA%\dock\docks\dk_<16 hex>\net.sock` fits unless the profile path is very long **(unverified)**; fall back to a short path under the data dir |
+| Linux, macOS | `socketpair(AF_UNIX, SOCK_STREAM)`: one end stays in the helper, the other is passed to QEMU as fd 3 through `exec.Cmd.ExtraFiles`, `-netdev stream,id=n0,addr.type=fd,addr.str=3` on QEMU 7.2 or later, else `-netdev socket,id=n0,fd=3` | No filesystem name and no listener, so no other process can connect. Works on every QEMU we support: with no current monitor, QEMU's `socket_get_fd` (`util/qemu-sockets.c`) parses the fd number and checks `fd_is_socket`. gvisor-tap-vsock's `qemu-wrapper` also hands QEMU fd 3, but that fd is a connection to gvproxy's listening unix socket; a socketpair has no listener at all |
+| Windows | AF_UNIX socket file `net.sock` in the dock directory, which already has the protected DACL from `secureDir`. The helper removes any stale file, listens, starts QEMU, which connects with `-netdev stream,id=n0,server=off,addr.type=unix,addr.path=<path>`, accepts exactly one connection, then closes the listener and deletes the file. It checks that the peer is its own QEMU child with `WSAIoctl(SIO_AF_UNIX_GETPEERPID)` (the ioctl QEMU itself defines in `include/system/os-win32.h`), so frame injection does not rest on the DACL alone. Needs QEMU 7.2 or later | Go's `net.Listen("unix", ...)` works on Windows. A filesystem object is governed by the directory ACL **(unverified: whether Windows checks the socket file ACL on connect; phase 0, together with the peer-pid ioctl)**. The helper listens rather than QEMU (`server=on`), so no QEMU-side listener can be raced by another process. Path length: `sun_path` is 108 bytes, and `%LOCALAPPDATA%\dock\docks\dk_<16 hex>\net.sock` fits unless the profile path is very long **(unverified)**; fall back to a short path under the data dir |
 | Windows fallback | loopback TCP: the helper listens on `127.0.0.1:0`, QEMU uses `-netdev stream,addr.type=inet,...` or `-netdev socket,connect=` | Any local process could connect first and inject frames as if it were the guest. The helper accepts exactly one connection and checks that the peer is the dock's QEMU pid and start stamp (`GetExtendedTcpTable`), the same check `windows-fleet-hosts.md` section 3.5 proposes for agent forwards |
 
 Candidate stacks:
@@ -167,14 +172,15 @@ Candidate stacks:
 ### 3.2 Option B: `-netdev passt` / `pasta`
 
 `-netdev passt` is in QEMU 10.1 (`NetdevPasstOptions` in `qapi/net.json`, "Since: 10.1"), with a
-`map-host-loopback` option. passt runs as a separate process and is GPL-2.0-or-later. It only runs on
-Linux: it relies on Linux namespaces and syscalls, and there are no Windows or macOS builds
-**(unverified for macOS; no port is known)**. Ubuntu 24.04, which the `e2e-local` CI job uses,
-ships a QEMU older than 10.1 **(unverified exact version)**. passt removes the loopback mapping when
-configured to, but it has no per-destination policy, so it does not deny RFC1918, link-local or the
-host's own addresses **(unverified; passt's options were not reviewed in full)**. That would need
-host firewall rules, which `dock` (run as the user) cannot install. Linux-only, too new, and only a
-partial fix.
+`map-host-loopback` option. The QEMU version is not the blocker, though: passt also works through
+`-netdev stream,addr.type=unix` on QEMU 7.2 and later, which is how passt documents its QEMU use
+(the 10.1 netdev only starts the passt process for you). passt runs as a separate process and is
+GPL-2.0-or-later. It only runs on Linux: it relies on Linux namespaces and syscalls, and there are
+no Windows or macOS builds **(unverified for macOS; no port is known)**. passt removes the loopback
+mapping when configured to, but it has no per-destination policy, so it does not deny RFC1918,
+link-local or the host's own addresses **(unverified; passt's options were not reviewed in full)**.
+That would need host firewall rules, which `dock` (run as the user) cannot install. Linux-only and
+only a partial fix.
 
 ### 3.3 Option C: keep slirp with a patched build
 
@@ -203,7 +209,7 @@ privileged helper on macOS. `dock` runs unprivileged, so this does not fit local
 | Binary size | grows the `dock` binary by a few MB **(unverified; phase 0 measures with the release flags `-trimpath -s -w`)** | larger than A1 (switch, API, vsock code) **(unverified)** | none for us | none in `dock`; we ship QEMU |
 | Throughput | gvisor-tap-vsock reports 1.6 to 2.3 Gbit/s with iperf3 (MTU 4000, QEMU on macOS, its README). Expect similar for A1 **(unverified)**; slirp is the baseline to beat or match | same | high (passt is designed for it) | slirp baseline |
 | Per-dock cost | one helper process: Go runtime plus stack, tens of MB **(unverified)** | same | one passt process | none extra |
-| Maintenance | gVisor `go` branch pseudo-versions, occasional API churn. We own DHCP, DNS and the forwarders (a few hundred lines each **(estimate)**) | an extra dependency layer, plus upstreaming a hook or carrying a fork | depends on QEMU 10.1+ adoption | a QEMU fork |
+| Maintenance | gVisor `go` branch pseudo-versions, occasional API churn. We own DHCP, DNS and the forwarders (a few hundred lines each **(estimate)**) | an extra dependency layer, plus upstreaming a hook or carrying a fork | a second program for users to install; Linux only | a QEMU fork |
 
 **Choice: A1, with gvisor-tap-vsock as reference code.** We use gVisor netstack directly behind our
 own small package. We can borrow designs from gvisor-tap-vsock, its DHCP responder and its forwarder
@@ -259,8 +265,11 @@ open) through `os.Executable()`, so there is still one binary to ship. Boot sequ
    - Linux: `SysProcAttr.Pdeathsig = SIGKILL`, so QEMU dies with the helper. Go ties this to the
      thread that forked, so the helper must start QEMU from a locked OS thread that stays alive
      **(unverified detail; phase 0)**.
-   - Windows: QEMU is assigned to a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, held only
-     by the helper, so the helper's death (even `TerminateProcess`) kills QEMU.
+   - Windows: a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, held only by the helper, so
+     the helper's death (even `TerminateProcess`) kills QEMU. Go's `os/exec` cannot start a process
+     suspended and resume it, so assigning QEMU after `Start` leaves a short window in which it runs
+     outside the job. The helper avoids that by assigning itself to the job before starting QEMU;
+     the child is then in the job from creation (nested jobs, Windows 8 and later).
    - macOS: there is no parent-death signal. QEMU sees EOF on its netdev. The engine treats a dead
      helper as a dead dock (below) and kills the QEMU pid if its start stamp still matches.
 4. The helper writes `pid`/`pidstart` (QEMU, as today, so `livePID`, `Kill` and the e2e `pgrep`
@@ -278,12 +287,12 @@ If QEMU is alive and the helper is dead, the dock is reported `archived` after k
 | Event | Behaviour |
 |---|---|
 | `dock new`, `dock resume`, branch boot | A new helper, then a new QEMU. The policy is read from the record at every boot, so a policy change applies on the next resume |
-| `dock stop` | Unchanged: agent `poweroff`, QEMU exits, the helper sees its child exit and exits. The forced path kills QEMU by pid, and the helper exits after it |
+| `dock stop` | Agent `poweroff`, QEMU exits, the helper sees its child exit and exits. The forced path kills QEMU by pid. In both paths `stopVM` then waits briefly for the helper (`netpid` with its stamp) and kills it if it is still there, for example hung, before `clearRuntime`. Otherwise a quick `dock resume` could collide with the old helper on the agent port, `net.sock` or `net.log` |
 | `dock rm` | `stopVM(force)` as today, then the directory is removed. The retry loop in `removeFiles` covers a helper still closing `net.log` on Windows |
 | Helper crash | No frames are processed, so the guest has no network and no agent channel: fail closed. Linux and Windows: QEMU is killed with it. macOS: QEMU stays up without network until the next `dock` command kills it. In every case the dock shows as stopped, and `dock resume` boots it again |
 | QEMU crash | The helper's child exits and the helper exits. Same as today, with no network left behind |
 | Host reboot or logout | Both processes are gone. Same as today (no autostart) |
-| `dock` upgraded while docks run | Running helpers keep the old binary until stop and resume. On Windows a running `dock.exe` cannot be overwritten in place. Whether `scripts/install.ps1` replaces it by rename or by overwrite needs checking **(unverified)**. If it overwrites, the helper should run from a copy in the data dir, or the installer should rename first (Q7) |
+| `dock` upgraded while docks run | Running helpers keep the old binary until stop and resume. `scripts/install.sh` writes a temp file and `mv -f`s it over `dock`, which is safe while helpers run on Linux and macOS. `scripts/install.ps1` overwrites in place (`Copy-Item ... dock.exe -Force`), and Windows refuses to overwrite a running image, so today's installer fails on Windows whenever any dock is running. Today nothing long-lived runs from `dock.exe` (only a foreground `dock port`), so this is new. Either the installer renames the running `dock.exe` aside before copying (Windows allows renaming a running image), or the helper runs from a per-version copy in the data dir (Q7). A newer CLI must also read the `netpid`/`net.json` files of a helper started by the previous release, so their format stays compatible across one release |
 | Helper and QEMU versions | The helper checks the QEMU version (`-version`) once per boot and chooses `stream` or `socket` (Linux, macOS), or refuses (Windows below 7.2, Q4) |
 
 QEMU's `reconnect-ms` is not used. A restarted helper would have lost all TCP state anyway, and
@@ -320,7 +329,10 @@ the operator opt-ins of `guestRestore`) contains the address:
   255.255.255.255.
 - The host's own addresses: every address on every host interface (`net.InterfaceAddrs`), refreshed
   at most every few seconds and on a miss. Without this, a public address on the host would reach
-  host services bound to 0.0.0.0.
+  host services bound to 0.0.0.0. Because that list can be stale (section 5.2), each forwarded TCP
+  connection is also checked after connect: if `LocalAddr` and `RemoteAddr` have the same IP, the
+  host dialled itself, and the connection is closed before any guest byte is sent **(unverified
+  that every OS picks the destination as the source for a self-connect; phase 2 tests it)**.
 - 10.0.2.0/24 itself except the virtual service addresses above: the guest's subnet maps to nothing
   on the host.
 
@@ -348,8 +360,9 @@ Sharing details:
   and it removes that section's cross-dock listener concern (step 5), because a dock's proxy is
   reachable only from inside its own stack.
 - `internal/egress` does not build on Windows or macOS today, because `Listen` uses
-  `syscall.IP_FREEBIND` (`egress.go` line 260, also listed in `windows-fleet-hosts.md` section
-  2.1). `Listen` moves to `egress_linux.go`. The proxy is served on a `gonet` listener inside the
+  `syscall.IP_FREEBIND` (`egress.go` line 264, also listed in `windows-fleet-hosts.md` section
+  2.1), and on Windows `syscall.SetsockoptInt(int(fd), ...)` does not match its `syscall.Handle`
+  parameter either. `Listen` moves to `egress_linux.go`. The proxy is served on a `gonet` listener inside the
   stack instead.
 - A DNS-based allowlist for tools that are not proxy-aware (answer only allowed names, admit only
   the IPs returned for them) was considered. It is weaker against shared CDN addresses and does not
@@ -373,8 +386,11 @@ Sharing details:
 ### 4.8 DNS
 
 - The stack answers UDP and TCP on 10.0.2.3:53. It parses queries with
-  `golang.org/x/net/dns/dnsmessage` (`golang.org/x/net` is already in `go.mod`) and forwards the raw
-  message to the host's upstream resolvers. These are read from `/etc/resolv.conf` on Linux and
+  `golang.org/x/net/dns/dnsmessage` (`golang.org/x/net` is already in `go.mod`) and forwards only
+  standard queries: opcode QUERY, one question, class IN. Anything else (UPDATE, NOTIFY, zone
+  transfers, malformed messages) gets REFUSED without reaching the host resolver, and the forwarder
+  has a per-dock rate and in-flight cap. Forwarding arbitrary raw messages would contradict goal 4,
+  because the upstream is often a loopback resolver or the LAN router. These are read from `/etc/resolv.conf` on Linux and
   macOS, and from `GetAdaptersAddresses` on Windows. The helper is a host process, so it may send
   to a loopback resolver such as systemd-resolved's 127.0.0.53. The guest never gets a socket to
   it. On macOS, `/etc/resolv.conf` may miss VPN-scoped resolvers, so falling back to the system
@@ -385,7 +401,13 @@ Sharing details:
 - Guest DNS to other servers (for example 8.8.8.8:53, or DNS over HTTPS) is ordinary public
   traffic in `on` mode and is denied in `allowlist` mode.
 - Exfiltration through DNS lookups remains possible in `on` mode, as it is with slirp. In `off` and
-  `allowlist` modes there is no resolver.
+  `allowlist` modes there is no resolver for the guest. In `allowlist` mode the proxy still resolves
+  the CONNECT host on the host side, after `Allowed` has accepted it (`egress.go` `ServeHTTP`), so a
+  wildcard pattern such as `*.example.com` lets the guest send chosen labels to that domain's
+  authoritative servers. This is the same in fleet and is acceptable for allowlists the user picked.
+- The host's upstream resolver is often the LAN router (for example 192.168.1.1). DNS through the
+  stack is therefore the one path by which a guest's bytes reach a private address in `on` mode,
+  limited to well-formed standard queries (above).
 
 ### 4.9 Network off
 
@@ -439,6 +461,11 @@ WFP can express "QEMU: no connects except to its AF_UNIX peer"; phase 0 of that 
 | Public internet, TCP and UDP | Reachable | Reachable | The meaning of `--network on`; use `off` or `allowlist` for untrusted code |
 | Hosts that are public addresses but internal by routing (VPN routes to public ranges, corporate networks on public space) | Reachable | Reachable | Not detectable from the address. Documented; users on such networks use `allowlist` or `off` |
 | DNS through the host resolver (internal names resolve) | Yes | Yes, in `on` mode | Resolving gives an address, not access. Connections are still checked |
+| The host's resolver itself, often the LAN router | Any DNS message, through 10.0.2.3 | Standard queries only, rate-capped (section 4.8) | DNS is needed; the router sees only well-formed queries |
+| Host services through the router's public address (hairpin NAT of a port forward the user set up) | Reachable | Reachable | The public address is not the host's, so no address check can see it. Documented with the VPN row |
+| IPv6 | Off (`ipv6=off`) | No IPv6 protocol in the stack; frames dropped | Fails closed |
+| ICMP | Some echo forwarded by slirp | None (Q9) | |
+| Timing and other covert channels on allowed traffic | Possible | Possible | Out of scope; `on` mode allows the internet anyway |
 | The stack itself (DHCP, DNS, proxy) | slirp in QEMU (C) | Go code in the helper | Smaller and memory-safe compared with slirp in C |
 
 ### 5.2 Residual risks
@@ -446,11 +473,15 @@ WFP can express "QEMU: no connects except to its AF_UNIX peer"; phase 0 of that 
 1. **A bug in the stack or helper.** The helper runs as the user, with the user's network
    access. A guest that gains code execution in the helper can reach host loopback. This is the
    same blast radius as a QEMU escape today, since QEMU runs as the same user. gVisor netstack is
-   Go, so memory corruption is far less likely than in libslirp's C. Policy bugs (a missed range)
+   Go, so memory corruption is far less likely than in libslirp's C. The stack replaces slirp as
+   the code that parses guest packets; it does not add a second parser next to it. A malformed
+   frame that triggers a Go panic kills the helper, which takes QEMU down with it (fail closed, a
+   denial of service of that one dock only); the helper does not `recover` and continue. The frame
+   reader rejects lengths above `NET_BUFSIZE` before allocating. Policy bugs (a missed range)
    are the realistic risk. Mitigation: one admission function with table tests for every range,
    plus an e2e test that removes the guest rule as root and still fails to connect (section 6).
-2. **Frame injection by another local process.** This is not possible with the socketpair, and
-   depends on the directory DACL on Windows AF_UNIX. The loopback TCP fallback needs the peer-pid
+2. **Frame injection by another local process.** This is not possible with the socketpair. On Windows
+   AF_UNIX it rests on the directory DACL plus the one-connection, peer-pid check of section 3.1. The loopback TCP fallback needs the peer-pid
    check. Same class as the existing token-protected agent forward.
 3. **Resource exhaustion.** A guest opening many flows uses helper file descriptors and memory.
    Mitigated by the per-dock caps in section 4.5. The host still pays for one Go process per
@@ -470,14 +501,16 @@ default until phase 5.
 **Phase 0: spikes (no product code; results written into this note).**
 Each item gets a yes or no with evidence:
 - `-netdev stream` with `addr.type=unix` on the Windows QEMU installer build and on a scoop build:
-  the minimum version, and whether the socket file's DACL is enforced.
+  the minimum version, whether the socket file's DACL is enforced, and whether
+  `SIO_AF_UNIX_GETPEERPID` returns QEMU's pid to the helper.
 - `-netdev socket,fd=3` and `stream addr.type=fd` from Go `ExtraFiles` on Linux and macOS.
 - Throughput and CPU against slirp: a 1 GiB download in the guest and iperf3 both ways, on Linux
   KVM and Windows WHPX.
 - `dock` binary size delta with the release flags.
 - Linux `Pdeathsig` from a locked thread, and the Windows Job Object kill.
 - DNS forwarding on all three OSes, including systemd-resolved and a macOS VPN resolver.
-- Whether `scripts/install.ps1` can replace a running `dock.exe`.
+- That renaming a running `dock.exe` aside and copying the new one works with helpers running (the
+  current `install.ps1` overwrites in place and will fail, section 4.3).
 - Whether GitHub-hosted Windows and macOS runners can run a local dock at all: WHPX and HVF nested
   virtualization are not expected on hosted runners **(unverified)**, so the fallback is
   `DOCK_LOCAL_ACCEL=tcg`, and its boot time decides whether a TCG e2e fits the CI budget.
@@ -492,7 +525,9 @@ the host-address and 10.0.2.0/24 rules for local use, and switch `internal/net` 
 to it. Move `egress.Listen` into `egress_linux.go` so `internal/egress` builds on Windows and macOS.
 Acceptance: existing `internal/net` and `internal/egress` tests pass unchanged. New table tests cover
 every range, boundary addresses and the opt-in list. `GOOS=windows` and `GOOS=darwin`
-`go build ./internal/egress ./internal/netpolicy` pass. The `cli-portable` job runs the new tests.
+`go build ./internal/egress ./internal/netpolicy` pass. `./internal/netpolicy/...` (and later
+`./internal/usernet/...`) are added to the `cli-portable` job's `go test` list, which today covers
+only `internal/local`, `internal/guestagent` and `internal/cli`.
 
 **Phase 2: `internal/usernet`.**
 Add the gVisor netstack dependency (pinned), the length-prefixed frame endpoint, ARP, DHCP, DNS
@@ -503,7 +538,8 @@ DHCP and resolves a name; that a guest connection to a test listener on host 127
 both by address and through 10.0.2.2; that RFC1918, link-local and a host interface address are
 refused, and allowed once opted in; that a public-address dial goes through an injected dialer;
 that `DialGuest` reaches a guest listener; that the flow cap holds; that IPv6 frames are dropped;
-and that the frame reader rejects oversized or truncated frames.
+that the frame reader rejects oversized or truncated frames; that the DNS responder refuses
+non-QUERY opcodes and multi-question messages; and that a self-connect to a host address is closed.
 
 **Phase 3: helper and engine integration, opt-in.**
 Add the `dock __vmnet` helper and the `BuildArgv` netdev variants (`stream` fd, `socket` fd,
@@ -560,8 +596,9 @@ other hosts and ports, has no DNS and no direct TCP, and 20 parallel CONNECTs su
   epic or later?
 - **Q6. Performance budget.** What throughput and per-dock memory, relative to slirp, are
   acceptable before the default flips?
-- **Q7. Upgrades on Windows.** Run the helper from the installed `dock.exe` (needs an installer
-  that renames before replacing), or from a per-version copy in the data dir?
+- **Q7. Upgrades on Windows.** `install.ps1` overwrites `dock.exe` in place today, which fails
+  while any helper runs. Change the installer to rename the running binary aside first (and clean
+  up old copies later), or run the helper from a per-version copy in the data dir?
 - **Q8. CI.** Is TCG-only e2e on hosted Windows and macOS runners enough, or will a self-hosted
   WHPX or HVF runner be provided?
 - **Q9. ICMP.** Is losing outbound ping acceptable, or should the stack answer ICMP echo through
@@ -571,9 +608,16 @@ other hosts and ports, has no DNS and no direct TCP, and 20 parallel CONNECTs su
 
 - QEMU: `net/stream.c` (`reconnect-ms`, client and server modes), `net/stream_data.c` (4-byte
   `htonl` length framing), `net/dgram.c` (address types), `net/meson.build` (stream, dgram and socket
-  built on every host OS), `qapi/net.json` (`NetdevPasstOptions` since 10.1, `map-host-loopback`),
-  commit d409373b9d (AF_UNIX on Windows).
+  built on every host OS), `qapi/net.json` (`NetdevPasstOptions` since 10.1, `map-host-loopback`;
+  `NetdevStreamOptions` at v7.2.0, v8.0.0 and v10.0.0 for `reconnect`/`reconnect-ms`),
+  `util/qemu-sockets.c` (`socket_get_fd`, unguarded unix sockets), `include/system/os-win32.h`
+  (`SIO_AF_UNIX_GETPEERPID`), `net/net.c` (`net_fill_rstate`, `NET_BUFSIZE`), commit d409373b9d
+  (AF_UNIX on Windows; not in v7.1.0, in v7.2.0), commit adf684ce69 (`stream_data.c`).
 - gvisor-tap-vsock: README (QEMU transports, Windows/macOS/Linux use, throughput figures, Apache-2.0),
   `pkg/types/configuration.go` (`NAT`, `Ec2MetadataAccess`, `TCPMaxInFlight`, no filter options),
-  `pkg/services/forwarder/tcp.go` (no policy hook).
+  `pkg/services/forwarder/tcp.go` (no policy hook), `pkg/tap/protocols.go` (`qemuProtocol`, 4-byte
+  big-endian length).
+- Go: `os/exec` `Cmd.ExtraFiles` ("not supported on Windows").
+- This repo: `scripts/install.sh` (temp file and `mv -f`), `scripts/install.ps1`
+  (`Copy-Item -Force` over `dock.exe`).
 - passt: GPL-2.0-or-later SPDX headers; the QEMU 10.1 `passt` netdev patches.
