@@ -5,8 +5,8 @@ package dockyard
 // against this pin makes the whole release tamper-evident. Bump both together
 // when a new images-* release is adopted.
 const (
-	DockyardTag         = "images-2026.10.11.2"
-	DockyardIndexSHA256 = "239277107001287d16619a378eff5fd73cb292c60d0b0e360fd2cf3435ece98b"
+	DockyardTag         = "images-2026.10.11.3"
+	DockyardIndexSHA256 = "086748f9285f5213b013f0444a3456aaa933f26ab5dfb350456ee8a7eb1aeb99"
 	DockyardIndexURL    = "https://github.com/usedock/docklet/releases/download/" + DockyardTag + "/dockyard.json"
 )
 
