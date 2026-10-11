@@ -1,0 +1,10 @@
+# Fallback: DHCP on any ethernet NIC. Fleet provisioning writes 10-dock.network
+# (static, matched by MAC), which sorts first and wins for that NIC.
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+UseDomains=no
