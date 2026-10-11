@@ -5,7 +5,7 @@
 # and at the extra sizes in EXTRA_DISK_GIB, and that a Dockyard image can be pulled and booted. Needs
 # DOCK (binary), DOCK_URL, LOGS (dir) and T0 (epoch seconds at the start of the run); jq and curl.
 # With PUSH_PULL=auto|require (default auto) it also round-trips a local QEMU dock through dock push and dock pull;
-# auto skips that when the control plane has no import route (the released v0.2.1), require fails instead.
+# auto skips that when the control plane has no import route (control planes before v0.2.3), require fails instead.
 # Under Actions, fd 3 is the step's own stdout: the key mask goes there, never into the tee'd log.
 set -euo pipefail
 : "${DOCK:?path of the dock binary}" "${DOCK_URL:?control plane URL}" "${LOGS:?log dir}" "${T0:?start epoch}"
@@ -123,7 +123,7 @@ $DOCK rm img
 
 # 8. dock push / dock pull round trip: a local QEMU dock goes up to this control plane and its remote
 # successor comes back down, carrying a marker written on each side.
-# The control plane must have the import and export routes (usedock/dock#122, newer than v0.2.1). An empty
+# The control plane must have the import and export routes (usedock/dock#122, mounted from v0.2.3 by usedock/dock#132). An empty
 # POST to the import route is 404 when the route is missing and 400 when it validates the body.
 import_supported() {
   local code out; out="$(mktemp)"
