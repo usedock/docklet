@@ -280,6 +280,9 @@ type FleetHeartbeatRequest struct {
 	Samples   []StatsSample `json:"samples,omitempty"`
 	// BaseFingerprints is a pointer so a microvm host holding no base still reports [].
 	BaseFingerprints *[]string `json:"baseFingerprints,omitempty"`
+	// Images names what this host serves: the built base plus pulled Dockyard
+	// images. A pointer so a host serving none still reports [].
+	Images *[]string `json:"images,omitempty"`
 }
 
 // FleetPollResponse is the long-poll answer; Command is nil when none is queued.

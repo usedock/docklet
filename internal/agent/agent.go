@@ -105,6 +105,9 @@ type Config struct {
 	// heartbeat so delta restores are placed only where their base exists; a nil
 	// func (gvisor hosts) or a nil result reports nothing.
 	Bases func() []string
+	// Images lists the image names this host serves, reported on each heartbeat
+	// so the control plane marks them available; nil reports nothing.
+	Images func() []string
 	// OpenTerminal starts guest shells for terminal.open; nil refuses them.
 	OpenTerminal TerminalOpener
 	// OpenTunnel connects to dock ports for tunnel.open; nil refuses them.
@@ -313,10 +316,20 @@ func (c Config) heartbeat(ctx context.Context) {
 			body.BaseFingerprints = &bases
 		}
 	}
+	if c.Images != nil {
+		if images := c.Images(); images != nil {
+			body.Images = &images
+		}
+	}
 	err := c.fleet(ctx, http.MethodPost, "/v1/fleet/heartbeat", body, nil, callTimeout)
 	var re *responseError
+	// An older control plane rejects unknown fields. Drop the newest first so a
+	// control plane that knows baseFingerprints but not images still gets bases.
+	if errors.As(err, &re) && re.status == http.StatusBadRequest && body.Images != nil {
+		body.Images = nil
+		err = c.fleet(ctx, http.MethodPost, "/v1/fleet/heartbeat", body, nil, callTimeout)
+	}
 	if errors.As(err, &re) && re.status == http.StatusBadRequest && body.BaseFingerprints != nil {
-		// An older control plane rejects the unknown field: heartbeat as before.
 		body.BaseFingerprints = nil
 		err = c.fleet(ctx, http.MethodPost, "/v1/fleet/heartbeat", body, nil, callTimeout)
 	}
