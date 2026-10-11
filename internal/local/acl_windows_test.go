@@ -28,6 +28,12 @@ func TestDataDirIsRestrictedToTheUserOnWindows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// SDDL may render the user as an alias (LA for the built-in Administrator).
+	owner, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := ";" + strings.TrimPrefix(owner.String(), "O:") + ")"
 	dir := filepath.Join(t.TempDir(), "dock")
 	if err := os.MkdirAll(filepath.Join(dir, "docks", "dk_old"), 0o700); err != nil {
 		t.Fatal(err)
@@ -61,7 +67,7 @@ func TestDataDirIsRestrictedToTheUserOnWindows(t *testing.T) {
 		if strings.Contains(s, ";AU)") || strings.Contains(s, ";BU)") || strings.Contains(s, ";WD)") {
 			t.Fatalf("%s is readable by other users: %s", p, s)
 		}
-		if !strings.Contains(s, user.User.Sid.String()) {
+		if !strings.Contains(s, me) {
 			t.Fatalf("%s must stay usable by its owner: %s", p, s)
 		}
 	}
