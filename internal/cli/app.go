@@ -49,7 +49,7 @@ func NewApp() *App {
 	return a
 }
 
-const usageText = `dock - command line client for Dock (early, not released yet)
+const usageText = `dock - run isolated Linux machines for agents on your laptop, your servers or Dock Cloud
 
 Usage: dock <command> [flags]
 

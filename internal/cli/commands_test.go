@@ -273,8 +273,11 @@ func TestUsage(t *testing.T) {
 	mustExit(t, te, 2)
 	mustExit(t, te, 2, "frobnicate")
 	mustExit(t, te, 0, "help")
-	if !strings.Contains(te.out.String(), "not released") {
-		t.Fatal("help marks the CLI as early")
+	if strings.Contains(te.out.String(), "not released") {
+		t.Fatal("help still calls the CLI unreleased")
+	}
+	if !strings.Contains(te.out.String(), "isolated Linux machines for agents") {
+		t.Fatal("help does not say what dock is")
 	}
 	mustExit(t, te, 0, "ls", "-h")
 }
