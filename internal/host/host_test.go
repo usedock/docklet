@@ -29,6 +29,7 @@ type fakeDriver struct {
 	snapErr    error
 	adoptPid   int
 	onBoot     func()
+	bootErr    error
 }
 
 func (f *fakeDriver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, error) {
@@ -39,6 +40,9 @@ func (f *fakeDriver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, erro
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
+	}
+	if f.bootErr != nil {
+		return nil, f.bootErr
 	}
 	return &fc.Handle{DockID: spec.DockID, Pid: 4242}, nil
 }

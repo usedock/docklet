@@ -582,6 +582,9 @@ func (h *Host) Provision(ctx context.Context, dockID string, res apiv1.Resources
 	}
 	bootHandle, err := h.cfg.Driver.Boot(ctx, spec)
 	if err != nil {
+		if confined {
+			h.dropEgress(guestIP)
+		}
 		_ = h.alloc.Release(dockID)
 		_ = h.deleteIface(tap)
 		// Preserve the failed jail for diagnosis instead of deleting it;
