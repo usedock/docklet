@@ -41,16 +41,16 @@ type fakePlane struct {
 	mu   sync.Mutex
 	mode string // direct or proxy
 
-	importBody map[string]any
-	parts      map[int][]byte
-	partAuth   map[string][]string // path -> Authorization headers seen
-	partFail   int                 // the first N part PUTs answer 500
-	partStatus int                 // every part PUT answers this status when set
-	partPuts   int
-	completed  []donePart
+	importBody    map[string]any
+	parts         map[int][]byte
+	partAuth      map[string][]string // path -> Authorization headers seen
+	partFail      int                 // the first N part PUTs answer 500
+	partStatus    int                 // every part PUT answers this status when set
+	partPuts      int
+	completed     []donePart
 	completeFail  []string // the next complete calls answer these error codes (503)
 	completeCalls int
-	dockState  string
+	dockState     string
 
 	// pull
 	exportState   map[string]any
