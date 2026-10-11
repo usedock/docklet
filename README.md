@@ -1,8 +1,37 @@
 # docklet
 
-The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on each machine that hosts docks. It boots, pauses, snapshots, resumes and destroys docks, and reports what the host actually has.
+Isolated Linux machines for agents. On your laptop, your servers, or our cloud.
 
-> **Status:** the docklet is here. The `dock` CLI and its local engine live in this repo too (early, not released yet).
+This repo holds the `dock` CLI, with its built-in local engine, and the docklet, the host agent for [Dock](https://github.com/usedock/dock). One docklet runs on each machine that hosts docks. It boots, pauses, snapshots, resumes and destroys docks, and reports what the host actually has.
+
+## Install the CLI
+
+```sh
+curl -fsSL https://usedock.io/install | sh     # Linux, macOS
+irm https://usedock.io/install.ps1 | iex       # Windows (PowerShell)
+```
+
+Both installers verify the release checksums and cosign signatures before installing the `dock` CLI.
+
+## Quickstart
+
+With no account, `dock` runs docks on your own machine (the built-in `local` context). You need QEMU and KVM on Linux x86_64, or QEMU and Windows Hypervisor Platform on Windows x86_64; `dock doctor` tells you what is missing.
+
+```sh
+curl -fsSL https://usedock.io/install | sh
+dock new demo
+dock exec demo -- uname -a
+```
+
+The first `dock new` downloads the default `ubuntu-24.04` Dockyard image once. On Windows, install with the PowerShell line above.
+
+<!-- recording: owner adds a 30-second quickstart recording here -->
+
+Docs: [quickstart](https://docs.usedock.io/quickstart), [CLI](https://docs.usedock.io/cli), [local docks](https://docs.usedock.io/local-docks), [Windows](https://docs.usedock.io/local-docks/windows), [Dockyard images](https://docs.usedock.io/dockyard).
+
+Questions and ideas: [GitHub Discussions](https://github.com/usedock/dock/discussions).
+
+> **Status:** the `dock` CLI ships in signed releases (since v0.1.0). From v0.2.0 it runs docks locally with no account on Linux x86_64 with KVM and Windows x86_64 with Windows Hypervisor Platform, via QEMU; macOS builds but is untested. The docklet host agent is early, and Windows and macOS fleet hosts are planned.
 
 ## What it does
 
@@ -17,8 +46,8 @@ The host agent for [Dock](https://github.com/usedock/dock). One docklet runs on 
 
 | Host | Engine | Status |
 | --- | --- | --- |
-| Linux with KVM | Firecracker | Target: first release |
-| Linux with Docker | gVisor | Target: first release |
+| Linux with KVM | Firecracker | Early, in signed releases |
+| Linux with Docker | gVisor | Early, in signed releases |
 | Windows x86_64 (fleet host) | docklet daemon on Windows | Planned |
 | macOS, Apple silicon (fleet host) | docklet daemon on macOS | Planned |
 
@@ -49,20 +78,6 @@ winget install SoftwareFreedomConservancy.QEMU
 - `scripts/` - host bootstrap, image and kernel builders.
 - `DEPLOY.md` - the full host deploy guide.
 
-## Install the CLI
-
-Available once the first release that includes the `dock` CLI is cut. Both installers download the release, verify `checksums.txt` and the cosign signatures, and stop on any missing or bad checksum or signature.
-
-```sh
-# macOS and Linux (installs to ~/.local/bin; set DOCK_INSTALL_DIR or DOCK_VERSION to change)
-curl -fsSL https://raw.githubusercontent.com/usedock/docklet/main/scripts/install.sh | sh
-```
-
-```powershell
-# Windows PowerShell (installs to %LOCALAPPDATA%\dock\bin and adds it to your user PATH)
-irm https://raw.githubusercontent.com/usedock/docklet/main/scripts/install.ps1 | iex
-```
-
 ## Add a host
 
 One command per machine, run as root on Ubuntu from a checkout of this repo. It installs the runtime, the signature-verified docklet release and a systemd unit, then enrolls the host with your control plane ([usedock/dock](https://github.com/usedock/dock)):
@@ -76,12 +91,12 @@ sudo bash scripts/bootstrap-host.sh \
 
 Pick `microvm` on Linux with KVM or `gvisor` on any Linux with Docker. The script is re-runnable. See [DEPLOY.md](DEPLOY.md) for flags, base images and troubleshooting.
 
-## dock CLI (early, not released yet)
+## dock CLI reference
 
-`cmd/dock` runs docks locally (the built-in `local` context, no account) or talks to the Dock control plane `/v1` API (the `cloud` context and added URLs; not this daemon). It builds on Linux, macOS and Windows and is not packaged or versioned yet.
+`cmd/dock` runs docks locally (the built-in `local` context, no account) or talks to the Dock control plane `/v1` API (the `cloud` context and added URLs; not this daemon). It builds on Linux, macOS and Windows; released binaries come from the installer above.
 
 ```sh
-go build -o dock ./cmd/dock
+go build -o dock ./cmd/dock                # or use the installed release
 dock doctor                              # what local docks need: QEMU, accelerator, disk, Dockyard
 dock images                              # Dockyard images; `dock images pull ubuntu-24.04` downloads one
 dock new web                             # with no account this boots a local dock (downloads the image once)
