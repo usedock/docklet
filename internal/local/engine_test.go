@@ -267,3 +267,20 @@ func TestBranchLosingTheNameRaceCleansUp(t *testing.T) {
 		}
 	}
 }
+
+func TestBootGuestConfigBlocksTheGatewayUnlessNetworkIsOff(t *testing.T) {
+	for network, want := range map[string]bool{"on": true, "off": false} {
+		e, _, _ := newTestEngine(t)
+		d, err := e.New(context.Background(), Spec{Name: "gw", Network: network})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(e.file(d.ID, "guest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(string(raw), `"block_gateway":true`); got != want {
+			t.Errorf("network %s: guest.json %s", network, raw)
+		}
+	}
+}

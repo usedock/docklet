@@ -7,7 +7,8 @@
 # 2. Sets the hostname when the config carries one.
 #    A config with "resetHostKeys": true (first boot of a copied disk) also deletes the
 #    sshd host keys; ssh.service regenerates them (ssh-keygen -A) after this unit.
-# 3. Grows the root filesystem to the size of its disk.
+# 3. Blocks the slirp gateway 10.0.2.2 when the config sets block_gateway.
+# 4. Grows the root filesystem to the size of its disk.
 # Networking needs no step here: the image ships a DHCP networkd unit that a
 # static 10-dock.network (written by fleet provisioning) outranks.
 set -u
@@ -60,6 +61,25 @@ if [ -s "$CFG" ]; then
     hostnamectl set-hostname "$name" 2>/dev/null || hostname "$name" || true
   elif [ -n "$name" ]; then
     echo "dock-guest-init: ignoring invalid hostname" >&2
+  fi
+fi
+
+# Local QEMU user-mode docks: slirp maps the gateway 10.0.2.2 to the host's loopback.
+# When the config sets block_gateway, refuse NEW connections to it, from this guest and
+# from Docker containers. Replies to the hostfwd'd agent connection (which slirp opens
+# from 10.0.2.2) are ESTABLISHED, so they pass; a plain route to the gateway would break
+# them. DNS (10.0.2.3) is untouched. The rules live in memory and are applied every boot.
+# Root in the guest can remove them.
+# DHCP renewals go unicast to slirp's own DHCP server at 10.0.2.2:67; slirp answers them itself
+# and never forwards them to the host, so that one flow is accepted ahead of the REJECT.
+if [ -s "$CFG" ] && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("block_gateway") is True else 1)' "$CFG" 2>/dev/null; then
+  if iptables -w 5 -C OUTPUT -d 10.0.2.2 -m conntrack --ctstate NEW -j REJECT 2>/dev/null ||
+     { iptables -w 5 -I OUTPUT -d 10.0.2.2 -m conntrack --ctstate NEW -j REJECT &&
+       iptables -w 5 -I OUTPUT -d 10.0.2.2 -p udp --dport 67 -j ACCEPT &&
+       iptables -w 5 -t mangle -I PREROUTING -d 10.0.2.2 -m conntrack --ctstate NEW -j DROP; }; then
+    :
+  else
+    echo "dock-guest-init: could not block the gateway 10.0.2.2" >&2
   fi
 fi
 

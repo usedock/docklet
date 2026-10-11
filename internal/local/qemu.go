@@ -28,6 +28,9 @@ type GuestConfig struct {
 	// ResetHostKeys makes the guest delete its sshd host keys before sshd starts, so it generates
 	// fresh ones. Set only for the first boot of a dock made from a copy of another disk.
 	ResetHostKeys bool `json:"resetHostKeys,omitempty"`
+	// BlockGateway asks the guest to refuse connections to the slirp gateway 10.0.2.2, which slirp
+	// maps to the host loopback. Older images ignore it. Root in the guest can undo it.
+	BlockGateway bool `json:"block_gateway,omitempty"`
 }
 
 // DefaultGuestConfig is the config for a dock with the given agent token.
@@ -41,10 +44,18 @@ var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62})$`)
 // /sys/firmware/qemu_fw_cfg/by_name/opt/usedock/cfg/raw.
 const FWCfgName = "opt/usedock/cfg"
 
+// GuestOptions are the per-boot flags written into the guest config. Named fields keep the two
+// bools from being swapped at a call site.
+type GuestOptions struct {
+	ResetHostKeys bool
+	BlockGateway  bool
+}
+
 // WriteGuestConfig writes the guest agent config as JSON, readable by the owner only.
-func WriteGuestConfig(path, token, hostname string, resetHostKeys bool) error {
+func WriteGuestConfig(path, token, hostname string, opts GuestOptions) error {
 	cfg := DefaultGuestConfig(token)
-	cfg.ResetHostKeys = resetHostKeys
+	cfg.ResetHostKeys = opts.ResetHostKeys
+	cfg.BlockGateway = opts.BlockGateway
 	if hostnameRE.MatchString(hostname) {
 		cfg.Hostname = hostname
 	}

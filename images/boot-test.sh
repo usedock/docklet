@@ -38,8 +38,15 @@ case "$ARCH" in
 esac
 echo "boot-test: $NAME ($ARCH) accel=$ACCEL"
 
+# A host listener on 127.0.0.1 that slirp would expose to the guest as 10.0.2.2:PORT.
+# The fwcfg boot sets block_gateway and must not reach it; the cmdline boot does not and must.
+PROBE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+python3 -m http.server "$PROBE_PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
+LPID=$!
+trap '[ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true; kill "$LPID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+
 guest_cfg() {
-  printf '{"token":"%s","workspace":"/home/user/work","roots":["/home/user/work","/run/dock-fast"],"hostname":"boot-test"}' "$1"
+  printf '{"token":"%s","workspace":"/home/user/work","roots":["/home/user/work","/run/dock-fast"],"hostname":"boot-test"%s}' "$1" "${2:-}"
 }
 
 # boot <mode> <token>: mode fwcfg or cmdline.
@@ -48,7 +55,7 @@ boot() {
   zstd -d -q -f "$PREFIX.rootfs.ext4.zst" -o "$TMP/disk.ext4"
   truncate -s 6G "$TMP/disk.ext4"
   if [ "$mode" = fwcfg ]; then
-    (umask 077 && guest_cfg "$token" > "$TMP/guest.json")
+    (umask 077 && guest_cfg "$token" ,\"block_gateway\":true > "$TMP/guest.json")
     fw=(-fw_cfg "name=opt/usedock/cfg,file=$TMP/guest.json")
   else
     append="$append dock.cfg=$(guest_cfg "$token" | base64 -w0)"
@@ -59,7 +66,7 @@ boot() {
     -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:2222 -device virtio-net-pci,netdev=n0 \
     > "$TMP/console.log" 2>&1 &
   QPID=$!
-  if ! python3 -I "$HERE/ping-agent.py" 127.0.0.1 2222 "$token" "$WAIT" "$mode"; then
+  if ! PROBE_PORT="$PROBE_PORT" python3 -I "$HERE/ping-agent.py" 127.0.0.1 2222 "$token" "$WAIT" "$mode"; then
     echo "boot-test: $NAME ($mode) failed; console tail:" >&2
     tail -80 "$TMP/console.log" >&2
     exit 1

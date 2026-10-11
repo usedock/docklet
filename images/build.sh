@@ -89,7 +89,7 @@ deb %s %s-security main universe
   chroot_exec "$tree" apt-get -y dist-upgrade
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 docker.io \
-    cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping systemd-resolved
+    cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iptables iputils-ping systemd-resolved
   # The package may replace resolv.conf; keep the build's working copy for later apt steps.
   rm -f "$tree/etc/resolv.conf"
   cp /etc/resolv.conf "$tree/etc/resolv.conf"
