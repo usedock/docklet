@@ -52,6 +52,29 @@ mount_chroot() { mount -t proc none "$1/proc"; mount --bind /dev "$1/dev"; mount
 umount_chroot() { umount "$1/dev/pts" 2>/dev/null || true; umount "$1/sys" "$1/dev" "$1/proc"; }
 chroot_exec() { local t="$1"; shift; chroot "$t" env DEBIAN_FRONTEND=noninteractive "$@"; }
 
+# dock-guest-init reads the engine's config from QEMU fw_cfg. When the module
+# is not in the virtual kernel's core set, take it alone from modules-extra.
+ensure_fw_cfg() {
+  local tree="$1" kver mods
+  kver="$(ls "$tree/lib/modules" | sort -V | tail -1)"
+  mods="$tree/lib/modules/$kver"
+  echo "build.sh: kernel $kver: $(grep -h 'CONFIG_FW_CFG_SYSFS=' "$tree/boot/config-$kver" 2>/dev/null || echo 'no config')"
+  if grep -qs '/qemu_fw_cfg\.ko$' "$mods/modules.builtin" ||
+    ls "$mods"/kernel/drivers/firmware/qemu_fw_cfg.ko* >/dev/null 2>&1; then
+    return 0
+  fi
+  chroot_exec "$tree" sh -c "cd /tmp && apt-get download linux-modules-extra-$kver"
+  dpkg-deb --fsys-tarfile "$tree"/tmp/linux-modules-extra-"$kver"_*.deb |
+    tar -x -C "$tree" --keep-directory-symlink --wildcards '*/kernel/drivers/firmware/qemu_fw_cfg.ko*'
+  rm -f "$tree"/tmp/linux-modules-extra-*.deb
+  if ! ls "$mods"/kernel/drivers/firmware/qemu_fw_cfg.ko* >/dev/null 2>&1; then
+    echo "build.sh: kernel $kver has no qemu_fw_cfg module (CONFIG_FW_CFG_SYSFS)" >&2
+    exit 1
+  fi
+  chroot_exec "$tree" depmod "$kver"
+  echo "build.sh: qemu_fw_cfg taken from linux-modules-extra-$kver"
+}
+
 build_base() {
   local tree="$1"
   debootstrap --arch="$ARCH" "$UBUNTU_RELEASE" "$tree" "$MIRROR"
@@ -67,12 +90,7 @@ deb %s %s-security main universe
   chroot_exec "$tree" apt-get install -y --no-install-recommends \
     systemd systemd-sysv dbus ca-certificates curl git openssh-server sudo python3 docker.io \
     cloud-guest-utils e2fsprogs initramfs-tools linux-image-virtual iproute2 iputils-ping
-  # dock-guest-init reads the engine's config from QEMU fw_cfg.
-  if ! ls "$tree"/lib/modules/*/kernel/drivers/firmware/qemu_fw_cfg.ko* >/dev/null 2>&1 &&
-    ! grep -qs '/qemu_fw_cfg\.ko$' "$tree"/lib/modules/*/modules.builtin; then
-    echo "build.sh: kernel has no qemu_fw_cfg (CONFIG_FW_CFG_SYSFS)" >&2
-    exit 1
-  fi
+  ensure_fw_cfg "$tree"
   # Same user as scripts/build-image.sh: sudo and Docker without a password.
   chroot_exec "$tree" useradd -m -s /bin/bash -G sudo,docker user
   echo "user ALL=(ALL) NOPASSWD:ALL" > "$tree/etc/sudoers.d/user"
