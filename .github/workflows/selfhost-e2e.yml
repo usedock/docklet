@@ -12,7 +12,7 @@ on:
         description: "Control plane images: build (from the checked-out ref) or ghcr (pull the published release)"
         type: choice
         options: [build, ghcr]
-        default: build
+        default: ghcr
   schedule:
     - cron: "17 4 * * 1"
   pull_request:
@@ -81,8 +81,8 @@ jobs:
           cd dock-src/deploy/self-host
           git -C ../.. rev-parse HEAD | tee "$LOGS/dock-ref.txt"
           s=$(date +%s)
-          # The GHCR packages are not public yet, so build from the checked-out ref unless asked to pull.
-          mode="${{ inputs.images || 'build' }}"
+          # Pull the published images by default (what self-hosters run); build from the checked-out ref on request.
+          mode="${{ inputs.images || 'ghcr' }}"
           echo "$mode" > "$LOGS/setup-mode.txt"
           if [ "$mode" = ghcr ]; then
             ./setup.sh 2>&1 | tee "$LOGS/setup.log"
