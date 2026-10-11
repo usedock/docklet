@@ -729,6 +729,12 @@ func TestClaimedPoolSlotIsTrackedOnceAcrossRescanAndRestart(t *testing.T) {
 	h.mu.Lock()
 	h.vms = map[string]*vm{}
 	h.mu.Unlock()
+	// Destroy("run-1") holds the runtime id's lock, not the slot's: Rescan must still skip it.
+	unlock := h.lockDock("run-1")
+	if adopted := h.Rescan(); len(adopted) != 0 {
+		t.Fatalf("rescan adopted %v while the runtime id's lock was held", adopted)
+	}
+	unlock()
 	if adopted := h.Rescan(); len(adopted) != 1 || adopted[0] != "run-1" {
 		t.Fatalf("adopted = %v, want [run-1]", adopted)
 	}

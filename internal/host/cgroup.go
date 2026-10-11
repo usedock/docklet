@@ -118,6 +118,9 @@ func (h *Host) RunSweeper(ctx context.Context, interval time.Duration) {
 			return
 		case <-t.C:
 			h.sweepUIDs()
+			if h.afterSweep != nil {
+				h.afterSweep()
+			}
 		}
 	}
 }
@@ -128,7 +131,8 @@ type dockLock struct {
 	refs int
 }
 
-// lockDock serializes Provision, Destroy and the uid sweep on one dock id.
+// lockDock serializes Provision, Destroy, SnapshotLoad, Rescan and the uid
+// sweep on one dock id.
 func (h *Host) lockDock(id string) func() {
 	e := h.dockEntry(id)
 	e.mu.Lock()
