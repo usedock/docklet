@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	apiv1 "github.com/usedock/docklet/api/v1"
 	"github.com/usedock/docklet/internal/exec"
@@ -220,5 +221,190 @@ func TestDestroyRemovesFailedJailBeforeFreeingUID(t *testing.T) {
 	}
 	if _, ok := iso.h.uids.Get("dock-1"); ok {
 		t.Fatal("destroy must free the uid")
+	}
+}
+
+// cgroupFixture makes a jailer cgroup dir for a dock holding one process.
+func cgroupFixture(t *testing.T, h *Host, dockID string, withKill bool) (dir string) {
+	t.Helper()
+	dir = filepath.Join(h.cfg.CgroupBase, "firecracker", dockID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), []byte("4242\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if withKill {
+		if err := os.WriteFile(filepath.Join(dir, "cgroup.kill"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestDestroyKeepsUIDWhileCgroupHasProcesses(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 150 * time.Millisecond
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", true)
+	if err := iso.h.Destroy(ctx, "dock-1"); err == nil {
+		t.Fatal("destroy must report a cgroup that cannot be emptied")
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "cgroup.kill")); string(raw) != "1" {
+		t.Fatalf("cgroup.kill = %q, want 1", raw)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); !ok {
+		t.Fatal("uid freed while the cgroup still had processes")
+	}
+	// The processes die; a retry frees the uid and removes the cgroup.
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("uid must be freed once the cgroup is empty")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cgroup survived: %v", err)
+	}
+}
+
+func TestDestroyFreesUIDAfterCgroupEmpties(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 5 * time.Second
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", true)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644)
+	}()
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("uid must be freed after the cgroup empties")
+	}
+}
+
+func TestDestroyKillsListedPidsWithoutCgroupKill(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	iso.h.cfg.CgroupWait = 2 * time.Second
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", false)
+	var killed []int
+	iso.h.cfg.KillPID = func(pid int) error {
+		killed = append(killed, pid)
+		return os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644)
+	}
+	if err := iso.h.Destroy(ctx, "dock-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(killed) != 1 || killed[0] != 4242 {
+		t.Fatalf("killed = %v, want [4242]", killed)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); ok {
+		t.Fatal("uid must be freed")
+	}
+}
+
+// A symlink at a dock file path is refused, never followed or chowned in place.
+func TestChownRefusesSymlinks(t *testing.T) {
+	h, _, dir := testHost(t)
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "rootfs-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.chown(link, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("chown accepted a symlink")
+	}
+	if err := h.chown(target, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("regular file refused: %v", err)
+	}
+}
+
+// stuckDestroy provisions dock-1 and destroys it while its cgroup keeps a process, leaving the uid reserved.
+func stuckDestroy(t *testing.T, iso *isolated) string {
+	t.Helper()
+	ctx := context.Background()
+	iso.h.cfg.CgroupWait = 100 * time.Millisecond
+	if _, err := iso.h.Provision(ctx, "dock-1", resDefault, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	dir := cgroupFixture(t, iso.h, "dock-1", true)
+	if err := iso.h.Destroy(ctx, "dock-1"); err == nil {
+		t.Fatal("destroy must report a cgroup that cannot be emptied")
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); !ok {
+		t.Fatal("uid freed while the cgroup still had processes")
+	}
+	return dir
+}
+
+// No destroy retry comes: a restart frees the uid once its cgroup is empty.
+func TestStartupSweepFreesUIDOfDestroyedDock(t *testing.T) {
+	iso := isolatedHost(t)
+	dir := stuckDestroy(t, iso)
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.procs"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := iso.h.cfg
+	cfg.UIDBase, cfg.UIDSize = 2000000000, 65536
+	h, err := New(cfg, iso.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.uids.Get("dock-1"); ok {
+		t.Fatal("startup sweep must free the uid of a destroyed dock with an empty cgroup")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cgroup survived the sweep: %v", err)
+	}
+}
+
+func TestStartupSweepKeepsUIDWhileCgroupHasProcesses(t *testing.T) {
+	iso := isolatedHost(t)
+	dir := stuckDestroy(t, iso)
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.kill"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iso.h.sweepUIDs()
+	if raw, _ := os.ReadFile(filepath.Join(dir, "cgroup.kill")); string(raw) != "1" {
+		t.Fatalf("sweep must kill the cgroup, cgroup.kill = %q", raw)
+	}
+	if _, ok := iso.h.uids.Get("dock-1"); !ok {
+		t.Fatal("sweep freed a uid whose cgroup still has processes")
+	}
+}
+
+// A stopped dock keeps its jail and its uid; a running dock is tracked. Neither is swept.
+func TestStartupSweepKeepsLiveAndStoppedDocks(t *testing.T) {
+	ctx := context.Background()
+	iso := isolatedHost(t)
+	for _, id := range []string{"dock-run", "dock-stop"} {
+		if _, err := iso.h.Provision(ctx, id, resDefault, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	markStopped(iso.h, "dock-stop")
+	iso.h.sweepUIDs()
+	for _, id := range []string{"dock-run", "dock-stop"} {
+		if _, ok := iso.h.uids.Get(id); !ok {
+			t.Fatalf("sweep freed the uid of %s", id)
+		}
 	}
 }

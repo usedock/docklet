@@ -120,3 +120,34 @@ func TestCheckRange(t *testing.T) {
 		t.Fatal("group gid 300100 inside range must be refused")
 	}
 }
+
+func TestSaveFsyncsFileAndDir(t *testing.T) {
+	var synced []string
+	old := fsync
+	fsync = func(f *os.File) error {
+		synced = append(synced, f.Name())
+		return nil
+	}
+	defer func() { fsync = old }()
+	dir := t.TempDir()
+	a, err := Open(dir, 5000, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Assign("d1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 2 || synced[0] != filepath.Join(dir, "uids.json.tmp") || synced[1] != dir {
+		t.Fatalf("fsync calls = %v, want temp file then dir", synced)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "uids.json.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("temp file left behind: %v", err)
+	}
+	b, err := Open(dir, 5000, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.Get("d1"); !ok {
+		t.Fatal("allocation not persisted")
+	}
+}

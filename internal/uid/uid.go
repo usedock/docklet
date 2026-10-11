@@ -89,6 +89,17 @@ func (a *Allocator) Get(dockID string) (int, bool) {
 	return id, ok
 }
 
+// Docks lists the dock ids holding an allocation.
+func (a *Allocator) Docks() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ids := make([]string, 0, len(a.used))
+	for id := range a.used {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // Release frees a dock's id for reuse.
 func (a *Allocator) Release(dockID string) error {
 	a.mu.Lock()
@@ -105,8 +116,14 @@ func (a *Allocator) Release(dockID string) error {
 	return nil
 }
 
+// fsync is a seam so tests can count durability calls.
+var fsync = func(f *os.File) error { return f.Sync() }
+
+// save writes temp, fsyncs it, renames, then fsyncs the dir so a crash never
+// loses or tears an allocation.
 func (a *Allocator) save() error {
-	if err := os.MkdirAll(filepath.Dir(a.path), 0o700); err != nil {
+	dir := filepath.Dir(a.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(a.used)
@@ -114,10 +131,30 @@ func (a *Allocator) save() error {
 		return err
 	}
 	tmp := a.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, a.path)
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := fsync(f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, a.path); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return fsync(d)
 }
 
 // CheckRange refuses a range that overlaps a passwd user, a group (the dock's

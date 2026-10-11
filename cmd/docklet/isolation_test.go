@@ -55,3 +55,21 @@ func TestParseIsolationRefusesInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestParseIsolationRefusesOversizedLimits(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"DOCKLET_DISK_MBPS": "1000001"},
+		{"DOCKLET_NET_MBPS": "9223372036854775807"},
+		{"DOCKLET_DISK_IOPS": "10000001"},
+		{"DOCKLET_PIDS_LIMIT": "4194305"},
+	} {
+		if _, err := parseIsolation(envOf(env)); err == nil {
+			t.Fatalf("env %v accepted, want startup refusal", env)
+		}
+	}
+	if _, err := parseIsolation(envOf(map[string]string{
+		"DOCKLET_DISK_MBPS": "1000000", "DOCKLET_DISK_IOPS": "10000000", "DOCKLET_NET_MBPS": "1000000", "DOCKLET_PIDS_LIMIT": "4194304",
+	})); err != nil {
+		t.Fatalf("limits at the cap refused: %v", err)
+	}
+}

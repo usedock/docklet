@@ -53,7 +53,11 @@ type Config struct {
 	UIDSize int
 	// Limits are the host-wide I/O, bandwidth and pids limits, resolved per dock size.
 	Limits fc.Limits
-	// Chown overrides os.Chown for dock files (tests only).
+	// CgroupWait bounds how long destroy waits for a killed cgroup to empty; 0 means 5s.
+	CgroupWait time.Duration
+	// KillPID overrides SIGKILL for the cgroup v1 fallback (tests only).
+	KillPID func(pid int) error
+	// Chown overrides fc.ChownFile for dock files (tests only).
 	Chown     func(path string, uid, gid int) error
 	Driver    Backend
 	Snaps     *snapmgr.Coordinator
@@ -158,6 +162,7 @@ func New(cfg Config, stateDir string) (*Host, error) {
 		h.pl = newPool(cfg.PoolSize)
 	}
 	h.Rescan()
+	h.sweepUIDs()
 	return h, nil
 }
 
@@ -298,7 +303,7 @@ func (h *Host) chown(path string, owner, group int) error {
 	if h.cfg.Chown != nil {
 		return h.cfg.Chown(path, owner, group)
 	}
-	return os.Chown(path, owner, group)
+	return fc.ChownFile(path, owner, group)
 }
 
 // ensureIface creates and raises the host-side interface for a dock.
@@ -1097,7 +1102,7 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	// A claimed pool dock runs under its slot id: that names the container, jail and work disk.
 	backing := h.backingID(dockID)
 	_ = h.cfg.Driver.Terminate(h.handle(backing))
-	cleanupCgroup(h.cfg.CgroupBase, backing)
+	emptied := h.killCgroup(backing)
 	h.releaseEgress(dockID)
 	_ = h.alloc.Release(dockID)
 	// Claimed pool VMs keep their slot TAP, so delete the tracked one.
@@ -1113,10 +1118,18 @@ func (h *Host) Destroy(ctx context.Context, dockID string) error {
 	// A failed boot's preserved jail holds a disk owned by this dock's uid, which is about to be reused.
 	_ = os.RemoveAll(h.jailRoot(backing) + ".failed")
 	_ = os.RemoveAll(filepath.Join(h.cfg.VMsDir, backing))
-	h.releaseOwner(backing)
+	// A uid whose cgroup still holds processes stays reserved until a retry empties it.
+	if emptied {
+		h.releaseOwner(backing)
+	}
 	// A gvisor dock owns a loop-mounted work disk that must be unmounted before it is removed.
 	if w, ok := h.cfg.Driver.(interface{ RemoveWorkDisk(dockID string) error }); ok {
-		return w.RemoveWorkDisk(backing)
+		if err := w.RemoveWorkDisk(backing); err != nil {
+			return err
+		}
+	}
+	if !emptied {
+		return fmt.Errorf("dock %s: cgroup not empty after kill, uid kept reserved; retry destroy", dockID)
 	}
 	return nil
 }
