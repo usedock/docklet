@@ -159,9 +159,13 @@ umount_chroot "$TREE"
 printf '{"image":"%s","arch":"%s","builtAt":"%s"}\n' "$NAME" "$ARCH" "$(date -u +%FT%TZ)" > "$TREE/etc/dock-image.json"
 rm -rf "$TREE/usr/share/doc" "$TREE/usr/share/man" "$TREE/var/cache/apt/archives" \
   "$TREE/var/lib/apt/lists" "$TREE/tmp"/* "$TREE/var/tmp"/* "$TREE/root/.cache"
-# No resolved stub in the guest; fleet and DHCP networking both work with a static file.
+# DNS comes from systemd-resolved: the server DHCP offers (QEMU user networking:
+# 10.0.2.3) or the DNS= of the fleet's static 10-dock.network. The public
+# resolvers are used only when no link provides one.
 rm -f "$TREE/etc/resolv.conf"
-printf 'nameserver 1.1.1.1\n' > "$TREE/etc/resolv.conf"
+ln -s ../run/systemd/resolve/stub-resolv.conf "$TREE/etc/resolv.conf"
+install -d "$TREE/etc/systemd/resolved.conf.d"
+printf '[Resolve]\nFallbackDNS=1.1.1.1 9.9.9.9\n' > "$TREE/etc/systemd/resolved.conf.d/10-dock-fallback.conf"
 : > "$TREE/etc/machine-id"
 rm -f "$TREE/var/lib/dbus/machine-id" "$TREE"/etc/ssh/ssh_host_*
 printf 'dock\n' > "$TREE/etc/hostname"
