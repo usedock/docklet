@@ -5,6 +5,9 @@ package v1
 
 import "encoding/json"
 
+// DockletFeatures is what this build advertises at registration; the control plane gates behaviour on it.
+var DockletFeatures = []string{"egress-on-resume"}
+
 // APIVersion is the docklet contract version served under /v1/*.
 const APIVersion = "v1"
 
@@ -261,6 +264,8 @@ type FleetRegisterRequest struct {
 	// AcceptsCredential tells the control plane this docklet stores the per-host
 	// credential, so it may issue one; older docklets stay credential-less.
 	AcceptsCredential bool `json:"acceptsCredential,omitempty"`
+	// Features lists optional docklet behaviours (such as "egress-on-resume") the control plane may rely on.
+	Features []string `json:"features,omitempty"`
 }
 
 // FleetRegisterResponse carries the cadence the control plane wants from this host.

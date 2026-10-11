@@ -211,3 +211,19 @@ func TestContainerSnapshotLoadConfinement(t *testing.T) {
 		t.Fatal("resumed container must be confined")
 	}
 }
+
+func TestSnapshotLoadWithAgentConfinesWhenGivenAnAllowlist(t *testing.T) {
+	ctx := context.Background()
+	h, _, _ := testHost(t)
+	h.cfg.Egress = egress.New()
+	h.cfg.EgressPort = 3128
+	calls := recordIptables(h)
+	snap := snapshotFor(t, h)
+	ip, err := h.SnapshotLoadWithAgent(ctx, "dock-1", resSmall, snap, []string{"github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(*calls, "\n"), "-I FORWARD -s "+ip+" -j DROP") || h.vms["dock-1"].egressGateway == "" {
+		t.Fatalf("resumed agent dock must be confined, calls=%v", *calls)
+	}
+}

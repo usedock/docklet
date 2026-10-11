@@ -441,7 +441,7 @@ func (h *Host) ProvisionWithAgent(ctx context.Context, dockID string, res apiv1.
 }
 
 // SnapshotLoadWithAgent resumes a dock with a freshly keyed guest exec agent.
-func (h *Host) SnapshotLoadWithAgent(ctx context.Context, dockID string, res apiv1.Resources, snapshotID string) (string, error) {
+func (h *Host) SnapshotLoadWithAgent(ctx context.Context, dockID string, res apiv1.Resources, snapshotID string, egressAllow []string) (string, error) {
 	if err := checkIDs(dockID, snapshotID); err != nil {
 		return "", err
 	}
@@ -450,7 +450,7 @@ func (h *Host) SnapshotLoadWithAgent(ctx context.Context, dockID string, res api
 		return "", err
 	}
 	h.mu.Lock()
-	h.fastSpecs[dockID] = fastSpec{token: hex.EncodeToString(raw), workspace: "/home/user/work"}
+	h.fastSpecs[dockID] = fastSpec{token: hex.EncodeToString(raw), workspace: "/home/user/work", egress: egressAllow}
 	h.mu.Unlock()
 	ip, err := h.SnapshotLoad(ctx, dockID, res, snapshotID)
 	if err != nil {

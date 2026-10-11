@@ -133,7 +133,7 @@ func TestSnapshotLoadWithAgentRekeysResumedDock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.SnapshotLoadWithAgent(ctx, "dock-1", resSmall, snap); err != nil {
+	if _, err := h.SnapshotLoadWithAgent(ctx, "dock-1", resSmall, snap, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.FastExec(ctx, "dock-1", "true", nil, time.Second); err != nil {
@@ -177,7 +177,7 @@ func TestContainerAgentDockExecsAcrossResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.SnapshotLoadWithAgent(ctx, "dock-1", resSmall, snap); err != nil {
+	if _, err := h.SnapshotLoadWithAgent(ctx, "dock-1", resSmall, snap, nil); err != nil {
 		t.Fatal(err)
 	}
 	config := filepath.Join(dir, "jail", "firecracker", "dock-1", "root", "fast-agent.json")

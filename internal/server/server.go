@@ -511,15 +511,12 @@ func (s *Server) handleSnapshotLoad(w http.ResponseWriter, r *http.Request) {
 		if len(req.EgressAllow) > 0 && !req.ExecAgent {
 			return nil, errors.New("egressAllow requires execAgent")
 		}
-		if len(req.EgressAllow) > 0 {
-			// Lifted once SnapshotLoadWithAgent takes the allowlist; refuse rather than resume unconfined.
-			return nil, errors.New("egressAllow on load is not wired yet")
-		}
-		load := s.deps.Host.SnapshotLoad
+		var ip string
 		if req.ExecAgent {
-			load = s.deps.Host.SnapshotLoadWithAgent
+			ip, err = s.deps.Host.SnapshotLoadWithAgent(lifecycleCtx(r), req.DockID, req.Resources, req.SnapshotID, req.EgressAllow)
+		} else {
+			ip, err = s.deps.Host.SnapshotLoad(lifecycleCtx(r), req.DockID, req.Resources, req.SnapshotID)
 		}
-		ip, err := load(lifecycleCtx(r), req.DockID, req.Resources, req.SnapshotID)
 		if err != nil {
 			return nil, err
 		}
