@@ -33,8 +33,8 @@ const (
 	// plane may queue a part for up to 60s before it answers 429 part_upload_busy, so it must
 	// outlast that.
 	defaultHeaderWait = 90 * time.Second
-	pushReadyTimeout = 10 * time.Minute
-	exportTimeout    = 30 * time.Minute
+	pushReadyTimeout  = 10 * time.Minute
+	exportTimeout     = 30 * time.Minute
 )
 
 // contractMessages are readable texts for the error codes of the push and pull contract.
@@ -318,8 +318,8 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 		return err
 	}
 	defer cleanup()
-	// The flattened raw disk is the largest file push writes; its size is the disk size.
-	if err := eng.CheckFreeSpace(gibBytes(rec.DiskGiB), "push"); err != nil {
+	// Sized from the data the disk holds, not its virtual size: the flattened raw is sparse.
+	if err := eng.CheckPushSpace(rec); err != nil {
 		return localError(err)
 	}
 
@@ -748,9 +748,11 @@ func (a *App) getExport(ctx context.Context, cl *Client, exportID string) (expor
 func (a *App) download(ctx context.Context, cl *Client, exportID string, info exportInfo, part string, quiet bool) error {
 	pr := a.newProgress(quiet, "downloaded", info.SizeBytes)
 	var dl dlState
-	// fails counts attempts in a row that moved nothing; an attempt that grew the file resets
-	// it, so a long pull on a flaky link keeps going while it makes progress.
+	// fails counts attempts in a row that moved nothing; an attempt that takes the file past
+	// its largest size so far resets it, so a long pull on a flaky link keeps going while it
+	// makes progress, and regrowing bytes a restart discarded never refills the budget.
 	fails := 0
+	best := fileSize(part)
 	for attempt := 1; ; attempt++ {
 		if attempt > 1 {
 			if err := sleepCtx(ctx, a.backoffFor(max(fails, 1))); err != nil {
@@ -765,7 +767,6 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 			}
 			info.URL = fresh.URL
 		}
-		before := fileSize(part)
 		done, err := a.fetchRange(ctx, cl, info, part, pr, &dl)
 		if err == nil && done {
 			break
@@ -777,7 +778,8 @@ func (a *App) download(ctx context.Context, cl *Client, exportID string, info ex
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if fileSize(part) > before {
+		if sz := fileSize(part); sz > best {
+			best = sz
 			fails = 0
 			continue
 		}

@@ -250,3 +250,39 @@ func TestCleanStaleTemp(t *testing.T) {
 		t.Fatalf("TempDir name %q must carry this pid", d)
 	}
 }
+
+func TestPushSpaceNeedCountsDataWhenSparse(t *testing.T) {
+	const gib = int64(1) << 30
+	// A 20 GiB disk holding 2 GiB: sparse needs the data plus zstd headroom, not 20 GiB.
+	if got := pushSpaceNeed(20*gib, 2*gib, true); got != 3*gib {
+		t.Fatalf("sparse need %d, want %d", got, 3*gib)
+	}
+	if got := pushSpaceNeed(20*gib, 2*gib, false); got != 21*gib {
+		t.Fatalf("non-sparse need %d, want %d", got, 21*gib)
+	}
+	// Overlay plus base can count more than the disk holds; the disk size bounds it.
+	if got := pushSpaceNeed(4*gib, 6*gib, true); got != 6*gib {
+		t.Fatalf("capped need %d, want %d", got, 6*gib)
+	}
+}
+
+func TestCheckPushSpaceUsesAllocatedData(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	if _, err := e.New(context.Background(), Spec{Name: "web", CPUs: 1, MemoryMiB: 512, DiskGiB: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := e.Lookup("web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.CheckPushSpace(rec)
+	if sparseTemp {
+		if err != nil {
+			t.Fatalf("a 1 PiB disk holding a few bytes must fit when the raw is sparse: %v", err)
+		}
+		return
+	}
+	if codeOf(err) != "insufficient_space" || !strings.Contains(err.Error(), "docklet#76") {
+		t.Fatalf("got %v", err)
+	}
+}

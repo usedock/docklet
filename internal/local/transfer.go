@@ -101,6 +101,37 @@ func newestModTime(dir string) time.Time {
 // CheckFreeSpace fails with insufficient_space when the data dir's volume has less than need
 // bytes free. A volume whose free space cannot be read is let through.
 func (e *Engine) CheckFreeSpace(need int64, what string) error {
+	return e.checkFreeSpace(need, what, "")
+}
+
+// CheckPushSpace checks there is room to flatten and compress rec's disk.
+func (e *Engine) CheckPushSpace(rec Record) error {
+	data := allocatedBytes(e.file(rec.ID, "disk.qcow2"))
+	if rec.ImageDir != "" {
+		data += allocatedBytes(filepath.Join(rec.ImageDir, "base.qcow2"))
+	}
+	note := ""
+	if !sparseTemp {
+		note = " (on Windows the flattened disk is written at its full size, see docklet#76)"
+	}
+	return e.checkFreeSpace(pushSpaceNeed(int64(min(max(rec.DiskGiB, 0), 1<<30))<<30, data, sparseTemp), "push", note)
+}
+
+// pushSpaceNeed estimates the peak space of a push: the flattened raw disk plus its zstd copy.
+// The raw disk takes its data (overlay plus base, at most the disk size) when written sparse,
+// else the whole disk; the zstd copy is given half the data as headroom.
+func pushSpaceNeed(diskBytes, dataBytes int64, sparse bool) int64 {
+	if diskBytes > 0 {
+		dataBytes = min(dataBytes, diskBytes)
+	}
+	raw := dataBytes
+	if !sparse {
+		raw = max(diskBytes, dataBytes)
+	}
+	return raw + dataBytes/2
+}
+
+func (e *Engine) checkFreeSpace(need int64, what, note string) error {
 	if need <= 0 {
 		return nil
 	}
@@ -111,8 +142,8 @@ func (e *Engine) CheckFreeSpace(need int64, what string) error {
 	if err != nil || free >= uint64(need) {
 		return nil
 	}
-	return errf("insufficient_space", "%s needs about %s free in %s but only %s is available; free some space or set DOCK_DATA_DIR to a larger drive",
-		what, HumanBytes(need), e.Dir, HumanBytes(int64(free)))
+	return errf("insufficient_space", "%s needs about %s free in %s but only %s is available%s; free some space or set DOCK_DATA_DIR to a larger drive",
+		what, HumanBytes(need), e.Dir, HumanBytes(int64(free)), note)
 }
 
 // Flat is a stopped dock's disk flattened to a raw image. Only the disk is ever read: the

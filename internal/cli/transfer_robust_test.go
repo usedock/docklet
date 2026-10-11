@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -421,7 +422,8 @@ func TestStalledPartUploadIsRetried(t *testing.T) {
 			return false
 		}
 		_, _ = readAll(r) // reading the body lets the server notice the client hanging up
-		select { // never answers
+		// Never answers.
+		select {
 		case <-r.Context().Done():
 		case <-time.After(20 * time.Second):
 		}
@@ -471,10 +473,16 @@ func (nopCloser) Close() error { return nil }
 
 func TestPushChecksFreeSpace(t *testing.T) {
 	te, p := transferEnv(t, "direct")
+	// A huge virtual disk that holds a few bytes.
 	mustExit(t, te, 0, "new", "web", "--disk", "100000000")
 	mustExit(t, te, 0, "stop", "web")
+	if runtime.GOOS != "windows" {
+		// The flattened raw is sparse: only the data needs room, so the push goes through.
+		mustExit(t, te, 0, "push", "web", "--to", "lab")
+		return
+	}
 	mustExit(t, te, 1, "push", "web", "--to", "lab")
-	if !strings.Contains(te.errb.String(), "insufficient_space") || !strings.Contains(te.errb.String(), "free") || p.importBody != nil {
+	if !strings.Contains(te.errb.String(), "insufficient_space") || !strings.Contains(te.errb.String(), "docklet#76") || p.importBody != nil {
 		t.Fatalf("stderr %q import %v", te.errb, p.importBody)
 	}
 	if len(tmpEntries(t, te)) != 0 {
@@ -529,5 +537,29 @@ func TestPushAndPullSweepStaleTransferDirs(t *testing.T) {
 				t.Fatal("a stale transfer directory must be removed at startup")
 			}
 		})
+	}
+}
+
+func TestDownloadRestartsDoNotResetTheBudget(t *testing.T) {
+	// From zero the body always drops at 40 bytes; every resume answers the wrong range and
+	// restarts. Regrowing the same 40 bytes is not progress, so the budget must run out.
+	r := newDLRig(t, 100, func(r *dlRig, w http.ResponseWriter, req *http.Request) {
+		if len(r.reqs) > 4*downloadAttempts {
+			_, _ = w.Write(r.payload) // let a looping client finish so the test reports it
+			return
+		}
+		if req.Header.Get("Range") == "" {
+			cutAfter(w, r.payload, len(r.payload), 40)
+		}
+		w.Header().Set("Content-Range", "bytes 0-99/100")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(r.payload)
+	})
+	err := r.download()
+	if err == nil || !strings.Contains(err.Error(), "download_failed") {
+		t.Fatalf("a download that keeps restarting must give up, got %v after %d requests", err, len(r.reqs))
+	}
+	if len(r.reqs) > 2*downloadAttempts+1 {
+		t.Fatalf("%d requests: restarts must not refill the budget", len(r.reqs))
 	}
 }
