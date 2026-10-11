@@ -48,8 +48,9 @@ func TestDecompressSparseIsIdenticalAndSmall(t *testing.T) {
 	if alloc <= 0 {
 		t.Fatalf("allocated %d bytes for a disk holding data", alloc)
 	}
-	// Four data regions of at most two 64 KiB blocks each, plus filesystem rounding.
-	if alloc > 4<<20 {
+	// Four small data regions; filesystems round allocation up (APFS took 8 MiB), but a
+	// non-sparse write would take all 64 MiB.
+	if alloc > int64(len(in))/4 {
 		t.Fatalf("allocated %d bytes for a mostly-zero %d byte disk", alloc, len(in))
 	}
 }
