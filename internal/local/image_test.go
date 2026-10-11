@@ -31,7 +31,7 @@ func TestCacheEnsureVerifiesConvertsAndCaches(t *testing.T) {
 	if k, _ := os.ReadFile(p.Kernel); string(k) != "kernel-bytes" {
 		t.Fatalf("kernel %q", k)
 	}
-	if _, err := os.Stat(filepath.Join(p.Dir, "rootfs.raw")); !os.IsNotExist(err) {
+	if left, _ := filepath.Glob(filepath.Join(p.Dir, "*.raw")); len(left) > 0 {
 		t.Fatal("the raw disk must not be kept")
 	}
 	if !c.Cached(im) {
@@ -111,6 +111,11 @@ func TestFindImage(t *testing.T) {
 	}
 	if _, err := findImage(ix, "nope", "amd64"); err == nil || !strings.Contains(err.Error(), "test-img") {
 		t.Fatalf("unknown image must list the available ones, got %v", err)
+	}
+	evil := im
+	evil.Name = "../../outside"
+	if _, err := findImage(&dockyard.Index{Version: "t", Images: []dockyard.Image{evil}}, evil.Name, "amd64"); codeOf(err) != "bad_index" {
+		t.Fatalf("an image name with a path must be refused, got %v", err)
 	}
 	delete(im.Files, dockyard.FileKernel)
 	if _, err := findImage(&dockyard.Index{Version: "t", Images: []dockyard.Image{im}}, "test-img", "amd64"); codeOf(err) != "bad_index" {

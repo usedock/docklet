@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -31,9 +32,15 @@ func ImageSize(im dockyard.Image) int64 {
 	return n
 }
 
+var imageNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,62}$`)
+
 // findImage returns the image for name and arch, or an error listing what exists.
 func findImage(ix *dockyard.Index, name, arch string) (dockyard.Image, error) {
 	if im, ok := ix.Find(name, arch); ok {
+		// The name and arch become a cache directory name; an unpinned index must not escape it.
+		if !imageNameRE.MatchString(im.Name) || (im.Arch != "amd64" && im.Arch != "arm64") {
+			return dockyard.Image{}, errf("bad_index", "image name %q or arch %q is not allowed", im.Name, im.Arch)
+		}
 		for _, need := range []string{dockyard.FileRootfs, dockyard.FileKernel, dockyard.FileInitrd} {
 			if f, ok := im.Files[need]; !ok || f.URL == "" {
 				return dockyard.Image{}, errf("bad_index", "image %s/%s lacks a %s entry", name, arch, need)
@@ -182,21 +189,37 @@ func (c *Cache) Ensure(ctx context.Context, im dockyard.Image) (CachedImage, err
 		}
 		c.logf("downloading %s (%s)", name, humanBytes(im.Files[name].Size))
 		if err := c.download(ctx, im.Files[name], dest); err != nil {
+			// Another dock command may have finished the same file or the whole image.
+			if c.Cached(im) {
+				return p, nil
+			}
+			if verifyFile(dest, im.Files[name]) == nil {
+				continue
+			}
 			return p, err
 		}
 	}
+	// Temp names are per call: two dock commands may prepare the same image at once.
 	c.logf("preparing %s disk", im.Name)
-	raw := filepath.Join(p.Dir, "rootfs.raw")
+	tag := randomHex(4)
+	raw := filepath.Join(p.Dir, "rootfs."+tag+".raw")
+	defer os.Remove(raw)
+	tmpBase := p.Base + "." + tag + ".part"
+	defer os.Remove(tmpBase)
 	if err := decompress(filepath.Join(p.Dir, dockyard.FileRootfs), raw); err != nil {
+		if c.Cached(im) {
+			return p, nil
+		}
 		return p, err
 	}
-	defer os.Remove(raw)
-	tmpBase := p.Base + ".part"
-	_ = os.Remove(tmpBase)
 	if err := c.Driver.ConvertRaw(ctx, raw, tmpBase); err != nil {
 		return p, err
 	}
 	if err := os.Rename(tmpBase, p.Base); err != nil {
+		// On Windows a base already in use by a dock cannot be replaced; it is the same image.
+		if c.Cached(im) {
+			return p, nil
+		}
 		return p, errf("cache_error", "%v", err)
 	}
 	if err := os.WriteFile(filepath.Join(p.Dir, ".ready"), nil, 0o600); err != nil {
@@ -236,7 +259,7 @@ func (c *Cache) download(ctx context.Context, f dockyard.File, dest string) erro
 	if resp.StatusCode != http.StatusOK {
 		return errf("download_failed", "%s answered %s", f.URL, resp.Status)
 	}
-	part := dest + ".part"
+	part := dest + "." + randomHex(4) + ".part"
 	out, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return errf("cache_error", "%v", err)
