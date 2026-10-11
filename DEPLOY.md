@@ -680,8 +680,9 @@ been validated for your image.
   and binds only the guest gateway address, never a
   public or loopback interface. A boot or resume that cannot confine fails
   instead of running open. A restarted docklet re-arms the allowlist of each
-  dock it adopts; an adopted ephemeral run keeps its rules but reaches nothing. Rules are removed on stop and destroy so a reused IP never
-  inherits them. Allowlists name hosts, not tenants: an
+  dock it adopts; an adopted ephemeral run keeps its rules but reaches
+  nothing. Rules are removed on stop and destroy so a reused IP never inherits
+  them. Allowlists name hosts, not tenants: an
   allowlisted multi-tenant service (GitHub, a package registry) can still
   receive data pushed with credentials the guest brings itself.
 - **Guest network isolation** applies to every dock, confined or not, and is
