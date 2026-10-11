@@ -61,8 +61,8 @@ func TestImportedDockReportsItsPulledDockyardImageOnExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := h.GenerationImage(ctx, id); got != "node-22" {
-		t.Fatalf("exported image = %q, want node-22", got)
+	if got, err := h.GenerationImage(ctx, id); err != nil || got != "node-22" {
+		t.Fatalf("exported image = %q (%v), want node-22", got, err)
 	}
 }
 

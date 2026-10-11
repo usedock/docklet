@@ -195,13 +195,13 @@ func (c *Coordinator) baseFor(rootfs string) (string, error) {
 }
 
 // GenerationBase names the base a stored generation was built against; empty
-// for whole-image and container generations or when the manifest is unreadable.
-func (c *Coordinator) GenerationBase(ctx context.Context, snapshotID string) string {
+// for whole-image and container generations. An unreadable manifest is an error, never "".
+func (c *Coordinator) GenerationBase(ctx context.Context, snapshotID string) (string, error) {
 	manifest, err := c.capturedManifest(ctx, snapshotID)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return manifest.BaseFingerprint
+	return manifest.BaseFingerprint, nil
 }
 
 // FreezeContainerState pins a container dock's workspace state: a tar of the
@@ -441,20 +441,21 @@ func verifiedEntry(manifest store.Manifest, entry store.FileEntry) (store.FileEn
 }
 
 // GenerationImage names the Dockyard image a stored generation's disk derives
-// from; empty for host-built bases, container generations or an unreadable manifest.
-func (c *Coordinator) GenerationImage(ctx context.Context, snapshotID string) string {
+// from; empty for host-built bases and container generations. An unreadable manifest is an error.
+func (c *Coordinator) GenerationImage(ctx context.Context, snapshotID string) (string, error) {
 	manifest, err := c.capturedManifest(ctx, snapshotID)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return manifest.Image
+	return manifest.Image, nil
 }
 
 // GenerationSHA256 is the sha256 of a stored whole-image generation's object.
-func (c *Coordinator) GenerationSHA256(ctx context.Context, snapshotID string) string {
+// An unreadable manifest is an error, so a capture never answers an empty checksum by accident.
+func (c *Coordinator) GenerationSHA256(ctx context.Context, snapshotID string) (string, error) {
 	manifest, err := c.capturedManifest(ctx, snapshotID)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return manifest.SHA256
+	return manifest.SHA256, nil
 }

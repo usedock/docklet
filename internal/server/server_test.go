@@ -479,3 +479,36 @@ func TestLogHeldDocksNamesStuckDock(t *testing.T) {
 		t.Fatalf("log = %q", buf.String())
 	}
 }
+
+// describer answers from a fixed map; a missing id is an unreadable manifest.
+type describer map[string][3]string
+
+func (d describer) get(id string, i int) (string, error) {
+	v, ok := d[id]
+	if !ok {
+		return "", errors.New("generation_forbidden")
+	}
+	return v[i], nil
+}
+func (d describer) GenerationBase(_ context.Context, id string) (string, error) { return d.get(id, 0) }
+func (d describer) GenerationSHA256(_ context.Context, id string) (string, error) {
+	return d.get(id, 1)
+}
+func (d describer) GenerationImage(_ context.Context, id string) (string, error) { return d.get(id, 2) }
+
+func TestSnapshotAnswerFailsClosedOnAnUnreadableManifest(t *testing.T) {
+	ctx := context.Background()
+	d := describer{"g1": {"fp", "sum", "node-22"}}
+	resp, err := snapshotAnswer(ctx, d, "g1", 7, "fam", true)
+	if err != nil || resp.BaseFingerprint != "fp" || resp.SHA256 != "sum" || resp.BaseImage != "node-22" || resp.SizeBytes != 7 || resp.CPUFamily != "fam" {
+		t.Fatalf("resp = %+v, err = %v", resp, err)
+	}
+	if resp, err := snapshotAnswer(ctx, d, "g1", 7, "fam", false); err != nil || resp.SHA256 != "" || resp.BaseImage != "" {
+		t.Fatalf("a delta capture answers no checksum or image: %+v %v", resp, err)
+	}
+	for _, full := range []bool{false, true} {
+		if _, err := snapshotAnswer(ctx, d, "gone", 7, "fam", full); err == nil {
+			t.Fatalf("full=%v: an unreadable manifest must fail the capture, not answer empty fields", full)
+		}
+	}
+}
