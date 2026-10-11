@@ -36,9 +36,12 @@ t0=$(date +%s)
 $DOCK stop e2e
 echo "e2e: stop took $(( $(date +%s) - t0 ))s"
 $DOCK ls --all | grep -q archived
+# Stopping must end the VM process, not just forget about it.
+if pgrep -f qemu-system >/dev/null; then echo "a qemu process is still running after dock stop" >&2; ps -eo pid,etime,args | grep '[q]emu-system' >&2; exit 1; fi
 [ -f "$dir/disk.qcow2" ]
 t0=$(date +%s)
 $DOCK resume e2e
+[ "$(pgrep -fc qemu-system)" = 1 ] || { echo "expected exactly one qemu process after resume" >&2; exit 1; }
 echo "e2e: resume took $(( $(date +%s) - t0 ))s"
 [ "$(stat -c %i "$dir/disk.qcow2")" = "$disk_before" ]
 [ "$($DOCK exec e2e -- cat /home/user/work/marker)" = kept ]
