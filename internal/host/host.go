@@ -244,8 +244,11 @@ func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
 	if err != nil {
 		return ""
 	}
-	token, workspace := readExecAgent(jail)
+	token, workspace, allow := readExecAgent(jail)
 	live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
+	if len(allow) > 0 {
+		live.egressGateway = h.reconfine(live.guestIP, allow)
+	}
 	if owner != dockID {
 		live.backing = dockID
 		live.ephemeral = true
@@ -1124,27 +1127,31 @@ func (h *Host) persistExecAgent(dockID string, spec fastSpec) {
 	if spec.ephemeral {
 		return
 	}
-	raw, err := json.Marshal(map[string]string{"token": spec.token, "workspace": spec.workspace})
+	raw, err := json.Marshal(execAgentRecord{Token: spec.token, Workspace: spec.workspace, Egress: spec.egress})
 	if err != nil {
 		return
 	}
 	_ = os.WriteFile(filepath.Join(h.jailRoot(dockID), execAgentSidecar), raw, 0o600)
 }
 
+// execAgentRecord is the sidecar shape; Egress lets a restarted docklet re-arm the dock's allowlist.
+type execAgentRecord struct {
+	Token     string   `json:"token"`
+	Workspace string   `json:"workspace"`
+	Egress    []string `json:"egress,omitempty"`
+}
+
 // readExecAgent returns empty values for docks booted without the agent.
-func readExecAgent(jail string) (string, string) {
+func readExecAgent(jail string) (string, string, []string) {
 	raw, err := os.ReadFile(filepath.Join(jail, execAgentSidecar))
 	if err != nil {
-		return "", ""
+		return "", "", nil
 	}
-	var spec struct {
-		Token     string `json:"token"`
-		Workspace string `json:"workspace"`
-	}
+	var spec execAgentRecord
 	if json.Unmarshal(raw, &spec) != nil {
-		return "", ""
+		return "", "", nil
 	}
-	return spec.Token, spec.Workspace
+	return spec.Token, spec.Workspace, spec.Egress
 }
 
 // Destroy shuts the microVM down and frees its IP and slot.
@@ -1204,6 +1211,18 @@ func (h *Host) restrictEgress(guestIP string, allow []string) error {
 	}
 	h.cfg.Egress.Allow(guestIP, allow)
 	return nil
+}
+
+// reconfine re-arms an adopted dock's allowlist: its iptables rules outlive a
+// docklet restart but the proxy policy does not. It never removes rules, so a
+// failed re-arm leaves the guest confined; returns the proxy gateway or empty.
+func (h *Host) reconfine(guestIP string, allow []string) string {
+	if h.cfg.Egress == nil || h.cfg.EgressPort == 0 || guestIP == "" {
+		return ""
+	}
+	_ = egress.Restrict(h.cfg.NetRunner, guestIP, h.cfg.EgressPort)
+	h.cfg.Egress.Allow(guestIP, allow)
+	return h.alloc.Gateway()
 }
 
 // releaseEgress always clears rules for the dock's IP, even when the policy

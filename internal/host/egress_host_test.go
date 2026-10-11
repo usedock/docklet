@@ -2,6 +2,10 @@ package host
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,5 +229,64 @@ func TestSnapshotLoadWithAgentConfinesWhenGivenAnAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(*calls, "\n"), "-I FORWARD -s "+ip+" -j DROP") || h.vms["dock-1"].egressGateway == "" {
 		t.Fatalf("resumed agent dock must be confined, calls=%v", *calls)
+	}
+}
+
+// proxyVerdict asks the proxy to CONNECT from guestIP and returns its refusal text.
+func proxyVerdict(p *egress.Proxy, guestIP, target string) string {
+	req := httptest.NewRequest(http.MethodConnect, "http://"+target, nil)
+	req.Host = target
+	req.RemoteAddr = guestIP + ":40000"
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+func TestRescanReconfinesAdoptedDocks(t *testing.T) {
+	ctx := context.Background()
+	h, _, dir, _ := testContainerHost(t)
+	h.cfg.Egress = egress.New()
+	h.cfg.EgressPort = 3128
+	var execEnv map[string]string
+	h.cfg.AgentCall = func(_ context.Context, _, _ string, req fastAgentRequest) (fastAgentResponse, error) {
+		if req.Op == "exec" {
+			execEnv = req.Env
+		}
+		return fastAgentResponse{OK: true}, nil
+	}
+	confinedIP, err := h.ProvisionWithAgent(ctx, "dock-1", resSmall, "", "", []string{"github.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openIP, err := h.ProvisionWithAgent(ctx, "dock-2", resSmall, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"dock-1", "dock-2"} {
+		if err := os.WriteFile(filepath.Join(dir, "jail", "firecracker", id, "root", "spec.json"), []byte(`{"dockId":"`+id+`","resources":{"cpus":1,"memoryMiB":2048,"diskGiB":10}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A restarted docklet has an empty proxy and no tracked docks; the iptables rules remain.
+	h.cfg.Egress = egress.New()
+	h.mu.Lock()
+	h.vms = map[string]*vm{}
+	h.mu.Unlock()
+	calls := recordIptables(h)
+	h.Rescan()
+	if got := proxyVerdict(h.cfg.Egress, confinedIP, "evil.example:443"); !strings.Contains(got, "denied") {
+		t.Fatalf("adopted confined dock must get its policy back, proxy said %q", got)
+	}
+	if !strings.Contains(strings.Join(*calls, "\n"), "-I FORWARD -s "+confinedIP+" -j DROP") {
+		t.Fatalf("adopted confined dock must be re-restricted, calls=%v", *calls)
+	}
+	if _, err := h.FastExec(ctx, "dock-1", "true", nil, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(execEnv["HTTPS_PROXY"], ":3128") {
+		t.Fatalf("exec on an adopted confined dock must carry the proxy env, got %v", execEnv)
+	}
+	if got := proxyVerdict(h.cfg.Egress, openIP, "evil.example:443"); !strings.Contains(got, "no egress policy") || h.vms["dock-2"].egressGateway != "" {
+		t.Fatalf("adopted open dock must stay unconfined, proxy said %q", got)
 	}
 }
