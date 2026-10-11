@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -34,6 +35,9 @@ type App struct {
 	ReadSecret func() (string, error)
 	// Engine is the local engine; nil builds the real one on first use.
 	Engine *local.Engine
+
+	// xferBackoff and xferPoll override the push and pull waits (tests).
+	xferBackoff, xferPoll time.Duration
 }
 
 // NewApp returns an App wired to the process streams.
@@ -63,6 +67,8 @@ Commands:
   resume <dock>         resume a stopped dock
   branch <dock>         start independent docks from a dock's state (local: a copy of its disk)
   rm <dock>             delete a dock
+  push <dock> --to <ctx>    copy a stopped local dock's disk to a control plane (--name, --stop, --rm)
+  pull <dock> --from <ctx>  copy a control plane dock's disk to a new stopped local dock (--name)
   images                list Dockyard images; 'images pull <name>' downloads one
   doctor                check what local docks need (QEMU, accelerator, disk, Dockyard)
   login                 store an API key for a context (read from stdin)
@@ -131,6 +137,10 @@ func (a *App) run(ctx context.Context, args []string) error {
 		return a.cmdBranch(ctx, rest)
 	case "rm":
 		return a.cmdRm(ctx, rest)
+	case "push":
+		return a.cmdPush(ctx, rest)
+	case "pull":
+		return a.cmdPull(ctx, rest)
 	case "images":
 		return a.cmdImages(ctx, rest)
 	case "doctor":
@@ -245,30 +255,45 @@ func (a *App) client() (*target, error) {
 		}
 		return &target{doer: localAPI{e}, Local: e}, nil
 	}
+	cl, ws, err := a.remote(cfg, name)
+	if err != nil {
+		return nil, err
+	}
+	return &target{doer: cl, Workspace: ws}, nil
+}
+
+// remote builds the HTTP client for a named control plane context. The DOCK_API_* and
+// DOCK_WORKSPACE overrides apply only when name is the active context.
+func (a *App) remote(cfg *Config, name string) (*Client, string, error) {
+	if name == LocalContext {
+		return nil, "", newError("invalid_argument", "the local context is not a control plane")
+	}
 	cx, ok := cfg.lookup(name)
 	if !ok {
-		return nil, newError("context_not_found", fmt.Sprintf("context %q does not exist", name))
+		return nil, "", newError("context_not_found", fmt.Sprintf("context %q does not exist", name))
 	}
-	base, key := cx.URL, cx.APIKey
-	if v := a.env("DOCK_API_URL"); v != "" {
-		if base, err = normalizeURL(v); err != nil {
-			return nil, err
+	base, key, ws := cx.URL, cx.APIKey, cx.Workspace
+	if name == cfg.active(a.Getenv) {
+		var err error
+		if v := a.env("DOCK_API_URL"); v != "" {
+			if base, err = normalizeURL(v); err != nil {
+				return nil, "", err
+			}
+		}
+		if v := a.env("DOCK_API_KEY"); v != "" {
+			key = strings.TrimSpace(v)
+		}
+		if v := a.env("DOCK_WORKSPACE"); v != "" {
+			ws = strings.TrimSpace(v)
 		}
 	}
-	if v := a.env("DOCK_API_KEY"); v != "" {
-		key = strings.TrimSpace(v)
-	}
 	if base == "" {
-		return nil, newError("no_url", fmt.Sprintf("context %q has no url", name))
+		return nil, "", newError("no_url", fmt.Sprintf("context %q has no url", name))
 	}
 	if key == "" {
-		return nil, newError("no_api_key", "no API key; run 'dock login' or set DOCK_API_KEY")
+		return nil, "", newError("no_api_key", "no API key; run 'dock login' or set DOCK_API_KEY")
 	}
-	ws := cx.Workspace
-	if v := a.env("DOCK_WORKSPACE"); v != "" {
-		ws = strings.TrimSpace(v)
-	}
-	return &target{doer: &Client{BaseURL: base, Key: key, HTTP: a.HTTP}, Workspace: ws}, nil
+	return &Client{BaseURL: base, Key: key, HTTP: a.HTTP}, ws, nil
 }
 
 // engine returns the local engine, building the real one on first use.

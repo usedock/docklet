@@ -48,6 +48,13 @@ func (f *fakeVM) ConvertRaw(_ context.Context, raw, q string) error {
 	b, _ := os.ReadFile(raw)
 	return os.WriteFile(q, b, 0o600)
 }
+func (f *fakeVM) FlattenDisk(_ context.Context, q, raw string) error {
+	b, err := os.ReadFile(q)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(raw, b, 0o600)
+}
 func (f *fakeVM) Alive(pid int) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.alive[pid] }
 func (f *fakeVM) Kill(pid int) error {
 	f.mu.Lock()
