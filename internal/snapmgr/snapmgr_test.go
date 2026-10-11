@@ -646,6 +646,34 @@ func TestFreezeRootfsFullRecordsAllocatedDataNotVirtualSize(t *testing.T) {
 	// A 64 MiB disk holding one block of data: the recorded data size is what is allocated, far
 	// below the virtual size, so a pull sizes its free-space check from the real data.
 	const virtual = 64 << 20
+	// The stub runner copies densely; this one does what `cp --sparse=always` does, so the frozen
+	// copy keeps its holes.
+	c.Runner = func(name string, args ...string) error {
+		src, dst := args[len(args)-2], args[len(args)-1]
+		in, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.Create(dst)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		if err := out.Truncate(virtual); err != nil {
+			return err
+		}
+		buf := make([]byte, disk.BlockSize)
+		for off := int64(0); off < virtual; off += disk.BlockSize {
+			n, _ := in.ReadAt(buf, off)
+			if n > 0 && !bytes.Equal(buf[:n], make([]byte, n)) {
+				if _, err := out.WriteAt(buf[:n], off); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 	f, err := os.Create(rootfs)
 	if err != nil {
 		t.Fatal(err)
