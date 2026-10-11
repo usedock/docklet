@@ -102,8 +102,10 @@ type SnapshotLoadRequest struct {
 	Resources  Resources `json:"resources"`
 	SnapshotID string    `json:"snapshotId"`
 	// ExecAgent boots the guest exec agent with a fresh token.
-	ExecAgent        bool   `json:"execAgent,omitempty"`
-	IdempotencyToken string `json:"idempotencyToken"`
+	ExecAgent bool `json:"execAgent,omitempty"`
+	// EgressAllow confines the resumed guest to these HTTPS hosts; requires ExecAgent.
+	EgressAllow      []string `json:"egressAllow,omitempty"`
+	IdempotencyToken string   `json:"idempotencyToken"`
 }
 
 // SnapshotLoadResponse carries the restored guest address.

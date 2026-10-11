@@ -1010,8 +1010,18 @@ func (h *Host) SnapshotLoad(ctx context.Context, dockID string, res apiv1.Resour
 		_ = h.deleteIface(tap)
 		return "", fmt.Errorf("load cgroup: %w", err)
 	}
+	var egressGateway string
+	if isFast && len(fast.egress) > 0 {
+		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
+			_ = h.cfg.Driver.Terminate(bootHandle)
+			_ = h.alloc.Release(dockID)
+			_ = h.deleteIface(tap)
+			return "", fmt.Errorf("load egress: %w", err)
+		}
+		egressGateway = gateway
+	}
 	h.mu.Lock()
-	live := &vm{res: res, tap: tap, guestIP: guestIP, pid: bootHandle.Pid, running: true}
+	live := &vm{res: res, tap: tap, guestIP: guestIP, pid: bootHandle.Pid, running: true, egressGateway: egressGateway}
 	if isFast {
 		live.fastToken = fast.token
 		live.fastWorkspace = fast.workspace
@@ -1082,8 +1092,18 @@ func (h *Host) snapshotLoadContainer(ctx context.Context, dockID string, res api
 		_ = h.deleteIface(tap)
 		return "", fmt.Errorf("load cgroup: %w", err)
 	}
+	var egressGateway string
+	if isFast && len(fast.egress) > 0 {
+		if err := h.restrictEgress(guestIP, fast.egress); err != nil {
+			_ = h.cfg.Driver.Terminate(bootHandle)
+			_ = h.alloc.Release(dockID)
+			_ = h.deleteIface(tap)
+			return "", fmt.Errorf("load egress: %w", err)
+		}
+		egressGateway = gateway
+	}
 	h.mu.Lock()
-	live := &vm{res: res, tap: tap, guestIP: guestIP, pid: bootHandle.Pid, running: true}
+	live := &vm{res: res, tap: tap, guestIP: guestIP, pid: bootHandle.Pid, running: true, egressGateway: egressGateway}
 	if isFast {
 		live.fastToken = fast.token
 		live.fastWorkspace = fast.workspace

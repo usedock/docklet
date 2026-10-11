@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	apiv1 "github.com/usedock/docklet/api/v1"
 	"github.com/usedock/docklet/internal/egress"
 )
 
@@ -118,5 +119,94 @@ func TestUnconfinedDocksStayOpen(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(*calls, "\n"), "-I FORWARD -s 192.168.127.0/24 -j DOCKLET-GUEST") {
 		t.Fatalf("unconfined dock must be hooked to the guest deny chain, calls=%v", *calls)
+	}
+}
+
+// snapshotFor boots a plain dock and captures it so a test can resume it confined.
+func snapshotFor(t *testing.T, h *Host) string {
+	t.Helper()
+	stubAgent(t, h)
+	if _, err := h.ProvisionWithAgent(context.Background(), "dock-1", resSmall, "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	snap, _, _, err := h.SnapshotCreate(context.Background(), "dock-1", nil, apiv1.SnapshotFull, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func TestSnapshotLoadConfinesResumedDock(t *testing.T) {
+	ctx := context.Background()
+	h, _, _ := testHost(t)
+	h.cfg.Egress = egress.New()
+	h.cfg.EgressPort = 3128
+	snap := snapshotFor(t, h)
+	calls := recordIptables(h)
+	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work", egress: []string{"github.com"}}
+	ip, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(*calls, "\n"), "-I FORWARD -s "+ip+" -j DROP") || h.vms["dock-1"].egressGateway == "" {
+		t.Fatalf("resumed dock must be confined, calls=%v", *calls)
+	}
+}
+
+func TestSnapshotLoadFailsClosedWithoutProxy(t *testing.T) {
+	ctx := context.Background()
+	h, _, _ := testHost(t)
+	snap := snapshotFor(t, h)
+	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work", egress: []string{"github.com"}}
+	if _, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap); err == nil || !strings.Contains(err.Error(), "egress proxy not configured") {
+		t.Fatalf("confined resume without a proxy must fail, err=%v", err)
+	}
+	if _, ok := h.vms["dock-1"]; ok {
+		t.Fatal("refused resume must not be tracked")
+	}
+}
+
+func TestSnapshotLoadWithoutAllowlistStaysOpen(t *testing.T) {
+	ctx := context.Background()
+	h, _, _ := testHost(t)
+	h.cfg.Egress = egress.New()
+	h.cfg.EgressPort = 3128
+	snap := snapshotFor(t, h)
+	calls := recordIptables(h)
+	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work"}
+	if _, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range *calls {
+		if strings.HasPrefix(c, "-I") && strings.Contains(c, "DROP") {
+			t.Fatalf("unconfined resume must get no drop rule, got %v", *calls)
+		}
+	}
+	if h.vms["dock-1"].egressGateway != "" {
+		t.Fatal("unconfined resume must not use the proxy")
+	}
+}
+
+func TestContainerSnapshotLoadConfinement(t *testing.T) {
+	ctx := context.Background()
+	h, _, _, _ := testContainerHost(t)
+	if _, err := h.Provision(ctx, "dock-1", resSmall, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	snap, _, _, err := h.SnapshotCreate(ctx, "dock-1", nil, "full", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.fastSpecs["dock-1"] = fastSpec{token: "tok", workspace: "/home/user/work", egress: []string{"github.com"}}
+	if _, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap); err == nil || !strings.Contains(err.Error(), "egress proxy not configured") {
+		t.Fatalf("confined container resume without a proxy must fail, err=%v", err)
+	}
+	h.cfg.Egress = egress.New()
+	h.cfg.EgressPort = 3128
+	if _, err := h.SnapshotLoad(ctx, "dock-1", resSmall, snap); err != nil {
+		t.Fatal(err)
+	}
+	if h.vms["dock-1"].egressGateway == "" {
+		t.Fatal("resumed container must be confined")
 	}
 }
