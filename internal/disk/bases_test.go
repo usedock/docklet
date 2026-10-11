@@ -179,3 +179,109 @@ func TestListBasesIncludesAnUnmigratedPlainBase(t *testing.T) {
 		t.Fatalf("listed = %v, want the plain current base %s", listed, fp)
 	}
 }
+
+func TestBaseSourceNamesTheDockyardImage(t *testing.T) {
+	pointer := filepath.Join(t.TempDir(), "base.ext4")
+	pulled := installBase(t, pointer, 1)
+	built := installBase(t, pointer, 2)
+	if err := RecordBaseSource(pointer, pulled, "ubuntu-24.04", "2026.10"); err != nil {
+		t.Fatal(err)
+	}
+	if got := BaseSourceName(pointer, pulled); got != "ubuntu-24.04" {
+		t.Fatalf("pulled base source = %q", got)
+	}
+	// A base built on the host has no Dockyard source.
+	if got := BaseSourceName(pointer, built); got != "" {
+		t.Fatalf("host-built base source = %q, want empty", got)
+	}
+	if got := BaseSourceName(pointer, "not-a-fingerprint"); got != "" {
+		t.Fatalf("invalid fingerprint source = %q", got)
+	}
+	if err := RecordBaseSource(pointer, "../x", "n", ""); err == nil {
+		t.Fatal("an invalid fingerprint must be refused")
+	}
+}
+
+func TestBaseSourceFallsBackToImageRecords(t *testing.T) {
+	// A base pulled before sources were recorded is still named by images/<name>/image.json.
+	pointer := filepath.Join(t.TempDir(), "base.ext4")
+	fp := installBase(t, pointer, 3)
+	dir := filepath.Join(filepath.Dir(pointer), "images", "node-22")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "image.json"), []byte(`{"name":"node-22","fingerprint":"`+fp+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := BaseSourceName(pointer, fp); got != "node-22" {
+		t.Fatalf("source = %q, want node-22", got)
+	}
+}
+
+func TestDockImageFollowsTheLabelThenTheCurrentBase(t *testing.T) {
+	pointer := filepath.Join(t.TempDir(), "base.ext4")
+	pulled := installBase(t, pointer, 1)
+	built := installBase(t, pointer, 2)
+	if err := RecordBaseSource(pointer, pulled, "ubuntu-24.04", ""); err != nil {
+		t.Fatal(err)
+	}
+	rootfs := filepath.Join(t.TempDir(), "rootfs.ext4")
+
+	if err := SetCurrentBase(pointer, built); err != nil {
+		t.Fatal(err)
+	}
+	if got := DockImage(pointer, rootfs); got != "" {
+		t.Fatalf("unlabeled dock on a host-built current base = %q, want empty", got)
+	}
+	// The label wins over the current base, so a newer default never relabels an old dock.
+	if err := LabelBase(rootfs, pulled); err != nil {
+		t.Fatal(err)
+	}
+	if got := DockImage(pointer, rootfs); got != "ubuntu-24.04" {
+		t.Fatalf("labeled dock = %q", got)
+	}
+	if err := LabelBase(rootfs, built); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetCurrentBase(pointer, pulled); err != nil {
+		t.Fatal(err)
+	}
+	if got := DockImage(pointer, rootfs); got != "" {
+		t.Fatalf("dock labeled with a host-built base = %q, want empty", got)
+	}
+	// An unlabeled dock follows the current base.
+	_ = os.Remove(rootfs + baseLabelSuffix)
+	if got := DockImage(pointer, rootfs); got != "ubuntu-24.04" {
+		t.Fatalf("unlabeled dock on the pulled current base = %q", got)
+	}
+}
+
+func TestImageFingerprintResolvesNamedAndDefaultImages(t *testing.T) {
+	pointer := filepath.Join(t.TempDir(), "base.ext4")
+	def := installBase(t, pointer, 1)
+	named := installBase(t, pointer, 2)
+	if err := RecordBaseSource(pointer, def, "ubuntu-24.04", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetCurrentBase(pointer, def); err != nil {
+		t.Fatal(err)
+	}
+	imgDir := filepath.Join(filepath.Dir(pointer), "images", "node-22")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "..", BasesDir, named, baseFile), filepath.Join(imgDir, baseFile)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if got := ImageFingerprint(pointer, "node-22"); got != named {
+		t.Fatalf("node-22 = %q, want %q", got, named)
+	}
+	if got := ImageFingerprint(pointer, "ubuntu-24.04"); got != def {
+		t.Fatalf("ubuntu-24.04 = %q, want the current base %q", got, def)
+	}
+	for _, name := range []string{"", "python-3.12", "../x"} {
+		if got := ImageFingerprint(pointer, name); got != "" {
+			t.Fatalf("%q = %q, want empty", name, got)
+		}
+	}
+}

@@ -278,12 +278,8 @@ func main() {
 	// The fleet agent is the only outbound client: it registers this host,
 	// heartbeats inventory, and relays queued commands into the loopback API.
 	if fleetURL := os.Getenv("DOCKLET_FLEET_URL"); fleetURL != "" {
-		var features []string
-		if egressPort > 0 {
-			features = apiv1.DockletFeatures
-		}
 		fleet := agent.Config{
-			Features:         features,
+			Features:         registerFeatures(egressPort > 0, isMicroVM),
 			FleetURL:         fleetURL,
 			Token:            os.Getenv("DOCKLET_FLEET_TOKEN"),
 			Auth:             fleetAuth,
@@ -440,4 +436,17 @@ func serveEgress(l net.Listener, h http.Handler, fatal func(format string, args 
 		return
 	}
 	fatal("docklet: egress proxy stopped, confined guests lose egress: %v", err)
+}
+
+// registerFeatures is what the host advertises at registration: egress-on-resume needs the egress
+// proxy, verified-imports a microvm host (uploaded disks are whole ext4 images).
+func registerFeatures(egressProxy, microVM bool) []string {
+	var features []string
+	if egressProxy {
+		features = append(features, apiv1.DockletFeatures...)
+	}
+	if microVM {
+		features = append(features, apiv1.FeatureVerifiedImports)
+	}
+	return features
 }

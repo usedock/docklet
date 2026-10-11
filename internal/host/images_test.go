@@ -215,14 +215,15 @@ func TestPullRefusesUnverified(t *testing.T) {
 	}
 }
 
-func TestPullRefusesUnknownAndDefault(t *testing.T) {
+func TestPullRefusesUnknownAndUnlisted(t *testing.T) {
 	p := newRelease(t, "node-22", rawImage()).puller(t.TempDir())
 	ctx := context.Background()
 	if _, err := p.Pull(ctx, "python-3.12"); !errors.Is(err, ErrImageNotInCatalog) {
 		t.Fatalf("unknown image err = %v", err)
 	}
-	if _, err := p.Pull(ctx, apiv1.DefaultImage); err == nil {
-		t.Fatal("the host-built base must not be pulled over")
+	// The default image is pullable now, but only when the release lists it.
+	if _, err := p.Pull(ctx, apiv1.DefaultImage); !errors.Is(err, ErrImageNotInCatalog) {
+		t.Fatalf("default image missing from the release err = %v, want not in catalog", err)
 	}
 	if _, err := p.Pull(ctx, "../evil"); err == nil {
 		t.Fatal("a path-like name must be refused")
@@ -407,5 +408,101 @@ func TestPullWaitsForTheNameLock(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("pull did not proceed after the lock was released")
+	}
+}
+
+func TestPullDefaultImageOnAFreshHostBecomesTheBase(t *testing.T) {
+	raw := rawImage()
+	dir := t.TempDir()
+	withImageDir(t, dir)
+	rel := newRelease(t, apiv1.DefaultImage, raw)
+	for i := 0; i < 2; i++ { // pulling again is a no-op
+		img, err := rel.puller(dir).Pull(context.Background(), apiv1.DefaultImage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if img.Name != apiv1.DefaultImage || img.Fingerprint != sum(raw) {
+			t.Fatalf("pulled = %+v", img)
+		}
+	}
+	pointer := filepath.Join(dir, "base.ext4")
+	if got, err := os.ReadFile(pointer); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("base.ext4 does not serve the pulled image (err %v)", err)
+	}
+	if _, fp, err := disk.CurrentBase(pointer); err != nil || fp != sum(raw) {
+		t.Fatalf("current base = %q, %v; want %s", fp, err, sum(raw))
+	}
+	// Docks of it report the Dockyard image they run.
+	if got := disk.BaseSourceName(pointer, sum(raw)); got != apiv1.DefaultImage {
+		t.Fatalf("base source = %q, want %s", got, apiv1.DefaultImage)
+	}
+	// The default image is served through base.ext4 itself: no second named pointer.
+	if _, err := os.Lstat(imagePointer(dir, apiv1.DefaultImage)); !os.IsNotExist(err) {
+		t.Fatalf("default image got its own pointer: %v", err)
+	}
+	if got := ServedImages(dir); !reflect.DeepEqual(got, []string{apiv1.DefaultImage}) {
+		t.Fatalf("ServedImages = %v", got)
+	}
+	if got := ListInstalled(dir); len(got) != 0 {
+		t.Fatalf("ListInstalled = %+v, the default is not a named pull", got)
+	}
+	if got, err := ResolveImage(""); err != nil || got != apiv1.DefaultImage {
+		t.Fatalf("ResolveImage = %q, %v", got, err)
+	}
+}
+
+func TestPullDefaultImageKeepsAHostBuiltBaseHeld(t *testing.T) {
+	dir := t.TempDir()
+	withImageDir(t, dir)
+	// An existing host: a plain base.ext4 some delta generations were built against.
+	built := append(bytes.Clone(rawImage()), "host-built"...)
+	pointer := filepath.Join(dir, "base.ext4")
+	if err := os.WriteFile(pointer, built, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old, err := disk.Fingerprint(pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := rawImage()
+	if _, err := newRelease(t, apiv1.DefaultImage, raw).puller(dir).Pull(context.Background(), apiv1.DefaultImage); err != nil {
+		t.Fatal(err)
+	}
+	if _, fp, err := disk.CurrentBase(pointer); err != nil || fp != sum(raw) {
+		t.Fatalf("current base = %q, %v; want the pulled image", fp, err)
+	}
+	held, err := disk.FindBase(pointer, old)
+	if err != nil {
+		t.Fatalf("the host-built base must stay restorable: %v", err)
+	}
+	if got, _ := os.ReadFile(held); !bytes.Equal(got, built) {
+		t.Fatal("the held host-built base changed")
+	}
+	// Heartbeat fingerprints list both bases.
+	fps, err := disk.ListBases(pointer)
+	if err != nil || !reflect.DeepEqual(fps, sortedStrings(old, sum(raw))) {
+		t.Fatalf("ListBases = %v, %v", fps, err)
+	}
+	// The host-built base has no Dockyard source, the pulled one does.
+	if got := disk.BaseSourceName(pointer, old); got != "" {
+		t.Fatalf("host-built base source = %q", got)
+	}
+}
+
+func sortedStrings(a, b string) []string {
+	if a > b {
+		a, b = b, a
+	}
+	return []string{a, b}
+}
+
+func TestPullNamedImageRecordsItsSource(t *testing.T) {
+	raw := rawImage()
+	dir := t.TempDir()
+	if _, err := newRelease(t, "node-22", raw).puller(dir).Pull(context.Background(), "node-22"); err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.BaseSourceName(filepath.Join(dir, "base.ext4"), sum(raw)); got != "node-22" {
+		t.Fatalf("base source = %q, want node-22", got)
 	}
 }

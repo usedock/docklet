@@ -8,6 +8,11 @@ import "encoding/json"
 // DockletFeatures is what this build advertises at registration; the control plane gates behaviour on it.
 var DockletFeatures = []string{"egress-on-resume"}
 
+// FeatureVerifiedImports is advertised by microvm hosts that restore an uploaded whole disk (a
+// manifest with no cpuFamily): sha256 required, unpacked size capped at the dock's diskGiB.
+// Older hosts refuse such a generation, so the control plane places imports only on these.
+const FeatureVerifiedImports = "verified-imports"
+
 // APIVersion is the docklet contract version served under /v1/*.
 const APIVersion = "v1"
 
@@ -80,12 +85,15 @@ const (
 // and have proven fatal to the snapshotted VM on this stack, so the default
 // flows leave them off.
 type SnapshotCreateRequest struct {
-	DockID           string       `json:"dockId"`
-	ParentID         *string      `json:"parentId"`
-	Kind             SnapshotKind `json:"kind"`
-	ResumeAfter      bool         `json:"resumeAfter"`
-	Memory           bool         `json:"memory"`
-	IdempotencyToken string       `json:"idempotencyToken"`
+	DockID      string       `json:"dockId"`
+	ParentID    *string      `json:"parentId"`
+	Kind        SnapshotKind `json:"kind"`
+	ResumeAfter bool         `json:"resumeAfter"`
+	Memory      bool         `json:"memory"`
+	// Full writes the whole rootfs.ext4.zst (never a delta) and records its sha256 and size, so the
+	// generation can move to another host or context. Microvm hosts only.
+	Full             bool   `json:"full,omitempty"`
+	IdempotencyToken string `json:"idempotencyToken"`
 }
 
 // SnapshotCreateResponse identifies the stored generation.
@@ -96,6 +104,11 @@ type SnapshotCreateResponse struct {
 	// BaseFingerprint names the base image a microvm delta generation restores
 	// onto; empty for gvisor and whole-image generations.
 	BaseFingerprint string `json:"baseFingerprint,omitempty"`
+	// SHA256 is the hex digest of the stored rootfs.ext4.zst object; set for Full requests only.
+	SHA256 string `json:"sha256,omitempty"`
+	// BaseImage names the Dockyard image the dock's base came from; empty when the base was built
+	// on the host (or the request was not Full).
+	BaseImage string `json:"baseImage,omitempty"`
 }
 
 // SnapshotLoadRequest restores a generation onto a fresh microVM at the

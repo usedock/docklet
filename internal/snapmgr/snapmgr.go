@@ -104,6 +104,40 @@ func (c *Coordinator) FreezeRootfs(ctx context.Context, dockID, rootfsSrc, snaps
 	return manifest, nil
 }
 
+// FreezeRootfsFull pins the dock rootfs as a whole image, never a delta: the
+// object is rootfs.ext4.zst and the manifest carries its sha256 and size, so it
+// can leave this host (dock pull) and be verified wherever it lands. Image names
+// the Dockyard image the dock's base came from, empty for a host-built base.
+// The local copy is dropped after upload: an export is a one-off, not a resume.
+func (c *Coordinator) FreezeRootfsFull(ctx context.Context, dockID, rootfsSrc, snapshotID, kind, cpuFamily string, parentID *string) (store.Manifest, error) {
+	genPath := filepath.Join(c.GensDir, snapshotID, "rootfs.ext4")
+	defer func() { _ = os.RemoveAll(filepath.Dir(genPath)) }()
+	if err := disk.Freeze(c.Runner, rootfsSrc, genPath); err != nil {
+		return store.Manifest{}, err
+	}
+	entry, err := store.PutFileCompressed(ctx, c.Store, snapshotID, "rootfs.ext4", genPath, c.GensDir)
+	if err != nil {
+		return store.Manifest{}, err
+	}
+	manifest := store.Manifest{
+		SnapshotID: snapshotID,
+		DockID:     dockID,
+		ParentID:   parentID,
+		Kind:       kind,
+		CPUFamily:  cpuFamily,
+		Files:      []store.FileEntry{entry},
+		SHA256:     entry.SHA256,
+		SizeBytes:  entry.Size,
+	}
+	if c.BaseImage != "" {
+		manifest.Image = disk.DockImage(c.BaseImage, rootfsSrc)
+	}
+	if err := store.PutManifest(ctx, c.Store, manifest); err != nil {
+		return store.Manifest{}, err
+	}
+	return manifest, nil
+}
+
 // baseFor picks the base a dock's capture diffs against: the one its rootfs
 // derives from while the host still holds it, so a newer current image never
 // turns a small delta into a whole-disk one; else the current base.
@@ -236,6 +270,14 @@ func (c *Coordinator) PrepareResume(ctx context.Context, snapshotID string) (str
 // dock changed. A missing base fails with disk.ErrBaseUnavailable before any
 // download. A legacy whole-image generation is downloaded as before.
 func (c *Coordinator) MaterializeDisk(ctx context.Context, snapshotID, dest string) error {
+	return c.MaterializeDiskWithin(ctx, snapshotID, dest, 0)
+}
+
+// MaterializeDiskWithin is MaterializeDisk for a dock of at most maxDisk bytes (0 when unknown).
+//
+// An imported generation (source "import": a disk a user uploaded) must carry the manifest-level
+// sha256 and sizeBytes and may not unpack past maxDisk, so a small upload cannot fill the host.
+func (c *Coordinator) MaterializeDiskWithin(ctx context.Context, snapshotID, dest string, maxDisk int64) error {
 	manifest, err := store.GetManifest(ctx, c.Store, snapshotID)
 	if err != nil {
 		return err
@@ -247,8 +289,44 @@ func (c *Coordinator) MaterializeDisk(ctx context.Context, snapshotID, dest stri
 	if err != nil {
 		return err
 	}
+	wholeExt4 := entry.Path == "rootfs.ext4.zst" || entry.Path == "rootfs.ext4"
+	imported := manifest.Source == store.SourceImport
+	if imported && (!wholeExt4 || manifest.SHA256 == "" || manifest.SizeBytes <= 0) {
+		return fmt.Errorf("generation %s refused: an imported disk needs a whole rootfs.ext4 with manifest sha256 and sizeBytes", snapshotID)
+	}
 	if entry.Path != "rootfs.delta.zst" && entry.Path != "rootfs.delta" {
-		return store.GetFileAuto(ctx, c.Store, snapshotID, entry, dest)
+		entry, err = verifiedEntry(manifest, entry)
+		if err != nil {
+			return fmt.Errorf("generation %s refused: %w", snapshotID, err)
+		}
+		// A generation that names a Dockyard image was written after checksums existed: a missing
+		// sha256 means tampering, not a legacy capture.
+		if manifest.Image != "" && entry.SHA256 == "" {
+			return fmt.Errorf("generation %s refused: whole image without a sha256", snapshotID)
+		}
+		// A host capture unpacks to the size it recorded; an upload to at most the dock's disk.
+		limit := entry.RawSize
+		if imported {
+			if maxDisk <= 0 {
+				return fmt.Errorf("generation %s refused: an imported disk needs the dock's disk size", snapshotID)
+			}
+			limit = maxDisk
+		}
+		if err := store.GetFileAutoLimit(ctx, c.Store, snapshotID, entry, dest, limit); err != nil {
+			return fmt.Errorf("generation %s: %w", snapshotID, err)
+		}
+		if c.BaseImage == "" || !wholeExt4 {
+			return nil
+		}
+		// Label the disk with the held base of the Dockyard image the manifest names, so later
+		// captures report that image and diff against it. Otherwise mark it unknown: the current
+		// base says nothing about where a whole image came from.
+		if manifest.Image != "" {
+			if fp := disk.ImageFingerprint(c.BaseImage, manifest.Image); fp != "" {
+				return disk.LabelBase(dest, fp)
+			}
+		}
+		return disk.LabelUnknownBase(dest)
 	}
 	if c.BaseImage == "" {
 		return fmt.Errorf("generation %s needs a base image to rebuild onto, but none is configured", snapshotID)
@@ -292,4 +370,48 @@ func findRootfs(manifest store.Manifest) (store.FileEntry, error) {
 func (c *Coordinator) Prune(ctx context.Context, snapshotID string) error {
 	_ = os.RemoveAll(filepath.Join(c.GensDir, snapshotID))
 	return c.Store.Delete(ctx, snapshotID)
+}
+
+// verifiedEntry folds the manifest's whole-image sha256 and size into the file
+// entry GetFileAuto checks, so a tampered or truncated object is refused and
+// no partial disk is left. A manifest that records neither (a legacy
+// generation) is restored as before. Manifest and entry values that disagree
+// are refused outright.
+func verifiedEntry(manifest store.Manifest, entry store.FileEntry) (store.FileEntry, error) {
+	if entry.Encoding == "" && strings.HasSuffix(entry.Path, ".zst") {
+		entry.Encoding = store.EncodingZstd
+	}
+	if manifest.SHA256 != "" {
+		want := strings.ToLower(manifest.SHA256)
+		if entry.SHA256 != "" && !strings.EqualFold(entry.SHA256, want) {
+			return entry, fmt.Errorf("manifest sha256 %s disagrees with its file entry %s", manifest.SHA256, entry.SHA256)
+		}
+		entry.SHA256 = want
+	}
+	if manifest.SizeBytes > 0 {
+		if entry.Size > 0 && entry.Size != manifest.SizeBytes {
+			return entry, fmt.Errorf("manifest sizeBytes %d disagrees with its file entry %d", manifest.SizeBytes, entry.Size)
+		}
+		entry.Size = manifest.SizeBytes
+	}
+	return entry, nil
+}
+
+// GenerationImage names the Dockyard image a stored generation's disk derives
+// from; empty for host-built bases, container generations or an unreadable manifest.
+func (c *Coordinator) GenerationImage(ctx context.Context, snapshotID string) string {
+	manifest, err := store.GetManifest(ctx, c.Store, snapshotID)
+	if err != nil {
+		return ""
+	}
+	return manifest.Image
+}
+
+// GenerationSHA256 is the sha256 of a stored whole-image generation's object.
+func (c *Coordinator) GenerationSHA256(ctx context.Context, snapshotID string) string {
+	manifest, err := store.GetManifest(ctx, c.Store, snapshotID)
+	if err != nil {
+		return ""
+	}
+	return manifest.SHA256
 }

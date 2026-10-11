@@ -32,17 +32,18 @@ func TestRunImageLsEmpty(t *testing.T) {
 	}
 }
 
-func TestRunImagePullRefusesBadInput(t *testing.T) {
+func TestRunImagePullRefusesBadInputAndPullsTheDefault(t *testing.T) {
 	p := host.NewPuller(t.TempDir())
-	p.IndexURL = "http://127.0.0.1:1/dockyard.json" // never reached for these names
+	p.IndexURL = "http://127.0.0.1:1/dockyard.json" // unreachable: only the default image name gets this far
 	var out, errb bytes.Buffer
 	if code := runImage([]string{"pull", "../etc"}, &out, &errb, p); code != 1 {
 		t.Fatalf("bad name exit = %d, want 1", code)
 	}
 	if code := runImage([]string{"pull", "ubuntu-24.04"}, &out, &errb, p); code != 1 {
-		t.Fatalf("default image exit = %d, want 1", code)
+		t.Fatalf("default image exit = %d, want 1 (index unreachable)", code)
 	}
-	if !strings.Contains(errb.String(), "host-built") {
+	// The default image is pullable now: it is refused only for the unreachable index, not by name.
+	if !strings.Contains(errb.String(), "fetch index") || strings.Contains(errb.String(), "host-built") {
 		t.Fatalf("stderr = %q", errb.String())
 	}
 }

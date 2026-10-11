@@ -163,9 +163,6 @@ func (p *Puller) Pull(ctx context.Context, name string) (InstalledImage, error) 
 	if !dockyard.ValidName(name) {
 		return InstalledImage{}, fmt.Errorf("invalid image name %q", name)
 	}
-	if name == apiv1.DefaultImage {
-		return InstalledImage{}, fmt.Errorf("%s is the host-built base (scripts/build-image.sh), not pulled", name)
-	}
 	if len(p.IndexSHA256) != 64 {
 		return InstalledImage{}, errors.New("no pinned index checksum, refusing to trust the index")
 	}
@@ -386,6 +383,9 @@ func (p *Puller) install(name, fp, tmp, version, arch string) error {
 	if err := os.Chmod(final, 0o644); err != nil {
 		return err
 	}
+	if err := disk.RecordBaseSource(filepath.Join(p.Dir, "base.ext4"), fp, name, version); err != nil {
+		return err
+	}
 	dir := filepath.Join(p.Dir, imagesDir, name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -396,6 +396,10 @@ func (p *Puller) install(name, fp, tmp, version, arch string) error {
 	}
 	if err := writeFileAtomic(filepath.Join(dir, "image.json"), meta); err != nil {
 		return err
+	}
+	if name == apiv1.DefaultImage {
+		// The default image is the host's current base: <images>/base.ext4 itself, not a named pointer.
+		return p.makeCurrent(fp)
 	}
 	next := filepath.Join(dir, ".base.ext4.next-"+randSuffix())
 	if err := os.Symlink(filepath.Join("..", "..", disk.BasesDir, fp, "base.ext4"), next); err != nil {
@@ -435,4 +439,27 @@ func randSuffix() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// makeCurrent points <images>/base.ext4 at the held base fp. A legacy plain
+// base.ext4 is first kept under bases/<its fingerprint> (hard link, so the
+// pointer never disappears) because delta generations name it.
+func (p *Puller) makeCurrent(fp string) error {
+	pointer := filepath.Join(p.Dir, "base.ext4")
+	if info, err := os.Lstat(pointer); err == nil && info.Mode().IsRegular() {
+		old, err := disk.Fingerprint(pointer)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(disk.BasePath(pointer, old)); err != nil {
+			held := disk.BasePath(pointer, old)
+			if err := os.MkdirAll(filepath.Dir(held), 0o755); err != nil {
+				return err
+			}
+			if err := os.Link(pointer, held); err != nil && !os.IsExist(err) {
+				return fmt.Errorf("keep the existing base: %w", err)
+			}
+		}
+	}
+	return disk.SetCurrentBase(pointer, fp)
 }

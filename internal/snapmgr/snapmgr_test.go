@@ -1,10 +1,12 @@
 package snapmgr
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -553,5 +555,383 @@ func TestFreezeRootfsCapturesADiskGrownPastTheBase(t *testing.T) {
 	}
 	if string(got) != string(want) {
 		t.Fatalf("restored %d bytes differ from the grown rootfs (%d bytes)", len(got), len(want))
+	}
+}
+
+// fullFixture returns a coordinator with a Dockyard-recorded current base and a
+// dock rootfs that differs from it by one block.
+func fullFixture(t *testing.T) (c *Coordinator, rootfs, base, fp string) {
+	t.Helper()
+	dir := t.TempDir()
+	pointer := filepath.Join(dir, "base.ext4")
+	fp = addBase(t, pointer, 7)
+	if err := disk.SetCurrentBase(pointer, fp); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := disk.RecordBaseSource(pointer, fp, "ubuntu-24.04", "2026.10"); err != nil {
+		t.Fatal(err)
+	}
+	base = disk.BasePath(pointer, fp)
+	rootfs = filepath.Join(dir, "rootfs.ext4")
+	raw, err := os.ReadFile(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[disk.BlockSize+3] ^= 0xff
+	if err := os.WriteFile(rootfs, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c = coordinator(t)
+	c.BaseImage = pointer
+	return c, rootfs, base, fp
+}
+
+func TestFreezeRootfsFullWritesAWholeChecksummedImage(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, _ := fullFixture(t)
+	manifest, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "s1", "full", "GenuineIntel:142:10", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Even with a base configured a full capture is never a delta.
+	if len(manifest.Files) != 1 || manifest.Files[0].Path != "rootfs.ext4.zst" {
+		t.Fatalf("files = %+v, want rootfs.ext4.zst", manifest.Files)
+	}
+	if manifest.BaseFingerprint != "" {
+		t.Fatalf("a whole image must not pin a base fingerprint: %q", manifest.BaseFingerprint)
+	}
+	rc, err := c.Store.Get(ctx, "s1", "rootfs.ext4.zst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	sum := sha256.Sum256(stored)
+	if manifest.SHA256 != hex.EncodeToString(sum[:]) || manifest.SizeBytes != int64(len(stored)) {
+		t.Fatalf("manifest sha256/size = %s/%d, stored object is %x/%d", manifest.SHA256, manifest.SizeBytes, sum, len(stored))
+	}
+	// The persisted manifest carries the same fields (what the control plane reads).
+	persisted, err := store.GetManifest(ctx, c.Store, "s1")
+	if err != nil || persisted.SHA256 != manifest.SHA256 || persisted.SizeBytes != manifest.SizeBytes {
+		t.Fatalf("persisted manifest = %+v, %v", persisted, err)
+	}
+	if c.GenerationSHA256(ctx, "s1") != manifest.SHA256 {
+		t.Fatal("GenerationSHA256 disagrees with the manifest")
+	}
+	if _, err := os.Stat(filepath.Join(c.GensDir, "s1", "rootfs.ext4")); !os.IsNotExist(err) {
+		t.Fatalf("the local copy of an export must be dropped: %v", err)
+	}
+	// It restores to exactly the dock's disk.
+	restored := filepath.Join(t.TempDir(), "restored.ext4")
+	if err := c.MaterializeDisk(ctx, "s1", restored); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(rootfs)
+	got, _ := os.ReadFile(restored)
+	if !bytes.Equal(got, want) {
+		t.Fatal("restored disk differs from the dock disk")
+	}
+}
+
+func TestFreezeRootfsFullReportsTheDockyardBaseImage(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, _ := fullFixture(t)
+	manifest, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "s1", "full", "GenuineIntel:142:10", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Image != "ubuntu-24.04" || c.GenerationImage(ctx, "s1") != "ubuntu-24.04" {
+		t.Fatalf("image = %q / %q, want ubuntu-24.04", manifest.Image, c.GenerationImage(ctx, "s1"))
+	}
+	// A dock labeled with a base the host built itself reports none.
+	built := addBase(t, c.BaseImage, 9)
+	if err := disk.LabelBase(rootfs, built); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err = c.FreezeRootfsFull(ctx, "d1", rootfs, "s2", "full", "GenuineIntel:142:10", nil)
+	if err != nil || manifest.Image != "" {
+		t.Fatalf("host-built base image = %q, %v; want empty", manifest.Image, err)
+	}
+	// No base configured at all (whole-image host): nothing to report, still checksummed.
+	bare := coordinator(t)
+	manifest, err = bare.FreezeRootfsFull(ctx, "d1", rootfs, "s3", "full", "GenuineIntel:142:10", nil)
+	if err != nil || manifest.Image != "" || manifest.SHA256 == "" {
+		t.Fatalf("no-base capture = %+v, %v", manifest, err)
+	}
+}
+
+// tamper rewrites the stored object of a snapshot with flipped bytes of the same length.
+func tamper(t *testing.T, c *Coordinator, snapshotID, name string) {
+	t.Helper()
+	ctx := context.Background()
+	rc, err := c.Store.Get(ctx, snapshotID, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	raw[len(raw)/2] ^= 0x55
+	if err := c.Store.Put(ctx, snapshotID, name, bytes.NewReader(raw), int64(len(raw))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializeDiskRefusesATamperedWholeImage(t *testing.T) {
+	ctx := context.Background()
+	c, rootfs, _, _ := fullFixture(t)
+	if _, err := c.FreezeRootfsFull(ctx, "d1", rootfs, "s1", "full", "GenuineIntel:142:10", nil); err != nil {
+		t.Fatal(err)
+	}
+	tamper(t, c, "s1", "rootfs.ext4.zst")
+	dest := filepath.Join(t.TempDir(), "restored.ext4")
+	err := c.MaterializeDisk(ctx, "s1", dest)
+	if err == nil {
+		t.Fatalf("err = %v, want a refusal of the tampered object", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused restore left a disk behind: %v", statErr)
+	}
+	if leftovers, _ := filepath.Glob(dest + "*"); len(leftovers) != 0 {
+		t.Fatalf("temp files left behind: %v", leftovers)
+	}
+}
+
+func writeTemp(t *testing.T, b []byte) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "src")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// controlPlaneManifest writes a whole-image manifest the way an import does: only the
+// manifest-level sha256/sizeBytes/image and a bare file entry.
+func controlPlaneManifest(t *testing.T, c *Coordinator, snapshotID string, mutate func(*store.Manifest)) {
+	t.Helper()
+	ctx := context.Background()
+	entry, err := store.PutFileCompressed(ctx, c.Store, snapshotID, "rootfs.ext4", writeTemp(t, []byte("imported-disk")), c.GensDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := store.Manifest{
+		SnapshotID: snapshotID, DockID: "d1", Kind: "full", CPUFamily: "GenuineIntel:142:10",
+		Files:  []store.FileEntry{{Path: entry.Path}},
+		SHA256: entry.SHA256, SizeBytes: entry.Size, Image: "ubuntu-24.04",
+	}
+	mutate(&m)
+	if err := store.PutManifest(ctx, c.Store, m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializeDiskVerifiesManifestLevelChecksum(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+
+	t.Run("good", func(t *testing.T) {
+		controlPlaneManifest(t, c, "good", func(*store.Manifest) {})
+		dest := filepath.Join(t.TempDir(), "restored.ext4")
+		if err := c.MaterializeDisk(ctx, "good", dest); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(dest); string(got) != "imported-disk" {
+			t.Fatalf("restored = %q", got)
+		}
+	})
+	t.Run("wrong sha256", func(t *testing.T) {
+		controlPlaneManifest(t, c, "badsum", func(m *store.Manifest) { m.SHA256 = strings.Repeat("ab", 32) })
+		d := filepath.Join(t.TempDir(), "r.ext4")
+		if err := c.MaterializeDisk(ctx, "badsum", d); err == nil || !strings.Contains(err.Error(), "sha256") {
+			t.Fatalf("err = %v, want a sha256 refusal", err)
+		}
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Fatalf("partial disk left: %v", err)
+		}
+	})
+	t.Run("wrong size", func(t *testing.T) {
+		controlPlaneManifest(t, c, "badsize", func(m *store.Manifest) { m.SizeBytes++ })
+		d := filepath.Join(t.TempDir(), "r.ext4")
+		if err := c.MaterializeDisk(ctx, "badsize", d); err == nil {
+			t.Fatal("a size mismatch must be refused")
+		}
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Fatalf("partial disk left: %v", err)
+		}
+	})
+	t.Run("manifest disagrees with its entry", func(t *testing.T) {
+		controlPlaneManifest(t, c, "conflict", func(m *store.Manifest) {
+			m.Files[0].SHA256 = strings.Repeat("cd", 32)
+		})
+		if err := c.MaterializeDisk(ctx, "conflict", filepath.Join(t.TempDir(), "r.ext4")); err == nil || !strings.Contains(err.Error(), "disagrees") {
+			t.Fatalf("err = %v, want a disagreement refusal", err)
+		}
+	})
+	t.Run("no checksum restores as before", func(t *testing.T) {
+		// Legacy generations record neither value at manifest level: nothing to verify.
+		controlPlaneManifest(t, c, "legacy", func(m *store.Manifest) { m.SHA256, m.SizeBytes, m.Image = "", 0, "" })
+		rc, err := c.Store.Get(ctx, "legacy", "rootfs.ext4.zst")
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		m, _ := store.GetManifest(ctx, c.Store, "legacy")
+		m.Files[0].Size = int64(len(raw))
+		if err := store.PutManifest(ctx, c.Store, m); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.MaterializeDisk(ctx, "legacy", filepath.Join(t.TempDir(), "r.ext4")); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestMaterializeDiskLabelsAnImportedDiskWithItsDockyardBase(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, fp := fullFixture(t)
+	controlPlaneManifest(t, c, "imp", func(*store.Manifest) {})
+	dest := filepath.Join(t.TempDir(), "restored.ext4")
+	if err := c.MaterializeDisk(ctx, "imp", dest); err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.BaseLabel(dest); got != fp {
+		t.Fatalf("label = %q, want the held ubuntu-24.04 base %q", got, fp)
+	}
+	if got := disk.DockImage(c.BaseImage, dest); got != "ubuntu-24.04" {
+		t.Fatalf("dock image = %q", got)
+	}
+}
+
+// importedManifest stores raw as the control plane records a dock push (dock#122): source import,
+// manifest-level sha256/sizeBytes/image, the entry's sha256 and size, and the cpuFamily of the host
+// it placed the import on.
+func importedManifest(t *testing.T, c *Coordinator, snapshotID string, raw []byte, mutate func(*store.Manifest)) {
+	t.Helper()
+	ctx := context.Background()
+	entry, err := store.PutFileCompressed(ctx, c.Store, snapshotID, "rootfs.ext4", writeTemp(t, raw), c.GensDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := store.Manifest{
+		SnapshotID: snapshotID, DockID: "imp_1", Kind: "full", CPUFamily: c.HostFamily, Image: "ubuntu-24.04",
+		Source: store.SourceImport, SHA256: entry.SHA256, SizeBytes: entry.Size,
+		Files: []store.FileEntry{{Path: entry.Path, Size: entry.Size, Encoding: store.EncodingZstd, SHA256: entry.SHA256}},
+	}
+	mutate(&m)
+	if err := store.PutManifest(ctx, c.Store, m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializeDiskRestoresAnImportedDisk(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	importedManifest(t, c, "up", []byte("uploaded-disk"), func(*store.Manifest) {})
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDiskWithin(ctx, "up", dest, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "uploaded-disk" {
+		t.Fatalf("restored = %q", got)
+	}
+	// The CPU family check stays: the control plane writes the placed host's family.
+	importedManifest(t, c, "other", []byte("x"), func(m *store.Manifest) { m.CPUFamily = "AuthenticAMD:1:1" })
+	var inc *ErrIncompatible
+	if err := c.MaterializeDiskWithin(ctx, "other", filepath.Join(t.TempDir(), "r"), 1<<30); !errors.As(err, &inc) {
+		t.Fatalf("err = %v, want ErrIncompatible", err)
+	}
+}
+
+func TestMaterializeDiskRefusesAnImportWithoutManifestChecksumOrSize(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	for name, mutate := range map[string]func(*store.Manifest){
+		"no sha256":    func(m *store.Manifest) { m.SHA256 = "" },
+		"no sizeBytes": func(m *store.Manifest) { m.SizeBytes = 0 },
+		// The entry still carries both: an import is judged by its manifest-level fields alone.
+		"neither": func(m *store.Manifest) { m.SHA256, m.SizeBytes = "", 0 },
+		"a delta": func(m *store.Manifest) { m.Files[0].Path = "rootfs.delta.zst" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			importedManifest(t, c, "bad", []byte("uploaded-disk"), mutate)
+			dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+			if err := c.MaterializeDiskWithin(ctx, "bad", dest, 1<<30); err == nil || !strings.Contains(err.Error(), "imported disk") {
+				t.Fatalf("err = %v, want an import refusal", err)
+			}
+			if _, err := os.Stat(dest); !os.IsNotExist(err) {
+				t.Fatalf("a refused import left a disk: %v", err)
+			}
+		})
+	}
+	// A generation naming a Dockyard image is never legacy either.
+	importedManifest(t, c, "named", []byte("d"), func(m *store.Manifest) {
+		m.Source, m.SHA256, m.SizeBytes, m.Files[0].SHA256 = "", "", 0, ""
+	})
+	if err := c.MaterializeDisk(ctx, "named", filepath.Join(t.TempDir(), "r")); err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("err = %v, want a refusal of an image-named generation without a sha256", err)
+	}
+}
+
+func TestMaterializeDiskCapsAnImportAtTheDockDisk(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	// 4 MiB of zeros compresses to a few hundred bytes: the upload must not unpack past the dock.
+	importedManifest(t, c, "bomb", make([]byte, 4<<20), func(*store.Manifest) {})
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "rootfs.ext4")
+	if err := c.MaterializeDiskWithin(ctx, "bomb", dest, 1<<20); !errors.Is(err, store.ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Fatalf("a refused import left files: %v", left)
+	}
+	// Without the dock's size there is nothing to hold it to.
+	if err := c.MaterializeDisk(ctx, "bomb", dest); err == nil {
+		t.Fatal("an import restored without a size limit")
+	}
+	// Exactly the dock's size is fine.
+	if err := c.MaterializeDiskWithin(ctx, "bomb", dest, 4<<20); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMaterializeDiskHoldsAHostCaptureToItsRecordedRawSize(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	importedManifest(t, c, "host", make([]byte, 1<<20), func(m *store.Manifest) {
+		m.Source, m.Image = "", ""
+		m.Files[0].RawSize = 1 << 10 // a lying manifest: the object unpacks far past it
+	})
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDisk(ctx, "host", dest); !errors.Is(err, store.ErrTooLarge) {
+		t.Fatalf("err = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestMaterializeDiskMarksAWholeImageFromAnUnheldImageUnknown(t *testing.T) {
+	ctx := context.Background()
+	// The current base is the Dockyard ubuntu-24.04, but the import says node-22, which this host lacks.
+	c, _, _, _ := fullFixture(t)
+	importedManifest(t, c, "node", []byte("node-disk"), func(m *store.Manifest) { m.Image = "node-22" })
+	dest := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDiskWithin(ctx, "node", dest, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.DockImage(c.BaseImage, dest); got != "" {
+		t.Fatalf("dock image = %q, want empty (export_base_unsupported), never the current base", got)
+	}
+	m, err := c.FreezeRootfsFull(ctx, "d1", dest, "again", "full", c.HostFamily, nil)
+	if err != nil || m.Image != "" {
+		t.Fatalf("recapture image = %q, %v", m.Image, err)
+	}
+	// A host-written whole image that names no image is just as unknown.
+	importedManifest(t, c, "built", []byte("built-disk"), func(m *store.Manifest) { m.Source, m.Image = "", "" })
+	dest2 := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := c.MaterializeDisk(ctx, "built", dest2); err != nil {
+		t.Fatal(err)
+	}
+	if got := disk.DockImage(c.BaseImage, dest2); got != "" {
+		t.Fatalf("dock image = %q, want empty", got)
 	}
 }

@@ -55,6 +55,8 @@ REBUILD_IMAGE="${DOCKLET_REBUILD_IMAGE:-0}"
 # raw image: installs the fleet's one image instead of building a local one.
 BASE_IMAGE="${DOCKLET_BASE_IMAGE:-}"
 BASE_IMAGE_SHA256="${DOCKLET_BASE_IMAGE_SHA256:-}"
+# Build the base on the host (build-image.sh) instead of pulling Dockyard ubuntu-24.04.
+export DOCKLET_BUILD_BASE="${DOCKLET_BUILD_BASE:-0}"
 # MicroVM jails (microvm): deliberately under the state dir. The driver hard-links
 # the guest kernel from IMAGE_DIR into each jail root, so both must share one
 # filesystem, and reflink provisioning needs the same.
@@ -87,11 +89,13 @@ Usage: bootstrap-host.sh --fleet-url <url> --fleet-token <token>
                          [--pool-size N] [--egress-allow-private CIDRS]
                          [--allow-vulnerable NAMES]
                          [--base-image PATH|URL --base-image-sha256 HEX]
-                         [--build-from-source]
+                         [--build-base] [--build-from-source]
 
   The docklet binary is downloaded from the GitHub release DOCKLET_VERSION, and the
   install stops unless its sha256 matches checksums.txt AND the cosign signature of
   both files verifies (cosign is installed from a pinned, checksum-checked release if missing).
+  --build-base         microvm: build the base image on this host (build-image.sh, minutes and ~20GB)
+                       instead of pulling the signed Dockyard ubuntu-24.04; also DOCKLET_BUILD_BASE=1
   --build-from-source  DEVELOPMENT ONLY: build from this checkout instead; nothing is verified
 
   --fleet-url    control plane base URL, e.g. https://api.example.com
@@ -124,8 +128,10 @@ DOCKLET_IMAGE_DIR, DOCKLET_JAIL_BASE, FC_VERSION, RUNSC_VERSION (overriding eith
 matching FC_SHA256_X86_64/FC_SHA256_AARCH64/RUNSC_SHA256_X86_64),
 DOCKLET_REBUILD_IMAGE=1 (rebuild an existing base image), READINESS_TIMEOUT.
 
-A microvm host builds the base image (base.ext4 + vmlinux + initrd.img) it boots
-through build-image.sh: several minutes and ~20GB, skipped once present. Bases
+A microvm host pulls the signed Dockyard ubuntu-24.04 as its base image (base.ext4 +
+vmlinux + initrd.img) through ensure-base.sh, and builds one with build-image.sh
+(several minutes, ~20GB) only when Dockyard is unreachable or --build-base is given;
+a base the host already holds is kept. Bases
 are content-addressed under images/bases/<sha256>/ and never deleted; a rebuild
 or --base-image adds one and repoints images/base.ext4.
 USAGE
@@ -212,6 +218,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --base-image-sha256=*)
       BASE_IMAGE_SHA256="${1#*=}"
+      shift
+      ;;
+    --build-base)
+      DOCKLET_BUILD_BASE=1
       shift
       ;;
     --build-from-source)
@@ -702,32 +712,18 @@ built_image_inputs() {
 }
 
 # The golden image is what a microVM boots: without it every provision fails.
-# build-image.sh derives the guest kernel from the running host kernel, so the
-# kernel release it was built for is stamped next to it and a mismatch is
-# reported rather than silently rebuilt (that build is minutes and ~20GB).
+# ensure-base.sh keeps an existing base, else pulls Dockyard ubuntu-24.04, else builds one
+# (build-image.sh derives the guest kernel from the host kernel; its release is stamped
+# beside the image and a mismatch is reported rather than silently rebuilt).
 build_microvm_image() {
-  local stamp="${IMAGE_DIR}/.kernel-release" kernel
-  kernel="$(uname -r)"
   if [ -n "$BASE_IMAGE" ]; then
     install_prebuilt_image
     return 0
   fi
-  if [ -f "${IMAGE_DIR}/base.ext4" ] && [ -f "${IMAGE_DIR}/vmlinux" ] && [ "$REBUILD_IMAGE" != "1" ]; then
-    if [ -f "$stamp" ] && [ "$(cat "$stamp")" != "$kernel" ]; then
-      warn "golden image was built for kernel $(cat "$stamp") but this host runs ${kernel}; re-run with DOCKLET_REBUILD_IMAGE=1 to rebuild"
-    fi
-    log "golden image already present in ${IMAGE_DIR}; skipping the build (DOCKLET_REBUILD_IMAGE=1 to force)"
-    return 0
-  fi
-  [ -f "${SCRIPT_DIR}/build-image.sh" ] || die "build-image.sh missing; cannot build the golden image this host boots"
-  [ -f "${SCRIPT_DIR}/extract-vmlinux.sh" ] || die "extract-vmlinux.sh missing; build-image.sh needs it"
-  if ! command -v debootstrap >/dev/null 2>&1; then
-    ensure_packages debootstrap e2fsprogs
-  fi
-  mkdir -p "$IMAGE_DIR"
-  log "building the golden image for kernel ${kernel} (several minutes, ~20GB)"
-  OUT_DIR="$IMAGE_DIR" bash "${SCRIPT_DIR}/build-image.sh"
-  printf '%s' "$kernel" > "$stamp"
+  # Keeps a base the host already holds; else pulls the signed Dockyard ubuntu-24.04, and only
+  # when that fails (or DOCKLET_BUILD_BASE=1) builds one on the host.
+  [ -f "${SCRIPT_DIR}/ensure-base.sh" ] || die "ensure-base.sh missing; cannot set up the base image this host boots"
+  OUT_DIR="$IMAGE_DIR" DOCKLET_BIN="$DOCKLET_DEST" bash "${SCRIPT_DIR}/ensure-base.sh"
   log "golden image ready: ${IMAGE_DIR}/base.ext4 + vmlinux + initrd.img"
 }
 

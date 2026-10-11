@@ -130,9 +130,10 @@ time to install an update, change a setting, or repair a host.
    - `gvisor` → the OCI image `dock-gvisor:latest` from
      `scripts/Dockerfile.gvisor`, rebuilt when its guest agent, entrypoint, or
      Dockerfile changed (tracked by the `dev.usedock.gvisor-inputs` label);
-   - `microvm` → the microVM base image (`base.ext4` + `vmlinux` + `initrd.img`)
-     via `scripts/build-image.sh` — **minutes and ~20GB**, so it is skipped once
-     present.
+   - `microvm` → the microVM base image (`base.ext4` + `vmlinux` + `initrd.img`): the signed
+     Dockyard `ubuntu-24.04` is pulled (`scripts/ensure-base.sh`), and only when Dockyard is
+     unreachable (or `--build-base` is given) is one built with `scripts/build-image.sh` —
+     **minutes and ~20GB**. A base the host already holds is kept.
 7. Installs and starts `docklet.service`, then waits for local readiness.
 
 ### Flags
@@ -146,6 +147,7 @@ time to install an update, change a setting, or repair a host.
 | `--pool-size N` | warm pool target (see §7) |
 | `--egress-allow-private <cidrs>` | private ranges confined guests may reach through the egress proxy, e.g. a control plane on a LAN (see §8) |
 | `--allow-vulnerable <names>` | CPU vulnerabilities readiness accepts, e.g. `spec_rstack_overflow`; single-tenant or dev hosts only |
+| `--build-base` | microvm: build the base image on this host with `build-image.sh` instead of pulling Dockyard `ubuntu-24.04` (also `DOCKLET_BUILD_BASE=1`) |
 | `--base-image <path\|url>` | microvm: install this pre-built base image (a `.zst` suffix is decompressed) instead of building one; see [Base images](#base-images-one-per-fleet) |
 | `--base-image-sha256 <hex>` | sha256 of the raw image (its base fingerprint); required with `--base-image`, a mismatch refuses the install |
 
@@ -154,7 +156,7 @@ Env equivalents: `DOCKLET_FLEET_URL`, `DOCKLET_FLEET_TOKEN`, `DOCKLET_HOST_ID`,
 `DOCKLET_ALLOW_VULNERABLE`, `DOCKLET_BASE_IMAGE`, `DOCKLET_BASE_IMAGE_SHA256`.
 Installer knobs: `DOCKLET_BIN` (prebuilt binary), `DOCKLET_GVISOR_IMAGE`, `DOCKLET_IMAGE_DIR` (base image location,
 default `/var/lib/docklet/images`), `FC_VERSION`, `RUNSC_VERSION`,
-`DOCKLET_REBUILD_IMAGE=1` (rebuild an existing
+`DOCKLET_BUILD_BASE=1` (build the base on the host instead of pulling Dockyard), `DOCKLET_REBUILD_IMAGE=1` (rebuild an existing
 base image), `READINESS_TIMEOUT`.
 
 ### gVisor host
@@ -186,21 +188,29 @@ sudo bash scripts/bootstrap-host.sh \
   --runtime microvm
 ```
 
-`bootstrap-host.sh` also builds the base image the microVMs boot from
-(`/var/lib/docklet/images/{base.ext4,vmlinux,initrd.img}`) through
-`build-image.sh`, unless `--base-image` hands it the fleet's pre-built one (the
-recommended path for every host after the first, see
-[Base images](#base-images-one-per-fleet)). That step is slow — several
-minutes and ~20GB, because it debootstraps Ubuntu and installs Docker —
-so it runs only when the image is absent. Force a rebuild after a host kernel
-upgrade:
+`bootstrap-host.sh` also sets up the base image the microVMs boot from
+(`/var/lib/docklet/images/{base.ext4,vmlinux,initrd.img}`) through `scripts/ensure-base.sh`:
+
+1. a host that already holds `base.ext4` + `vmlinux` keeps it (existing hosts with a
+   host-built base are untouched on re-run);
+2. otherwise it runs `docklet image pull ubuntu-24.04` (the signed Dockyard image) and points
+   `base.ext4` at it, then stages the host kernel. Every host then holds the same base, which
+   is what lets a disk move between hosts and contexts (`dock push` / `dock pull`);
+3. if Dockyard cannot be reached (or the installed docklet predates default-image pulls) it
+   falls back to `build-image.sh`. `--build-base` / `DOCKLET_BUILD_BASE=1` skips the pull and
+   builds on the host, as does `DOCKLET_REBUILD_IMAGE=1`.
+
+`--base-image` hands it the fleet's pre-built one instead (see
+[Base images](#base-images-one-per-fleet)). The build is slow — several
+minutes and ~20GB, because it debootstraps Ubuntu and installs Docker. Force a rebuild after a
+host kernel upgrade:
 
 ```sh
 sudo DOCKLET_REBUILD_IMAGE=1 bash scripts/bootstrap-host.sh \
   --fleet-url https://dock.example.com --fleet-token "$FLEET_TOKEN" --runtime microvm
 ```
 
-The image is minimal Ubuntu 24.04 (systemd, sshd, Docker, git, curl, python3); its name is set in `scripts/image-versions.env`.
+A host-built image is minimal Ubuntu 24.04 (systemd, sshd, Docker, git, curl, python3); its name is set in `scripts/image-versions.env`.
 `build-image.sh` derives the guest kernel from the running host
 kernel (`/boot/vmlinuz-<release>` and `initrd.img-<release>` must exist) and
 stamps the release it used beside the image, so a later kernel change is reported
@@ -279,9 +289,11 @@ way; old bases stay for the generations that need them.
 
 ### Dockyard images on a microvm host
 
-A host serves `ubuntu-24.04` (its built base) plus any Dockyard image you pull:
+A host serves `ubuntu-24.04` (its current base: the Dockyard image by default, or a host-built one)
+plus any other Dockyard image you pull:
 
 ```sh
+sudo docklet image pull ubuntu-24.04            # make the signed Dockyard ubuntu-24.04 this host's base
 sudo docklet image pull node-22 python-3.12   # verify, install; no restart needed
 docklet image ls                              # name, release, fingerprint
 # or at provision time:
@@ -297,8 +309,11 @@ sudo DOCKLET_IMAGES="node-22 python-3.12" bash scripts/provision-host.sh
   `DOCKLET_DOCKYARD_INDEX_SHA256`.
 - The decompressed rootfs is installed like any base, at
   `bases/<sha256>/base.ext4`, and named by `images/<name>/base.ext4` (a symlink)
-  with `images/<name>/image.json`. It never changes `base.ext4`, the base new
-  `ubuntu-24.04` docks clone. Re-pulling a newer release repoints the name and
+  with `images/<name>/image.json`; the Dockyard image each base came from is also recorded in
+  `bases/<sha256>/source.json`. A named pull never changes `base.ext4`. Pulling `ubuntu-24.04`
+  itself is the one exception: it is the host's default image, so it installs the base and
+  repoints `base.ext4` at it (a plain legacy `base.ext4` is kept under `bases/` first, so
+  existing generations stay restorable). Re-pulling a newer release repoints the name and
   keeps the old base for generations that need it.
 - The host kernel stays. Firecracker boots `vmlinux` and `initrd.img` staged from
   the host kernel (`scripts/install-kernel.sh`); the image's `vmlinuz` and
@@ -307,6 +322,24 @@ sudo DOCKLET_IMAGES="node-22 python-3.12" bash scripts/provision-host.sh
   built `ubuntu-24.04` once its base exists, plus every pulled image), so the
   control plane can place a Dock of that image here. A name this host does not
   hold is refused with `image_unavailable`.
+
+### Full snapshots and checksums (dock push / dock pull)
+
+A snapshot request with `"full": true` (`SnapshotCreateRequest.Full`, microvm hosts only) writes the
+dock's whole disk as one zstd object, `rootfs.ext4.zst`, and never a block delta, so the file can
+leave the host and be rebuilt anywhere. The manifest records its `sha256` and `sizeBytes` (of the
+stored, compressed bytes), and the response carries `sha256` plus `baseImage`: the Dockyard image
+the dock's base came from (`ubuntu-24.04`, `node-22`, ...), or empty when the base was built on the
+host (such a dock cannot be pulled to a laptop, whose engine only boots Dockyard bases).
+
+Restoring any whole-image generation verifies that sha256 and size when the manifest has them and
+refuses a mismatch with an error naming the generation; no partial disk is left behind. Generations
+captured before checksums existed restore as before. Delta generations are unchanged.
+
+This is why hosts default to the Dockyard base: a dock whose base is a host-built image has no
+Dockyard identity to report, while one cloned from the pulled `ubuntu-24.04` does. Existing hosts
+keep their host-built base; run `sudo docklet image pull ubuntu-24.04` to switch new docks over
+(old docks and their generations keep their own base, which stays held).
 
 ---
 
