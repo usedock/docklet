@@ -311,8 +311,7 @@ func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
 	}
 	rec := Record{ID: NewID(), Name: spec.Name, Image: im.Name, ImageDir: cached.Dir, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
 		DiskGiB: spec.DiskGiB, Network: spec.Network, CreatedAt: e.now()}
-	dir := e.store().DockDir(rec.ID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := e.mkDockDir(rec.ID); err != nil {
 		return Dock{}, errf("store_error", "%v", err)
 	}
 	fail := func(err error) (Dock, error) {
@@ -354,6 +353,18 @@ func (e *Engine) addRecord(rec Record) error {
 		*recs = append(*recs, rec)
 		return nil
 	})
+}
+
+// mkDockDir creates a dock directory inside a data dir that only this user can read: the
+// dock directory holds its agent token.
+func (e *Engine) mkDockDir(id string) error {
+	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
+		return err
+	}
+	if err := secureDir(e.Dir); err != nil {
+		return fmt.Errorf("restrict %s to this user: %w", e.Dir, err)
+	}
+	return os.MkdirAll(e.store().DockDir(id), 0o700)
 }
 
 func freePort() (int, error) {
@@ -654,7 +665,7 @@ func (e *Engine) Branch(ctx context.Context, ref string, count int, name string,
 			if over.MemoryMiB > 0 {
 				rec.MemoryMiB = over.MemoryMiB
 			}
-			if err := os.MkdirAll(e.store().DockDir(rec.ID), 0o700); err != nil {
+			if err := e.mkDockDir(rec.ID); err != nil {
 				return errf("store_error", "%v", err)
 			}
 			if err := copyFile(e.file(src.ID, "disk.qcow2"), e.file(rec.ID, "disk.qcow2")); err != nil {
