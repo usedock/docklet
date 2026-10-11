@@ -343,7 +343,7 @@ func TestStatsFromTrackedVM(t *testing.T) {
 
 func TestGateFilesWriteNetworkUnit(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeGateFiles(dir, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01"); err != nil {
+	if err := writeGateFiles(dir, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01", false); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "etc", "systemd", "network", "10-dock.network"))
@@ -367,7 +367,7 @@ func TestGateFilesResetMachineID(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := writeGateFiles(dir, "192.168.127.9", "192.168.127.1", "24", "AA:FC:00:00:00:02"); err != nil {
+	if err := writeGateFiles(dir, "192.168.127.9", "192.168.127.1", "24", "AA:FC:00:00:00:02", false); err != nil {
 		t.Fatal(err)
 	}
 	for _, stale := range []string{"etc/machine-id", "var/lib/dbus/machine-id"} {

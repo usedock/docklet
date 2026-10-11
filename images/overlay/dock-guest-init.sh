@@ -5,6 +5,8 @@
 #    Otherwise, when the file is missing, from dock.cfg=<base64 json> on the
 #    kernel command line (older engines). The content is never logged.
 # 2. Sets the hostname when the config carries one.
+#    A config with "resetHostKeys": true (first boot of a copied disk) also deletes the
+#    sshd host keys; ssh.service regenerates them (ssh-keygen -A) after this unit.
 # 3. Grows the root filesystem to the size of its disk.
 # Networking needs no step here: the image ships a DHCP networkd unit that a
 # static 10-dock.network (written by fleet provisioning) outranks.
@@ -50,6 +52,9 @@ elif [ ! -s "$CFG" ]; then
 fi
 
 if [ -s "$CFG" ]; then
+  if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("resetHostKeys") is True else 1)' "$CFG" 2>/dev/null; then
+    rm -f /etc/ssh/ssh_host_*
+  fi
   name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("hostname",""))' "$CFG" 2>/dev/null || true)"
   if [[ "$name" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,62})$ ]]; then
     hostnamectl set-hostname "$name" 2>/dev/null || hostname "$name" || true

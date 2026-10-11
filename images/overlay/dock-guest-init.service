@@ -2,7 +2,7 @@
 Description=Dock guest init (config from kernel command line, disk grow)
 DefaultDependencies=no
 After=local-fs.target
-Before=dock-fast-agent.service systemd-networkd.service network-pre.target
+Before=dock-fast-agent.service systemd-networkd.service network-pre.target ssh.service
 Wants=network-pre.target
 
 [Service]

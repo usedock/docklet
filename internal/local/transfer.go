@@ -356,6 +356,9 @@ func (e *Engine) Import(ctx context.Context, in Import) (Dock, error) {
 	if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
 		return fail(errf("store_error", "%v", err))
 	}
+	if err := e.markResetKeys(rec.ID); err != nil {
+		return fail(err)
+	}
 	if err := e.addRecord(rec); err != nil {
 		return fail(err)
 	}

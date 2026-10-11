@@ -25,6 +25,9 @@ type GuestConfig struct {
 	Roots     []string `json:"roots"`
 	// Hostname is applied by the guest at boot when it is a valid host name.
 	Hostname string `json:"hostname,omitempty"`
+	// ResetHostKeys makes the guest delete its sshd host keys before sshd starts, so it generates
+	// fresh ones. Set only for the first boot of a dock made from a copy of another disk.
+	ResetHostKeys bool `json:"resetHostKeys,omitempty"`
 }
 
 // DefaultGuestConfig is the config for a dock with the given agent token.
@@ -39,8 +42,9 @@ var hostnameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62})$`)
 const FWCfgName = "opt/usedock/cfg"
 
 // WriteGuestConfig writes the guest agent config as JSON, readable by the owner only.
-func WriteGuestConfig(path, token, hostname string) error {
+func WriteGuestConfig(path, token, hostname string, resetHostKeys bool) error {
 	cfg := DefaultGuestConfig(token)
+	cfg.ResetHostKeys = resetHostKeys
 	if hostnameRE.MatchString(hostname) {
 		cfg.Hostname = hostname
 	}

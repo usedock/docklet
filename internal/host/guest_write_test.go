@@ -72,7 +72,7 @@ func TestGateFilesNeverFollowGuestSymlinks(t *testing.T) {
 			if err := os.Symlink(out, p); err != nil {
 				t.Fatal(err)
 			}
-			err := writeGateFiles(root, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01")
+			err := writeGateFiles(root, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01", false)
 			if err == nil || !strings.Contains(err.Error(), "symlink") {
 				t.Fatalf("want symlink refusal, got %v", err)
 			}
@@ -91,7 +91,7 @@ func TestGateFilesRefuseSymlinkedFile(t *testing.T) {
 	if err := os.Symlink(filepath.Join(out, "machine-id"), filepath.Join(root, "etc/systemd/network/10-dock.network")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGateFiles(root, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01"); err == nil {
+	if err := writeGateFiles(root, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01", false); err == nil {
 		t.Fatal("symlinked target file must be refused")
 	}
 	sameTree(t, before, snapshotDir(t, out))
@@ -107,7 +107,7 @@ func TestGateFilesUnlinkMachineIDSymlinkWithoutFollowing(t *testing.T) {
 	if err := os.Symlink(filepath.Join(out, "machine-id"), filepath.Join(root, "etc/machine-id")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGateFiles(root, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01"); err != nil {
+	if err := writeGateFiles(root, "192.168.127.2", "192.168.127.1", "24", "AA:FC:00:00:00:01", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "etc/machine-id")); !os.IsNotExist(err) {
