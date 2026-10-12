@@ -114,6 +114,10 @@ func TestE2ELocalGVisorDock(t *testing.T) {
 	if out := run("uname -s; id -u"); !strings.Contains(out, "Linux") || !strings.Contains(out, "1001") {
 		t.Fatalf("uname/id: %q", out)
 	}
+	// The dock's own bridge network must still give it DNS and internet egress (network on).
+	if out := run("curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://github.com"); !strings.HasPrefix(out, "2") && !strings.HasPrefix(out, "3") {
+		t.Fatalf("egress: %q", out)
+	}
 	run("echo keep > /home/user/work/f")
 
 	run("(python3 -m http.server 3000 >/dev/null 2>&1 &) ; sleep 1")
