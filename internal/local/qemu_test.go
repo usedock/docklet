@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -180,6 +181,38 @@ func TestAcceleratorPerOS(t *testing.T) {
 	if _, err := Accelerator("linux", env(map[string]string{"DOCK_LOCAL_ACCEL": "kvm"}), okKVM); codeOf(err) != "invalid_accel" {
 		t.Fatalf("only tcg may be forced, got %v", err)
 	}
+}
+
+func TestAcceleratorKVMErrors(t *testing.T) {
+	pe := func(err error) error { return &fs.PathError{Op: "open", Path: "/dev/kvm", Err: err} }
+	_, err := Accelerator("linux", env(nil), func() error { return pe(fs.ErrPermission) })
+	if codeOf(err) != "no_accelerator" || !strings.Contains(err.Error(), "usermod -aG kvm") || strings.Contains(err.Error(), "firmware") {
+		t.Fatalf("permission: %v", err)
+	}
+	_, err = Accelerator("linux", env(nil), func() error { return pe(fs.ErrNotExist) })
+	if codeOf(err) != "no_accelerator" || !strings.Contains(err.Error(), "nested") || strings.Contains(err.Error(), "usermod") {
+		t.Fatalf("missing: %v", err)
+	}
+	_, err = Accelerator("linux", env(nil), func() error { return errors.New("boom") })
+	if codeOf(err) != "no_accelerator" || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("other: %v", err)
+	}
+}
+
+func TestDoctorKVMPermissionHasFix(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	e.Driver = &QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img",
+		KVM: func() error { return &fs.PathError{Op: "open", Path: "/dev/kvm", Err: fs.ErrPermission} }}
+	for _, c := range e.Doctor(context.Background()) {
+		if c.Name != "accelerator" {
+			continue
+		}
+		if c.OK || !strings.Contains(c.Fix, "usermod") || !strings.Contains(c.Detail, "permission denied") {
+			t.Fatalf("accelerator row %+v", c)
+		}
+		return
+	}
+	t.Fatal("no accelerator row")
 }
 
 func TestFindToolOrder(t *testing.T) {

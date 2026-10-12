@@ -36,7 +36,11 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 		accel, aerr := q.Accel()
 		switch {
 		case aerr != nil:
-			add(Check{Name: "accelerator", Detail: aerr.Error()})
+			c := Check{Name: "accelerator", Detail: aerr.Error()}
+			if q.GOOS == "linux" && ErrCode(aerr) == "no_accelerator" {
+				c.Fix = kvmFix(q.kvmErr())
+			}
+			add(c)
 		case err != nil:
 			add(Check{Name: "accelerator", Detail: accel + " (cannot verify without QEMU)"})
 		default:

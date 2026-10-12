@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,7 +164,7 @@ func Accelerator(goos string, getenv func(string) string, kvmUsable func() error
 	switch goos {
 	case "linux":
 		if err := kvmUsable(); err != nil {
-			return "", errf("no_accelerator", "KVM is not usable (%v). Check that the CPU supports virtualization, that it is enabled in firmware, and that your user can read and write /dev/kvm (for example: sudo usermod -aG kvm $USER, then log in again)", err)
+			return "", errf("no_accelerator", "%s", kvmMessage(err))
 		}
 		return "kvm", nil
 	case "windows":
@@ -171,6 +173,35 @@ func Accelerator(goos string, getenv func(string) string, kvmUsable func() error
 		return "hvf", nil
 	}
 	return "", errf("unsupported_os", "local docks are not supported on %s", goos)
+}
+
+// KVM fix text per failure; permission denied and a missing device need different fixes.
+const (
+	kvmPermissionFix = "Add your user to the kvm group: sudo usermod -aG kvm $USER, then log out and back in (or run newgrp kvm in this shell). Check with: ls -l /dev/kvm"
+	kvmMissingFix    = "Enable virtualization (VT-x or AMD-V) in firmware and load the module (sudo modprobe kvm_intel or kvm_amd); inside a VM, enable nested virtualization."
+	kvmOtherFix      = "Check that the CPU supports virtualization, that it is enabled in firmware, and that your user can read and write /dev/kvm."
+)
+
+// kvmFix is the fix line for a kvmUsable error.
+func kvmFix(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return kvmPermissionFix
+	case errors.Is(err, fs.ErrNotExist):
+		return kvmMissingFix
+	}
+	return kvmOtherFix
+}
+
+// kvmMessage is the no_accelerator text for a kvmUsable error.
+func kvmMessage(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Sprintf("KVM is present but your user cannot open /dev/kvm (%v). %s", err, kvmPermissionFix)
+	case errors.Is(err, fs.ErrNotExist):
+		return "this machine has no KVM device (/dev/kvm is missing). " + kvmMissingFix
+	}
+	return fmt.Sprintf("KVM is not usable (%v). %s", err, kvmOtherFix)
 }
 
 func kvmUsable() error {
@@ -333,11 +364,15 @@ func (q *QEMU) Binaries() (system, img string, err error) {
 
 // Accel is the accelerator this machine will use.
 func (q *QEMU) Accel() (string, error) {
-	kvm := q.KVM
-	if kvm == nil {
-		kvm = kvmUsable
+	return Accelerator(q.GOOS, q.Getenv, q.kvmErr)
+}
+
+// kvmErr is the injected KVM probe, or the real one.
+func (q *QEMU) kvmErr() error {
+	if q.KVM != nil {
+		return q.KVM()
 	}
-	return Accelerator(q.GOOS, q.Getenv, kvm)
+	return kvmUsable()
 }
 
 // Preflight checks QEMU, qemu-img and the accelerator.
