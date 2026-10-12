@@ -26,6 +26,12 @@ func TestE2ELocalGVisorDockDebug(t *testing.T) {
 	t.Logf("docker: %s", sh("docker", "--version"))
 	// Probes: passwd -S root only works with euid 0; sudo -n id -u prints 0 when setuid works.
 	script := `echo "sudo: $(sudo -n id -u 2>&1 | head -1)"; echo "passwd: $(passwd -S root 2>&1 | head -1)"; echo "mount: $(mount --bind /tmp /tmp 2>&1 | head -1)"; grep -E "NoNewPrivs" /proc/self/status`
+	for _, rt := range []string{"runsc", "runsc-suid"} {
+		for _, extra := range [][]string{{}, {"--cap-drop=ALL", "--security-opt", "no-new-privileges"}} {
+			args := append(append([]string{"run", "--rm", "--entrypoint", "sh", "--runtime=" + rt, "--user", "1001:1001"}, extra...), tag, "-c", script)
+			t.Logf("=== RESULT %s %v\n%s", rt, extra, sh("docker", args...))
+		}
+	}
 	variants := []struct {
 		name string
 		args []string
