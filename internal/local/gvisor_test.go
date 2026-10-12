@@ -23,6 +23,10 @@ type fakeDocker struct {
 	containers map[string]net.Listener
 	volumes    map[string]bool
 	networks   map[string]bool
+	stopped    map[string]bool   // container exists but is not running
+	attached   map[string]bool   // container is connected to its network
+	ports      map[string]string // published host port per container
+	tokens     map[string]string
 	daemonDown bool
 	images     map[string]bool
 	builds     int
@@ -35,7 +39,7 @@ type fakeDocker struct {
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, images: map[string]bool{},
+	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, stopped: map[string]bool{}, attached: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{},
 		runtimes: `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`, drv: newFakeDriver()}
 }
 
@@ -93,16 +97,53 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			if l, err = net.Listen("tcp", "127.0.0.1:"+port); err != nil {
 				return "", "port is already allocated", err
 			}
+			f.tokens[name] = c.Token
 			go f.drv.serve(0, l, c.Token)
 		}
 		f.containers[name] = l
+		f.ports[name] = port
+		f.attached[name] = true
 		return "cid\n", "", nil
 	case "inspect":
-		if _, ok := f.containers[last]; !ok || f.exitOnRun {
+		_, ok := f.containers[last]
+		if !ok {
 			return "false\n", "Error: No such container", gone
+		}
+		running := !f.stopped[last] && !f.exitOnRun
+		if strings.Contains(strings.Join(args, " "), "State.Status") {
+			if running {
+				return "running\n", "", nil
+			}
+			return "exited\n", "", nil
+		}
+		if !running {
+			return "false\n", "", nil
 		}
 		return "true\n", "", nil
 	case "stop":
+		if _, ok := f.containers[last]; !ok {
+			return "", "Error response from daemon: No such container: " + last, gone
+		}
+		if l := f.containers[last]; l != nil {
+			l.Close()
+			f.containers[last] = nil
+		}
+		f.stopped[last] = true
+		return "", "", nil
+	case "start":
+		if _, ok := f.containers[last]; !ok {
+			return "", "Error response from daemon: No such container: " + last, gone
+		}
+		if !f.attached[last] || !f.networks[last+"-net"] {
+			return "", "Error response from daemon: network not found", gone
+		}
+		l, err := net.Listen("tcp", "127.0.0.1:"+f.ports[last])
+		if err != nil {
+			return "", "Error response from daemon: driver failed programming external connectivity: Bind for 127.0.0.1:" + f.ports[last] + " failed: port is already allocated", err
+		}
+		f.containers[last] = l
+		delete(f.stopped, last)
+		go f.drv.serve(0, l, f.tokens[last])
 		return "", "", nil
 	case "rm":
 		l, ok := f.containers[last]
@@ -113,17 +154,41 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			l.Close()
 		}
 		delete(f.containers, last)
+		delete(f.stopped, last)
+		delete(f.attached, last)
 		return "", "", nil
 	case "network":
-		if args[1] == "create" {
+		switch args[1] {
+		case "create":
 			if f.networks[last] {
 				return "", "Error response from daemon: network with name " + last + " already exists", gone
 			}
 			f.networks[last] = true
 			return "nid", "", nil
+		case "connect":
+			ctr := last
+			if !f.networks[args[len(args)-2]] {
+				return "", "Error response from daemon: network " + args[len(args)-2] + " not found", gone
+			}
+			if f.attached[ctr] {
+				return "", "Error response from daemon: endpoint with name " + ctr + " already exists in network", gone
+			}
+			f.attached[ctr] = true
+			return "", "", nil
+		case "disconnect":
+			if !f.attached[last] {
+				return "", "Error response from daemon: container " + last + " is not connected to network", gone
+			}
+			delete(f.attached, last)
+			return "", "", nil
 		}
 		if !f.networks[last] {
 			return "", "Error response from daemon: network " + last + " not found", gone
+		}
+		for ctr := range f.attached {
+			if ctr+"-net" == last {
+				return "", "Error response from daemon: network " + last + " has active endpoints", gone
+			}
 		}
 		delete(f.networks, last)
 		return "", "", nil
@@ -177,7 +242,7 @@ func TestGVisorRoundTrip(t *testing.T) {
 		"run -d --runtime=runsc --name dock-local-" + d.ID,
 		"--network dock-local-" + d.ID + "-net",
 		"-p 127.0.0.1:" + itoa(port) + ":2222",
-		"--cpus 3", "--memory 1024m", "--user 1001:1001", "--cap-drop=ALL", "--security-opt no-new-privileges",
+		"--cpus 3", "--memory 1024m", "--user 1001:1001",
 		"--pids-limit 1024", "--tmpfs /tmp",
 		"-v dock-local-" + d.ID + "-work:/home/user/work",
 		"-v " + cfg + ":/etc/dock-fast-agent.json:ro",
@@ -188,8 +253,10 @@ func TestGVisorRoundTrip(t *testing.T) {
 			t.Errorf("argv lacks %q: %s", want, argv)
 		}
 	}
-	if strings.Contains(argv, "--privileged") {
-		t.Error("never privileged")
+	for _, bad := range []string{"--privileged", "--cap-drop", "no-new-privileges"} {
+		if strings.Contains(argv, bad) {
+			t.Errorf("argv must not contain %s: %s", bad, argv)
+		}
 	}
 	tok, _ := e.token(d.ID)
 	if raw, _ := os.ReadFile(cfg); !strings.Contains(string(raw), tok) || strings.Contains(argv, tok) {
@@ -201,6 +268,7 @@ func TestGVisorRoundTrip(t *testing.T) {
 		t.Fatalf("exec %+v %v", res, err)
 	}
 
+	rmBefore := len(fd.callsWith("rm"))
 	st, err := e.Stop(ctx, "gv", false)
 	if err != nil || st.State != "archived" {
 		t.Fatalf("stop %+v %v", st, err)
@@ -208,8 +276,17 @@ func TestGVisorRoundTrip(t *testing.T) {
 	if !fd.volumes["dock-local-"+d.ID+"-work"] {
 		t.Fatal("stop must keep the work volume")
 	}
-	if len(fd.containers) != 0 || len(fd.networks) != 0 {
-		t.Fatalf("stop must remove the container and its network: %v %v", fd.containers, fd.networks)
+	if _, kept := fd.containers["dock-local-"+d.ID]; !kept || !fd.stopped["dock-local-"+d.ID] {
+		t.Fatalf("stop must keep the stopped container (its rootfs): %v %v", fd.containers, fd.stopped)
+	}
+	if len(fd.networks) != 0 {
+		t.Fatalf("a stopped dock must not hold a network: %v", fd.networks)
+	}
+	if e.readInt(d.ID, "port") != port {
+		t.Fatal("the published port is fixed for the container; the port file must stay")
+	}
+	if len(fd.callsWith("rm")) != rmBefore {
+		t.Fatalf("stop must not remove the container: %v", fd.callsWith("rm"))
 	}
 	if _, err := e.Exec(ctx, "gv", "x", 0); codeOf(err) != "dock_not_running" {
 		t.Fatalf("exec on a stopped dock: %v", err)
@@ -219,8 +296,26 @@ func TestGVisorRoundTrip(t *testing.T) {
 	if err != nil || rd.State != "ready" || rd.Runtime != "gvisor" {
 		t.Fatalf("resume %+v %v", rd, err)
 	}
-	if n := len(fd.callsWith("run")); n != 2 {
-		t.Fatalf("resume must run a new container, runs %d", n)
+	if n := len(fd.callsWith("run")); n != 1 {
+		t.Fatalf("resume must start the same container, not run a new one: %d runs", n)
+	}
+	// Order on resume: network create, connect, then start.
+	var order []string
+	for _, c := range fd.calls {
+		switch {
+		case c[0] == "network" && c[1] == "create":
+			order = append(order, "create")
+		case c[0] == "network" && c[1] == "connect":
+			order = append(order, "connect")
+		case c[0] == "start":
+			order = append(order, "start")
+		}
+	}
+	if got := strings.Join(order, ","); got != "create,create,connect,start" {
+		t.Fatalf("resume order (first create is from new): %s", got)
+	}
+	if e.readInt(d.ID, "port") != port {
+		t.Fatal("resume must reuse the published port")
 	}
 	if fd.builds != 1 {
 		t.Fatalf("image must be built once, builds %d", fd.builds)
@@ -552,5 +647,71 @@ func TestGVisorRemoveWithDaemonDownKeepsTheRecord(t *testing.T) {
 	fd.daemonDown = false
 	if err := e.Remove(ctx, "down"); err != nil {
 		t.Fatalf("retry after starting Docker: %v", err)
+	}
+}
+
+func TestGVisorResumeFailsClearlyWhenThePortIsTaken(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	d, err := e.New(ctx, Spec{Name: "busy", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := e.readInt(d.ID, "port")
+	if _, err := e.Stop(ctx, "busy", false); err != nil {
+		t.Fatal(err)
+	}
+	rmBefore := len(fd.callsWith("rm"))
+	l, err := net.Listen("tcp", "127.0.0.1:"+itoa(port))
+	if err != nil {
+		t.Skipf("cannot take the port: %v", err)
+	}
+	_, err = e.Resume(ctx, "busy")
+	if codeOf(err) != "port_in_use" || !strings.Contains(err.Error(), itoa(port)) {
+		t.Fatalf("got %v", err)
+	}
+	if _, kept := fd.containers["dock-local-"+d.ID]; !kept || len(fd.callsWith("rm")) != rmBefore {
+		t.Fatal("the container must be kept, never recreated")
+	}
+	l.Close()
+	if st, err := e.Resume(ctx, "busy"); err != nil || st.State != "ready" {
+		t.Fatalf("resume once the port is free: %+v %v", st, err)
+	}
+
+	// The race where docker itself reports the port as taken after our check.
+	if _, err := e.Stop(ctx, "busy", false); err != nil {
+		t.Fatal(err)
+	}
+	fd.mu.Lock()
+	fd.ports["dock-local-"+d.ID] = itoa(port)
+	fd.mu.Unlock()
+	blocker, err := net.Listen("tcp", "127.0.0.1:"+itoa(port))
+	if err != nil {
+		t.Skipf("cannot take the port: %v", err)
+	}
+	defer blocker.Close()
+	if _, err := e.Resume(ctx, "busy"); codeOf(err) != "port_in_use" {
+		t.Fatalf("got %v", err)
+	}
+	if len(fd.networks) != 0 {
+		t.Fatalf("a failed resume must release the network: %v", fd.networks)
+	}
+}
+
+func TestGVisorResumeRecreatesALostContainer(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	d, err := e.New(ctx, Spec{Name: "lost", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Stop(ctx, "lost", false); err != nil {
+		t.Fatal(err)
+	}
+	delete(fd.containers, "dock-local-"+d.ID) // docker prune
+	delete(fd.stopped, "dock-local-"+d.ID)
+	st, err := e.Resume(ctx, "lost")
+	if err != nil || st.State != "ready" || len(fd.callsWith("run")) != 2 {
+		t.Fatalf("resume of a lost container: %+v %v", st, err)
 	}
 }

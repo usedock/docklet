@@ -119,6 +119,14 @@ func TestE2ELocalGVisorDock(t *testing.T) {
 		t.Fatalf("egress: %q", out)
 	}
 	run("echo keep > /home/user/work/f")
+	// Root in the sandbox: sudo works, and a change to the rootfs (a package) must survive stop/resume.
+	if out := run("sudo id -u"); strings.TrimSpace(out) != "0" {
+		t.Fatalf("sudo id: %q", out)
+	}
+	run("sudo touch /usr/local/bin/e2e-marker")
+	if res, err := e.Exec(ctx, "e2egv", "sudo apt-get update -qq && sudo apt-get install -y -qq tree && command -v tree", 280*time.Second); err != nil || res.ExitCode != 0 {
+		t.Fatalf("apt-get install: %+v %v", res, err)
+	}
 
 	run("(python3 -m http.server 3000 >/dev/null 2>&1 &) ; sleep 1")
 	conn, err := e.OpenPort(ctx, "e2egv", 3000)
@@ -144,6 +152,23 @@ func TestE2ELocalGVisorDock(t *testing.T) {
 	if out := run("cat /home/user/work/f"); strings.TrimSpace(out) != "keep" {
 		t.Fatalf("the work volume must survive stop and resume: %q", out)
 	}
+	if out := run("ls /usr/local/bin/e2e-marker && command -v tree"); !strings.Contains(out, "e2e-marker") || !strings.Contains(out, "tree") {
+		t.Fatalf("the whole rootfs must survive stop and resume: %q", out)
+	}
+	// The published port and DNS still work on the reconnected network.
+	if out := run("curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://github.com"); !strings.HasPrefix(out, "2") && !strings.HasPrefix(out, "3") {
+		t.Fatalf("egress after resume: %q", out)
+	}
+	run("(python3 -m http.server 3001 >/dev/null 2>&1 &) ; sleep 1")
+	conn, err = e.OpenPort(ctx, "e2egv", 3001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = conn.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+	if _, err := io.ReadFull(conn, head); err != nil || !strings.HasPrefix(string(head), "HTTP/") {
+		t.Fatalf("port forward after resume: %q %v", head, err)
+	}
+	conn.Close()
 	if err := e.Remove(ctx, "e2egv"); err != nil {
 		t.Fatal(err)
 	}

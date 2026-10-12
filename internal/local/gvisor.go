@@ -45,9 +45,11 @@ COPY dock-entrypoint /usr/local/bin/dock-entrypoint
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl git python3; \
+    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3; \
     chmod 0755 /usr/local/bin/dock-entrypoint /usr/local/libexec/dock-fast-agent.py; \
-    useradd -u 1001 -m -s /bin/bash user; \
+    useradd -u 1001 -m -s /bin/bash -G sudo user; \
+    echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user; \
+    chmod 0440 /etc/sudoers.d/user; \
     mkdir -p /home/user/work /run/dock-fast; \
     chown user:user /home/user/work /run/dock-fast; \
     apt-get clean; \
@@ -194,7 +196,8 @@ func gvContainer(id string) string { return "dock-local-" + id }
 func gvVolume(id string) string    { return "dock-local-" + id + "-work" }
 func gvNetwork(id string) string   { return "dock-local-" + id + "-net" }
 
-// gvRunArgs returns the docker run arguments for one dock.
+// gvRunArgs returns the docker run arguments for one dock. gVisor is the sandbox boundary, so
+// root inside the dock (sudo) is sandbox root: Docker default capabilities stay, never --privileged.
 func gvRunArgs(rec Record, port int, agentConfig, resolvConf, image string) []string {
 	return []string{
 		"run", "-d", "--runtime=runsc", "--name", gvContainer(rec.ID),
@@ -203,7 +206,6 @@ func gvRunArgs(rec Record, port int, agentConfig, resolvConf, image string) []st
 		"--cpus", strconv.Itoa(rec.CPUs),
 		"--memory", strconv.Itoa(rec.MemoryMiB) + "m",
 		"--user", strconv.Itoa(gvUID) + ":" + strconv.Itoa(gvUID),
-		"--cap-drop=ALL", "--security-opt", "no-new-privileges",
 		"--pids-limit", strconv.Itoa(gvPidsLimit),
 		"--tmpfs", "/tmp",
 		"-v", gvVolume(rec.ID) + ":/home/user/work",
@@ -256,7 +258,37 @@ func (g *GVisor) removeNetwork(ctx context.Context, id string) error {
 	return nil
 }
 
-// cleanup removes the container and the network, best effort, after a failed start.
+// disconnectNetwork detaches the (stopped) container from its network so the network can be
+// removed while the dock is stopped; Docker address pools only hold a few dozen networks.
+func (g *GVisor) disconnectNetwork(ctx context.Context, id string) error {
+	_, stderr, err := g.docker(ctx, nil, "network", "disconnect", "--force", gvNetwork(id), gvContainer(id))
+	if err != nil && !notFound(stderr) && !strings.Contains(strings.ToLower(stderr), "is not connected") {
+		return dockerFailure("stop_failed", "docker network disconnect "+gvNetwork(id), err, stderr)
+	}
+	return nil
+}
+
+// connectNetwork attaches the stopped container to its freshly created network.
+func (g *GVisor) connectNetwork(ctx context.Context, id string) error {
+	_, stderr, err := g.docker(ctx, nil, "network", "connect", gvNetwork(id), gvContainer(id))
+	if err != nil && !strings.Contains(strings.ToLower(stderr), "already exists") {
+		return dockerFailure("boot_failed", "docker network connect "+gvNetwork(id), err, stderr)
+	}
+	return nil
+}
+
+// halt stops the container (keeping it and its rootfs) and releases its network.
+func (g *GVisor) halt(ctx context.Context, id string, grace string) error {
+	if _, stderr, err := g.docker(ctx, nil, "stop", "--time", grace, gvContainer(id)); err != nil && !notFound(stderr) {
+		return dockerFailure("stop_failed", "docker stop "+gvContainer(id), err, stderr)
+	}
+	if err := g.disconnectNetwork(ctx, id); err != nil {
+		return err
+	}
+	return g.removeNetwork(ctx, id)
+}
+
+// cleanup removes the container and the network, best effort, after a failed first start.
 func (g *GVisor) cleanup(ctx context.Context, id string) {
 	_ = g.removeContainer(ctx, id)
 	_ = g.removeNetwork(ctx, id)
@@ -345,34 +377,44 @@ func (e *Engine) gvPrepare(ctx context.Context) (string, error) {
 	return g.EnsureImage(ctx, func(s string) { e.logf("%s", s) })
 }
 
-// bootGVisor runs a fresh container for rec on its work volume and waits for its agent.
-func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error {
-	g := e.gvisor()
+// writeGVisorFiles writes the dock agent config and resolv.conf (both bind-mounted into the
+// container) and returns their absolute paths. Rewriting them on resume refreshes the resolvers.
+func (e *Engine) writeGVisorFiles(rec Record) (cfg, resolv string, err error) {
 	tok, err := e.token(rec.ID)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	// docker -v reads a relative source (DOCK_DATA_DIR=data) as a volume name, so pass an absolute path.
-	cfg, err := filepath.Abs(e.file(rec.ID, "fast-agent.json"))
+	cfg, err = filepath.Abs(e.file(rec.ID, "fast-agent.json"))
 	if err != nil {
-		return errf("store_error", "%v", err)
+		return "", "", errf("store_error", "%v", err)
 	}
 	if err := WriteGuestConfig(cfg, tok, "", GuestOptions{}); err != nil {
-		return errf("store_error", "%v", err)
+		return "", "", errf("store_error", "%v", err)
 	}
 	// The container user (uid 1001) must read the bind-mounted file, so it cannot be 0600;
 	// the dock directory is 0700, so other host users still cannot reach it.
 	if err := os.Chmod(cfg, 0o644); err != nil {
-		return errf("store_error", "%v", err)
+		return "", "", errf("store_error", "%v", err)
 	}
 	// Docker points a user-defined network at its embedded DNS (127.0.0.11), which runsc's
-	// own network stack cannot reach, so the dock gets the host's upstream resolvers instead.
-	resolv := filepath.Join(filepath.Dir(cfg), "resolv.conf")
+	// own network stack cannot reach, so the dock gets the host upstream resolvers instead.
+	resolv = filepath.Join(filepath.Dir(cfg), "resolv.conf")
 	if err := os.WriteFile(resolv, gvResolvConf(os.ReadFile), 0o644); err != nil {
-		return errf("store_error", "%v", err)
+		return "", "", errf("store_error", "%v", err)
 	}
 	if err := os.Chmod(resolv, 0o644); err != nil {
-		return errf("store_error", "%v", err)
+		return "", "", errf("store_error", "%v", err)
+	}
+	return cfg, resolv, nil
+}
+
+// bootGVisor creates a fresh container for rec on its work volume and waits for its agent.
+func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error {
+	g := e.gvisor()
+	cfg, resolv, err := e.writeGVisorFiles(rec)
+	if err != nil {
+		return err
 	}
 	for attempt := 1; ; attempt++ {
 		port, err := freePort()
@@ -399,15 +441,73 @@ func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error
 			}
 			return errf("boot_failed", "docker run failed: %v: %s", err, strings.TrimSpace(stderr))
 		}
-		return e.waitReadyGVisor(ctx, rec.ID)
+		return e.waitReadyGVisor(ctx, rec.ID, false)
 	}
 }
 
-func (e *Engine) waitReadyGVisor(ctx context.Context, id string) error {
+func gvPortInUse(port int) error {
+	return errf("port_in_use", "local port %d, which this dock publishes its agent on, is now used by another program. Free it and run dock resume again", port)
+}
+
+// resumeGVisor starts the stopped container again, so the whole rootfs survives. Its published
+// host port was fixed when it was created; if something else holds it now the error says so.
+// A container that is gone (docker prune) is recreated on the work volume; only /home/user/work
+// survives that.
+func (e *Engine) resumeGVisor(ctx context.Context, rec Record, image string) error {
 	g := e.gvisor()
+	if _, stderr, err := g.docker(ctx, nil, "inspect", "--format", "{{.State.Status}}", gvContainer(rec.ID)); err != nil {
+		if !notFound(stderr) {
+			return dockerFailure("boot_failed", "docker inspect "+gvContainer(rec.ID), err, stderr)
+		}
+		e.logf("the container of %s is gone; recreating it (only /home/user/work survives)", rec.ID)
+		return e.bootGVisor(ctx, rec, image)
+	}
+	port := e.readInt(rec.ID, "port")
+	if port <= 0 {
+		return errf("dock_broken", "dock %s has no recorded port; remove it with: dock rm %s", rec.ID, rec.ID)
+	}
+	if _, _, err := e.writeGVisorFiles(rec); err != nil {
+		return err
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		return gvPortInUse(port)
+	}
+	_ = l.Close()
+	if err := g.ensureNetwork(ctx, rec.ID); err != nil {
+		return err
+	}
+	fail := func(err error) error {
+		_ = g.halt(context.WithoutCancel(ctx), rec.ID, "0")
+		return err
+	}
+	if err := g.connectNetwork(ctx, rec.ID); err != nil {
+		return fail(err)
+	}
+	if _, stderr, err := g.docker(ctx, nil, "start", gvContainer(rec.ID)); err != nil {
+		low := strings.ToLower(stderr)
+		if strings.Contains(low, "port is already allocated") || strings.Contains(low, "address already in use") {
+			return fail(gvPortInUse(port))
+		}
+		return fail(dockerFailure("boot_failed", "docker start "+gvContainer(rec.ID), err, stderr))
+	}
+	return e.waitReadyGVisor(ctx, rec.ID, true)
+}
+
+// waitReadyGVisor waits for the agent; on failure a first start removes the container, while a
+// resume (keep) only stops it so the rootfs is not lost.
+func (e *Engine) waitReadyGVisor(ctx context.Context, id string, keep bool) error {
+	g := e.gvisor()
+	undo := func(ctx context.Context) {
+		if keep {
+			_ = g.halt(ctx, id, "0")
+			return
+		}
+		g.cleanup(ctx, id)
+	}
 	fail := func(code, format string, a ...any) error {
 		logs := g.logs(ctx, id)
-		g.cleanup(context.WithoutCancel(ctx), id)
+		undo(context.WithoutCancel(ctx))
 		return errf(code, format+"%s", append(a, logs)...)
 	}
 	deadline := time.NewTimer(e.bootTimeout())
@@ -423,7 +523,7 @@ func (e *Engine) waitReadyGVisor(ctx context.Context, id string) error {
 		}
 		select {
 		case <-ctx.Done():
-			g.cleanup(context.WithoutCancel(ctx), id)
+			undo(context.WithoutCancel(ctx))
 			return ctx.Err()
 		case <-deadline.C:
 			return fail("boot_timeout", "the guest agent did not answer within %s.", e.bootTimeout())
@@ -432,24 +532,26 @@ func (e *Engine) waitReadyGVisor(ctx context.Context, id string) error {
 	}
 }
 
-// stopGVisor removes the container and its network and keeps the work volume.
+// stopGVisor stops the container but keeps it, so its whole rootfs survives, and releases its
+// network. The port file stays: the container keeps publishing the same host port.
 func (e *Engine) stopGVisor(ctx context.Context, id string, force bool) error {
-	g := e.gvisor()
-	if !force && g.running(ctx, id) {
-		_, stderr, err := g.docker(ctx, nil, "stop", "--time", "10", gvContainer(id))
-		if err != nil && !notFound(stderr) {
-			// rm -f below still ends it.
-			e.logf("docker stop: %v", err)
-		}
+	grace := "10"
+	if force {
+		grace = "0"
 	}
+	return e.gvisor().halt(ctx, id, grace)
+}
+
+// removeGVisor deletes the container, its network and the work volume.
+func (e *Engine) removeGVisor(ctx context.Context, id string) error {
+	g := e.gvisor()
 	if err := g.removeContainer(ctx, id); err != nil {
 		return err
 	}
 	if err := g.removeNetwork(ctx, id); err != nil {
 		return err
 	}
-	e.clearRuntime(id)
-	return nil
+	return g.removeVolume(ctx, id)
 }
 
 // newGVisor creates a gVisor dock and boots it.

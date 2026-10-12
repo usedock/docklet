@@ -664,7 +664,7 @@ func (e *Engine) Resume(ctx context.Context, ref string) (Dock, error) {
 		if err != nil {
 			return Dock{}, err
 		}
-		if err := e.bootGVisor(ctx, rec, image); err != nil {
+		if err := e.resumeGVisor(ctx, rec, image); err != nil {
 			return Dock{}, err
 		}
 		return e.view(ctx, rec), nil
@@ -808,10 +808,7 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 			e.logf("warning: docker was not found, so the container %s, volume %s and network %s could not be removed; remove them by hand if Docker comes back",
 				gvContainer(rec.ID), gvVolume(rec.ID), gvNetwork(rec.ID))
 		} else {
-			if err := e.stopGVisor(ctx, rec.ID, true); err != nil {
-				return err
-			}
-			if err := g.removeVolume(ctx, rec.ID); err != nil {
+			if err := e.removeGVisor(ctx, rec.ID); err != nil {
 				return err
 			}
 		}
