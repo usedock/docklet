@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -266,7 +267,11 @@ func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error
 	if err != nil {
 		return err
 	}
-	cfg := e.file(rec.ID, "fast-agent.json")
+	// docker -v reads a relative source (DOCK_DATA_DIR=data) as a volume name, so pass an absolute path.
+	cfg, err := filepath.Abs(e.file(rec.ID, "fast-agent.json"))
+	if err != nil {
+		return errf("store_error", "%v", err)
+	}
 	if err := WriteGuestConfig(cfg, tok, "", GuestOptions{}); err != nil {
 		return errf("store_error", "%v", err)
 	}

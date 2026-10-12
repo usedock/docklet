@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -394,6 +395,21 @@ func TestGVisorRetriesWhenThePortIsTaken(t *testing.T) {
 	}
 	if n := len(fd.callsWith("run")); n != bootAttempts {
 		t.Fatalf("retries must be bounded at %d, runs %d", bootAttempts, n)
+	}
+}
+
+func TestGVisorAgentConfigMountIsAbsolute(t *testing.T) {
+	e, fd := newGVisorEngine(t)
+	// DOCK_DATA_DIR=data: docker would read a relative -v source as a volume name.
+	t.Chdir(filepath.Dir(e.Dir))
+	e.Dir = filepath.Base(e.Dir)
+	if _, err := e.New(context.Background(), Spec{Name: "rel", Runtime: RuntimeGVisor}); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range fd.callsWith("run")[0] {
+		if src, ok := strings.CutSuffix(a, ":"+gvAgentConfigPath+":ro"); ok && !filepath.IsAbs(src) {
+			t.Fatalf("agent config mount source %q is relative", src)
+		}
 	}
 }
 
