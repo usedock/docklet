@@ -68,15 +68,17 @@ const (
 )
 
 // Docker runtime names a gvisor dock can use. runsc-suid is a second registration of the same
-// runsc binary with --allow-suid (gVisor ignores setuid bits otherwise, so sudo fails); it is a
-// separate runtime so other runsc containers on the machine keep the default.
+// runsc binary with --allow-suid (gVisor ignores setuid bits otherwise, so sudo fails) and
+// --overlay2=none (by default runsc keeps rootfs writes in a sandbox-lifetime overlay that is
+// lost on docker stop; with none they reach the container layer and survive stop/start). It is
+// a separate runtime so other runsc containers on the machine keep the defaults.
 const (
 	gvRuntimePlain = "runsc"
 	gvRuntimeSUID  = "runsc-suid"
 )
 
 // GVisorSUIDFix is how to enable sudo inside new gvisor docks, once.
-const GVisorSUIDFix = "sudo runsc install --runtime=runsc-suid -- --allow-suid && sudo systemctl restart docker"
+const GVisorSUIDFix = "sudo runsc install --runtime=runsc-suid -- --allow-suid --overlay2=none && sudo systemctl restart docker"
 
 // GVisorInstallFix says how to get runsc registered with Docker.
 const GVisorInstallFix = "Install gVisor (https://gvisor.dev/docs/user_guide/install/), then run: sudo runsc install && sudo systemctl restart docker"
@@ -128,13 +130,17 @@ type dockerRuntime struct {
 }
 
 // suidRuntime reports whether rt is a usable runsc-suid: a runsc binary registered with
-// --allow-suid. One without the flag is treated as missing, because sudo would silently fail.
+// --allow-suid and --overlay2=none. One without them is treated as missing, because sudo would
+// silently fail or the rootfs would not survive a stop.
 func suidRuntime(rt json.RawMessage) bool {
 	var r dockerRuntime
 	if json.Unmarshal(rt, &r) != nil || !strings.HasPrefix(filepath.Base(r.Path), "runsc") {
 		return false
 	}
-	return slices.ContainsFunc(r.RuntimeArgs, func(a string) bool { return a == "--allow-suid" || a == "--allow-suid=true" })
+	has := func(want ...string) bool {
+		return slices.ContainsFunc(r.RuntimeArgs, func(a string) bool { return slices.Contains(want, a) })
+	}
+	return has("--allow-suid", "--allow-suid=true") && has("--overlay2=none", "-overlay2=none")
 }
 
 // Probe runs the preflight and reports whether the runsc-suid runtime (sudo in docks) is available.
@@ -614,7 +620,7 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 	if suid {
 		rt = gvRuntimeSUID
 	} else {
-		e.logf("note: sudo will not work in this dock (the %s runtime is not registered). To enable it once, for new docks: %s", gvRuntimeSUID, GVisorSUIDFix)
+		e.logf("note: sudo will not work in this dock and only /home/user/work will persist (the %s runtime is not registered). To enable both once, for new docks: %s", gvRuntimeSUID, GVisorSUIDFix)
 	}
 	if diskSet {
 		e.logf("note: --disk is not enforced for gvisor docks; the work volume grows with the Docker data directory")

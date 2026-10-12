@@ -718,7 +718,7 @@ func TestGVisorResumeRecreatesALostContainer(t *testing.T) {
 
 const (
 	rtPlain = `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`
-	rtSUID  = `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/local/bin/runsc","runtimeArgs":["--allow-suid"]}}`
+	rtSUID  = `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/local/bin/runsc","runtimeArgs":["--allow-suid","--overlay2=none"]}}`
 )
 
 func TestGVisorRuntimeChoice(t *testing.T) {
@@ -732,7 +732,8 @@ func TestGVisorRuntimeChoice(t *testing.T) {
 		// Registered without the flag, sudo would silently fail: treated as missing.
 		{"runsc-suid without --allow-suid", `{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/local/bin/runsc"}}`, "runsc", true},
 		// Never accepted blindly: it must be a runsc binary.
-		{"runsc-suid that is not runsc", `{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/bin/evil","runtimeArgs":["--allow-suid"]}}`, "runsc", true},
+		{"runsc-suid without --overlay2=none", `{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/local/bin/runsc","runtimeArgs":["--allow-suid"]}}`, "runsc", true},
+		{"runsc-suid that is not runsc", `{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/bin/evil","runtimeArgs":["--allow-suid","--overlay2=none"]}}`, "runsc", true},
 	} {
 		e, fd := newGVisorEngine(t)
 		fd.runtimes = tc.runtimes
@@ -750,7 +751,7 @@ func TestGVisorRuntimeChoice(t *testing.T) {
 		if rec.GVisorRuntime != tc.want {
 			t.Errorf("%s: record runtime %q", tc.name, rec.GVisorRuntime)
 		}
-		noted := strings.Contains(progress.String(), "sudo will not work") && strings.Contains(progress.String(), "runsc install --runtime=runsc-suid -- --allow-suid")
+		noted := strings.Contains(progress.String(), "sudo will not work") && strings.Contains(progress.String(), "runsc install --runtime=runsc-suid -- --allow-suid --overlay2=none")
 		if noted != tc.note {
 			t.Errorf("%s: note printed=%v, progress %q", tc.name, noted, progress.String())
 		}
@@ -798,7 +799,7 @@ func TestDoctorGVisorRowReportsSudo(t *testing.T) {
 	}
 	e := doctorEngine(t, "linux", nil, &GVisor{GOOS: "linux", LookPath: look, Run: run(rtSUID)})
 	c, _ := doctorRow(e, "gvisor")
-	if !c.OK || !c.Optional || !strings.Contains(c.Detail, "sudo available") || c.Fix != "" {
+	if !c.OK || !c.Optional || !strings.Contains(c.Detail, "sudo and a persistent rootfs") || c.Fix != "" {
 		t.Fatalf("suid row %+v", c)
 	}
 	e = doctorEngine(t, "linux", nil, &GVisor{GOOS: "linux", LookPath: look, Run: run(rtPlain)})

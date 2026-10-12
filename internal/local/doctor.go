@@ -70,9 +70,9 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	if showGVisor {
 		c := Check{Name: "gvisor", OK: gvErr == nil, Optional: true, Detail: "docker with runsc: dock new --runtime gvisor"}
 		if gvErr == nil && gvSUID {
-			c.Detail += " (sudo available: runsc-suid found)"
+			c.Detail += " (sudo and a persistent rootfs: runsc-suid found)"
 		} else if gvErr == nil {
-			c.Detail += " (no sudo in docks: runsc-suid is not registered)"
+			c.Detail += " (no sudo and only /home/user/work persists: runsc-suid is not registered)"
 			c.Fix = GVisorSUIDFix
 		}
 		if gvErr != nil {
