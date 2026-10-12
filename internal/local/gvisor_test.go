@@ -715,3 +715,106 @@ func TestGVisorResumeRecreatesALostContainer(t *testing.T) {
 		t.Fatalf("resume of a lost container: %+v %v", st, err)
 	}
 }
+
+const (
+	rtPlain = `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`
+	rtSUID  = `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/local/bin/runsc","runtimeArgs":["--allow-suid"]}}`
+)
+
+func TestGVisorRuntimeChoice(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, runtimes, want string
+		note                 bool
+	}{
+		{"plain runsc", rtPlain, "runsc", true},
+		{"runsc-suid", rtSUID, "runsc-suid", false},
+		// Registered without the flag, sudo would silently fail: treated as missing.
+		{"runsc-suid without --allow-suid", `{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/local/bin/runsc"}}`, "runsc", true},
+		// Never accepted blindly: it must be a runsc binary.
+		{"runsc-suid that is not runsc", `{"runsc":{"path":"/usr/local/bin/runsc"},"runsc-suid":{"path":"/usr/bin/evil","runtimeArgs":["--allow-suid"]}}`, "runsc", true},
+	} {
+		e, fd := newGVisorEngine(t)
+		fd.runtimes = tc.runtimes
+		var progress strings.Builder
+		e.Progress = &progress
+		d, err := e.New(ctx, Spec{Name: "rt", Runtime: RuntimeGVisor})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		argv := strings.Join(fd.callsWith("run")[0], " ")
+		if !strings.Contains(argv, " --runtime="+tc.want+" ") {
+			t.Errorf("%s: argv %s", tc.name, argv)
+		}
+		rec, _ := e.Lookup(d.ID)
+		if rec.GVisorRuntime != tc.want {
+			t.Errorf("%s: record runtime %q", tc.name, rec.GVisorRuntime)
+		}
+		noted := strings.Contains(progress.String(), "sudo will not work") && strings.Contains(progress.String(), "runsc install --runtime=runsc-suid -- --allow-suid")
+		if noted != tc.note {
+			t.Errorf("%s: note printed=%v, progress %q", tc.name, noted, progress.String())
+		}
+	}
+}
+
+func TestGVisorResumeKeepsTheRecordedRuntime(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	fd.runtimes = rtSUID
+	d, err := e.New(ctx, Spec{Name: "keep", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Stop(ctx, "keep", false); err != nil {
+		t.Fatal(err)
+	}
+	// docker start reuses the container runtime; a started dock is never switched.
+	if _, err := e.Resume(ctx, "keep"); err != nil || len(fd.callsWith("run")) != 1 {
+		t.Fatalf("resume: %v", err)
+	}
+	// A lost container recreated while runsc-suid is gone must not silently fall back to runsc.
+	if _, err := e.Stop(ctx, "keep", false); err != nil {
+		t.Fatal(err)
+	}
+	delete(fd.containers, "dock-local-"+d.ID)
+	delete(fd.stopped, "dock-local-"+d.ID)
+	fd.runtimes = rtPlain
+	if _, err := e.Resume(ctx, "keep"); codeOf(err) != "runtime_missing" {
+		t.Fatalf("got %v", err)
+	}
+	fd.runtimes = rtSUID
+	if _, err := e.Resume(ctx, "keep"); err != nil {
+		t.Fatalf("recreate with the recorded runtime: %v", err)
+	}
+	if argv := strings.Join(fd.callsWith("run")[1], " "); !strings.Contains(argv, "--runtime=runsc-suid ") {
+		t.Fatalf("argv %s", argv)
+	}
+}
+
+func TestDoctorGVisorRowReportsSudo(t *testing.T) {
+	look := func(string) (string, error) { return "docker", nil }
+	run := func(out string) DockerRun {
+		return func(context.Context, io.Reader, ...string) (string, string, error) { return out, "", nil }
+	}
+	e := doctorEngine(t, "linux", nil, &GVisor{GOOS: "linux", LookPath: look, Run: run(rtSUID)})
+	c, _ := doctorRow(e, "gvisor")
+	if !c.OK || !c.Optional || !strings.Contains(c.Detail, "sudo available") || c.Fix != "" {
+		t.Fatalf("suid row %+v", c)
+	}
+	e = doctorEngine(t, "linux", nil, &GVisor{GOOS: "linux", LookPath: look, Run: run(rtPlain)})
+	c, _ = doctorRow(e, "gvisor")
+	if !c.OK || !c.Optional || !strings.Contains(c.Detail, "no sudo") || c.Fix != GVisorSUIDFix {
+		t.Fatalf("plain row %+v", c)
+	}
+}
+
+func TestRecordGVisorRuntimeBackCompat(t *testing.T) {
+	var r Record
+	if err := json.Unmarshal([]byte(`{"id":"dk_1","runtime":"gvisor"}`), &r); err != nil || r.gvRuntime() != "runsc" {
+		t.Fatalf("a record without gvisorRuntime uses runsc: %+v %v", r, err)
+	}
+	raw, _ := json.Marshal(Record{ID: "a"})
+	if strings.Contains(string(raw), "gvisorRuntime") {
+		t.Fatalf("empty field must be omitted: %s", raw)
+	}
+}

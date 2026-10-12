@@ -28,8 +28,9 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	// gvisor is informational and Linux only; gvErr is nil when it can run docks.
 	showGVisor := isQEMU && q.GOOS == "linux"
 	var gvErr error
+	var gvSUID bool
 	if showGVisor {
-		gvErr = e.gvisor().Preflight(ctx)
+		gvSUID, gvErr = e.gvisor().Probe(ctx)
 	}
 	if !isQEMU {
 		add(Check{Name: "driver", OK: e.Driver.Preflight(ctx) == nil, Detail: "custom driver"})
@@ -68,6 +69,12 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	}
 	if showGVisor {
 		c := Check{Name: "gvisor", OK: gvErr == nil, Optional: true, Detail: "docker with runsc: dock new --runtime gvisor"}
+		if gvErr == nil && gvSUID {
+			c.Detail += " (sudo available: runsc-suid found)"
+		} else if gvErr == nil {
+			c.Detail += " (no sudo in docks: runsc-suid is not registered)"
+			c.Fix = GVisorSUIDFix
+		}
 		if gvErr != nil {
 			c.Detail = gvErr.Error()
 			if code := ErrCode(gvErr); code == "docker_not_found" || code == "runsc_not_found" {

@@ -67,6 +67,17 @@ const (
 	gvAgentConfigPath = "/etc/dock-fast-agent.json"
 )
 
+// Docker runtime names a gvisor dock can use. runsc-suid is a second registration of the same
+// runsc binary with --allow-suid (gVisor ignores setuid bits otherwise, so sudo fails); it is a
+// separate runtime so other runsc containers on the machine keep the default.
+const (
+	gvRuntimePlain = "runsc"
+	gvRuntimeSUID  = "runsc-suid"
+)
+
+// GVisorSUIDFix is how to enable sudo inside new gvisor docks, once.
+const GVisorSUIDFix = "sudo runsc install --runtime=runsc-suid -- --allow-suid && sudo systemctl restart docker"
+
 // GVisorInstallFix says how to get runsc registered with Docker.
 const GVisorInstallFix = "Install gVisor (https://gvisor.dev/docs/user_guide/install/), then run: sudo runsc install && sudo systemctl restart docker"
 
@@ -106,28 +117,50 @@ func (g *GVisor) docker(ctx context.Context, stdin io.Reader, args ...string) (s
 
 // Preflight fails with a coded, actionable error when gVisor docks cannot run here.
 func (g *GVisor) Preflight(ctx context.Context) error {
+	_, err := g.Probe(ctx)
+	return err
+}
+
+// dockerRuntime is one entry of docker info Runtimes.
+type dockerRuntime struct {
+	Path        string   `json:"path"`
+	RuntimeArgs []string `json:"runtimeArgs"`
+}
+
+// suidRuntime reports whether rt is a usable runsc-suid: a runsc binary registered with
+// --allow-suid. One without the flag is treated as missing, because sudo would silently fail.
+func suidRuntime(rt json.RawMessage) bool {
+	var r dockerRuntime
+	if json.Unmarshal(rt, &r) != nil || !strings.HasPrefix(filepath.Base(r.Path), "runsc") {
+		return false
+	}
+	return slices.ContainsFunc(r.RuntimeArgs, func(a string) bool { return a == "--allow-suid" || a == "--allow-suid=true" })
+}
+
+// Probe runs the preflight and reports whether the runsc-suid runtime (sudo in docks) is available.
+func (g *GVisor) Probe(ctx context.Context) (suid bool, err error) {
 	if g.GOOS != "linux" {
-		return errf("unsupported_os", "--runtime gvisor is only supported on Linux, not %s", g.GOOS)
+		return false, errf("unsupported_os", "--runtime gvisor is only supported on Linux, not %s", g.GOOS)
 	}
 	look := g.LookPath
 	if look == nil {
 		look = exec.LookPath
 	}
 	if _, err := look("docker"); err != nil {
-		return errf("docker_not_found", "docker was not found on PATH. Install Docker Engine (https://docs.docker.com/engine/install/), then install gVisor: %s", GVisorInstallFix)
+		return false, errf("docker_not_found", "docker was not found on PATH. Install Docker Engine (https://docs.docker.com/engine/install/), then install gVisor: %s", GVisorInstallFix)
 	}
 	out, stderr, err := g.docker(ctx, nil, "info", "--format", "{{json .Runtimes}}")
 	if err != nil {
-		return errf("docker_unavailable", "cannot talk to the Docker daemon: %v: %s. Check that Docker is running and that your user may use it (for example: sudo usermod -aG docker $USER, then log in again)", err, strings.TrimSpace(stderr))
+		return false, errf("docker_unavailable", "cannot talk to the Docker daemon: %v: %s. Check that Docker is running and that your user may use it (for example: sudo usermod -aG docker $USER, then log in again)", err, strings.TrimSpace(stderr))
 	}
 	var rts map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rts); err != nil {
-		return errf("docker_unavailable", "unexpected output from docker info: %q", strings.TrimSpace(out))
+		return false, errf("docker_unavailable", "unexpected output from docker info: %q", strings.TrimSpace(out))
 	}
-	if _, ok := rts["runsc"]; !ok {
-		return errf("runsc_not_found", "the runsc runtime is not registered with Docker. %s", GVisorInstallFix)
+	if _, ok := rts[gvRuntimePlain]; !ok {
+		return false, errf("runsc_not_found", "the runsc runtime is not registered with Docker. %s", GVisorInstallFix)
 	}
-	return nil
+	return suidRuntime(rts[gvRuntimeSUID]), nil
 }
 
 // gvBuildContext returns the tar build context and the tag derived from its content.
@@ -200,7 +233,7 @@ func gvNetwork(id string) string   { return "dock-local-" + id + "-net" }
 // root inside the dock (sudo) is sandbox root: Docker default capabilities stay, never --privileged.
 func gvRunArgs(rec Record, port int, agentConfig, resolvConf, image string) []string {
 	return []string{
-		"run", "-d", "--runtime=runsc", "--name", gvContainer(rec.ID),
+		"run", "-d", "--runtime=" + rec.gvRuntime(), "--name", gvContainer(rec.ID),
 		"--network", gvNetwork(rec.ID),
 		"-p", "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(guestagent.Port),
 		"--cpus", strconv.Itoa(rec.CPUs),
@@ -368,13 +401,24 @@ func (e *Engine) gvisor() *GVisor {
 	return NewGVisor()
 }
 
-// gvPrepare is the preflight and image step shared by new and resume.
-func (e *Engine) gvPrepare(ctx context.Context) (string, error) {
-	g := e.gvisor()
-	if err := g.Preflight(ctx); err != nil {
-		return "", err
+// gvRuntime is the Docker runtime of a gvisor dock; older records have none and used runsc.
+func (r Record) gvRuntime() string {
+	if r.GVisorRuntime == "" {
+		return gvRuntimePlain
 	}
-	return g.EnsureImage(ctx, func(s string) { e.logf("%s", s) })
+	return r.GVisorRuntime
+}
+
+// gvPrepare is the preflight and image step shared by new and resume. suid says whether the
+// runsc-suid runtime is registered.
+func (e *Engine) gvPrepare(ctx context.Context) (image string, suid bool, err error) {
+	g := e.gvisor()
+	suid, err = g.Probe(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	image, err = g.EnsureImage(ctx, func(s string) { e.logf("%s", s) })
+	return image, suid, err
 }
 
 // writeGVisorFiles writes the dock agent config and resolv.conf (both bind-mounted into the
@@ -453,11 +497,14 @@ func gvPortInUse(port int) error {
 // host port was fixed when it was created; if something else holds it now the error says so.
 // A container that is gone (docker prune) is recreated on the work volume; only /home/user/work
 // survives that.
-func (e *Engine) resumeGVisor(ctx context.Context, rec Record, image string) error {
+func (e *Engine) resumeGVisor(ctx context.Context, rec Record, image string, suid bool) error {
 	g := e.gvisor()
 	if _, stderr, err := g.docker(ctx, nil, "inspect", "--format", "{{.State.Status}}", gvContainer(rec.ID)); err != nil {
 		if !notFound(stderr) {
 			return dockerFailure("boot_failed", "docker inspect "+gvContainer(rec.ID), err, stderr)
+		}
+		if rec.gvRuntime() == gvRuntimeSUID && !suid {
+			return errf("runtime_missing", "dock %s was created with the %s runtime, which is no longer registered with Docker; register it again (%s) or remove the dock", rec.ID, gvRuntimeSUID, GVisorSUIDFix)
 		}
 		e.logf("the container of %s is gone; recreating it (only /home/user/work survives)", rec.ID)
 		return e.bootGVisor(ctx, rec, image)
@@ -559,14 +606,20 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 	if spec.Network == "off" {
 		return Dock{}, errf("not_supported", "--network off is not supported with --runtime gvisor: a published port needs a network")
 	}
-	image, err := e.gvPrepare(ctx)
+	image, suid, err := e.gvPrepare(ctx)
 	if err != nil {
 		return Dock{}, err
+	}
+	rt := gvRuntimePlain
+	if suid {
+		rt = gvRuntimeSUID
+	} else {
+		e.logf("note: sudo will not work in this dock (the %s runtime is not registered). To enable it once, for new docks: %s", gvRuntimeSUID, GVisorSUIDFix)
 	}
 	if diskSet {
 		e.logf("note: --disk is not enforced for gvisor docks; the work volume grows with the Docker data directory")
 	}
-	rec := Record{ID: NewID(), Name: spec.Name, Image: "dock-local-gvisor", Runtime: RuntimeGVisor, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
+	rec := Record{ID: NewID(), Name: spec.Name, Image: "dock-local-gvisor", Runtime: RuntimeGVisor, GVisorRuntime: rt, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
 		DiskGiB: spec.DiskGiB, Network: spec.Network, CreatedAt: e.now()}
 	if err := e.mkDockDir(rec.ID); err != nil {
 		return Dock{}, errf("store_error", "%v", err)

@@ -92,6 +92,8 @@ jobs:
           tar -xjf "${tmp}/gvisor.tar.bz2" -C "${tmp}" runsc
           sudo install -m 0755 "${tmp}/runsc" /usr/local/bin/runsc
           sudo /usr/local/bin/runsc install
+          # Separate runtime with --allow-suid so docks get sudo; plain runsc stays the default.
+          sudo /usr/local/bin/runsc install --runtime=runsc-suid -- --allow-suid
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}'
       - name: gvisor engine e2e

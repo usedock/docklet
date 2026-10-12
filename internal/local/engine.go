@@ -660,11 +660,11 @@ func (e *Engine) Resume(ctx context.Context, ref string) (Dock, error) {
 		return e.view(ctx, rec), nil
 	}
 	if rec.runtime() == RuntimeGVisor {
-		image, err := e.gvPrepare(ctx)
+		image, suid, err := e.gvPrepare(ctx)
 		if err != nil {
 			return Dock{}, err
 		}
-		if err := e.resumeGVisor(ctx, rec, image); err != nil {
+		if err := e.resumeGVisor(ctx, rec, image, suid); err != nil {
 			return Dock{}, err
 		}
 		return e.view(ctx, rec), nil

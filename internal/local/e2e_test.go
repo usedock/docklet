@@ -120,6 +120,9 @@ func TestE2ELocalGVisorDock(t *testing.T) {
 	}
 	run("echo keep > /home/user/work/f")
 	// Root in the sandbox: sudo works, and a change to the rootfs (a package) must survive stop/resume.
+	if rec, _ := e.Lookup("e2egv"); rec.GVisorRuntime != "runsc-suid" {
+		t.Fatalf("CI registers runsc-suid, the dock must use it: %q", rec.GVisorRuntime)
+	}
 	if out := run("sudo id -u"); strings.TrimSpace(out) != "0" {
 		t.Fatalf("sudo id: %q", out)
 	}
