@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -213,6 +214,72 @@ func TestDoctorKVMPermissionHasFix(t *testing.T) {
 		return
 	}
 	t.Fatal("no accelerator row")
+}
+
+func TestKVMMessagesMentionGVisor(t *testing.T) {
+	pe := func(err error) error { return &fs.PathError{Op: "open", Path: "/dev/kvm", Err: err} }
+	for name, kerr := range map[string]error{"permission": pe(fs.ErrPermission), "missing": pe(fs.ErrNotExist), "other": errors.New("boom")} {
+		_, err := Accelerator("linux", env(nil), func() error { return kerr })
+		if err == nil || !strings.HasSuffix(err.Error(), GVisorHint) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if !strings.HasPrefix(kvmMessage(pe(fs.ErrPermission)), "KVM is present but your user cannot open") {
+		t.Error("the permission case must keep leading with the group fix")
+	}
+	for _, goos := range []string{"windows", "darwin"} {
+		if a, err := Accelerator(goos, env(nil), func() error { return errors.New("x") }); err != nil || strings.Contains(a, "gvisor") {
+			t.Errorf("%s: %q %v", goos, a, err)
+		}
+	}
+}
+
+func doctorEngine(t *testing.T, goos string, kvm error, gv *GVisor) *Engine {
+	t.Helper()
+	e, _, _ := newTestEngine(t)
+	e.Driver = &QEMU{GOOS: goos, GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img", KVM: func() error { return kvm }}
+	e.GVisor = gv
+	return e
+}
+
+func doctorRow(e *Engine, name string) (Check, bool) {
+	for _, c := range e.Doctor(context.Background()) {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return Check{}, false
+}
+
+func TestDoctorGVisorRow(t *testing.T) {
+	look := func(string) (string, error) { return "docker", nil }
+	run := func(out string) DockerRun {
+		return func(context.Context, io.Reader, ...string) (string, string, error) { return out, "", nil }
+	}
+	noKVM := &fs.PathError{Op: "open", Path: "/dev/kvm", Err: fs.ErrNotExist}
+
+	e := doctorEngine(t, "linux", noKVM, &GVisor{GOOS: "linux", LookPath: look, Run: run(`{"runsc":{}}`)})
+	c, ok := doctorRow(e, "gvisor")
+	if !ok || !c.OK || !c.Optional || !strings.Contains(c.Detail, "dock new --runtime gvisor") {
+		t.Fatalf("gvisor ok row %+v", c)
+	}
+	if a, _ := doctorRow(e, "accelerator"); a.OK || !strings.Contains(a.Fix, "dock new --runtime gvisor") || !strings.Contains(a.Detail, GVisorHint) {
+		t.Fatalf("accelerator row %+v", a)
+	}
+
+	e = doctorEngine(t, "linux", noKVM, &GVisor{GOOS: "linux", LookPath: look, Run: run(`{"runc":{}}`)})
+	c, ok = doctorRow(e, "gvisor")
+	if !ok || c.OK || !c.Optional || !strings.Contains(c.Detail, "runsc") || !strings.Contains(c.Fix, "runsc install") {
+		t.Fatalf("gvisor missing row %+v", c)
+	}
+	if a, _ := doctorRow(e, "accelerator"); strings.Contains(a.Fix, "--runtime gvisor") {
+		t.Fatalf("no gvisor suggestion in the fix when gvisor cannot run: %+v", a)
+	}
+
+	e = doctorEngine(t, "windows", nil, &GVisor{GOOS: "windows"})
+	if _, ok := doctorRow(e, "gvisor"); ok {
+		t.Fatal("no gvisor row off Linux")
+	}
 }
 
 func TestFindToolOrder(t *testing.T) {

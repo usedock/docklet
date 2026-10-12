@@ -79,6 +79,7 @@ winget install SoftwareFreedomConservancy.QEMU
 On a Linux machine without usable KVM (for example a cloud VM without nested virtualization), opt in to gVisor containers instead: `dock new --runtime gvisor` or `DOCK_LOCAL_RUNTIME=gvisor`. There is no silent fallback: without the flag, local docks stay QEMU only.
 
 - Needs Docker Engine and the gVisor `runsc` runtime registered with it ([install gVisor](https://gvisor.dev/docs/user_guide/install/), then `sudo runsc install` and `sudo systemctl restart docker`). `dock new` checks both before building anything. The first dock builds a small `dock-local-gvisor:<hash>` image with `docker build` (Ubuntu 24.04, python3, git, curl, sudo); nothing is published.
+- On Linux, the `no_accelerator` error and `dock doctor` point to this option when KVM is unusable. `dock doctor` shows an informational `gvisor` row that never makes it fail.
 - Only `/home/user/work` persists (a named Docker volume). `dock stop` removes the container and keeps the volume, `dock resume` runs a new container on it, `dock rm` removes both.
 - `exec`, `ssh` and `port` work as for QEMU docks, through the guest agent on `127.0.0.1`. `dock ls --json` shows `runtime: gvisor`.
 - Not supported: `--network off`, `dock branch`, `dock push` and `dock pull`. `--disk` is not enforced on the volume.

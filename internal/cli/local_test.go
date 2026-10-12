@@ -475,3 +475,34 @@ func TestRuntimeFlagIsLocalOnly(t *testing.T) {
 		t.Fatal("no API call for a usage error")
 	}
 }
+
+func TestDoctorOptionalRowDoesNotFail(t *testing.T) {
+	te, _ := newLocalEnv(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	getenv := func(k string) string {
+		if k == "DOCK_QEMU" || k == "DOCK_QEMU_IMG" {
+			return exe
+		}
+		return ""
+	}
+	te.app.Engine.Driver = &local.QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: getenv, KVM: func() error { return nil },
+		Run: func(context.Context, string, ...string) ([]byte, error) { return []byte("kvm"), nil }}
+	te.app.Engine.GVisor = &local.GVisor{GOOS: "linux", LookPath: func(string) (string, error) { return "", os.ErrNotExist }}
+	mustExit(t, te, 0, "doctor")
+	if !strings.Contains(te.out.String(), "[info   ] gvisor") || strings.Contains(te.out.String(), "[missing]") {
+		t.Fatalf("an unavailable gvisor renders as info and does not fail doctor: %q", te.out)
+	}
+	mustExit(t, te, 0, "doctor", "--json")
+	var found bool
+	for _, c := range jsonOut(t, te).([]any) {
+		if row := c.(map[string]any); row["name"] == "gvisor" {
+			found = row["optional"] == true && row["ok"] == false
+		}
+	}
+	if !found {
+		t.Fatalf("json must flag the gvisor row optional: %q", te.out)
+	}
+}
