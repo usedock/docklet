@@ -197,7 +197,7 @@ func kvmFix(err error) string {
 func kvmMessage(err error) string {
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		return "KVM is present but your user cannot open /dev/kvm (permission denied). " + kvmPermissionFix
+		return fmt.Sprintf("KVM is present but your user cannot open /dev/kvm (%v). %s", err, kvmPermissionFix)
 	case errors.Is(err, fs.ErrNotExist):
 		return "this machine has no KVM device (/dev/kvm is missing). " + kvmMissingFix
 	}
