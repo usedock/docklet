@@ -181,6 +181,7 @@ func TestGVisorRoundTrip(t *testing.T) {
 		"--pids-limit 1024", "--tmpfs /tmp",
 		"-v dock-local-" + d.ID + "-work:/home/user/work",
 		"-v " + cfg + ":/etc/dock-fast-agent.json:ro",
+		"-v " + e.file(d.ID, "resolv.conf") + ":/etc/resolv.conf:ro",
 		" dock-local-gvisor:",
 	} {
 		if !strings.Contains(argv, want) {
@@ -431,6 +432,32 @@ func TestGVisorAgentConfigMountIsAbsolute(t *testing.T) {
 		if src, ok := strings.CutSuffix(a, ":"+gvAgentConfigPath+":ro"); ok && !filepath.IsAbs(src) {
 			t.Fatalf("agent config mount source %q is relative", src)
 		}
+	}
+}
+
+func TestGVisorResolvConfUsesUpstreamResolvers(t *testing.T) {
+	files := map[string]string{}
+	read := func(p string) ([]byte, error) {
+		if s, ok := files[p]; ok {
+			return []byte(s), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	// Plain host: its IPv4 resolvers, IPv6 and duplicates dropped.
+	files["/etc/resolv.conf"] = "search lan\nnameserver 10.0.0.1\nnameserver 10.0.0.1\nnameserver fe80::1\nnameserver 1.1.1.1\n"
+	if got := string(gvResolvConf(read)); got != "nameserver 10.0.0.1\nnameserver 1.1.1.1\n" {
+		t.Fatalf("plain host: %q", got)
+	}
+	// systemd-resolved stub: the container cannot reach 127.0.0.53, use the real upstreams.
+	files["/etc/resolv.conf"] = "nameserver 127.0.0.53\noptions edns0\n"
+	files["/run/systemd/resolve/resolv.conf"] = "nameserver 168.63.129.16\n"
+	if got := string(gvResolvConf(read)); got != "nameserver 168.63.129.16\n" {
+		t.Fatalf("resolved stub: %q", got)
+	}
+	// Nothing usable: Docker's own fallback.
+	delete(files, "/run/systemd/resolve/resolv.conf")
+	if got := string(gvResolvConf(read)); got != "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" {
+		t.Fatalf("fallback: %q", got)
 	}
 }
 

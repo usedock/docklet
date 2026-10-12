@@ -9,10 +9,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -193,7 +195,7 @@ func gvVolume(id string) string    { return "dock-local-" + id + "-work" }
 func gvNetwork(id string) string   { return "dock-local-" + id + "-net" }
 
 // gvRunArgs returns the docker run arguments for one dock.
-func gvRunArgs(rec Record, port int, agentConfig, image string) []string {
+func gvRunArgs(rec Record, port int, agentConfig, resolvConf, image string) []string {
 	return []string{
 		"run", "-d", "--runtime=runsc", "--name", gvContainer(rec.ID),
 		"--network", gvNetwork(rec.ID),
@@ -206,6 +208,7 @@ func gvRunArgs(rec Record, port int, agentConfig, image string) []string {
 		"--tmpfs", "/tmp",
 		"-v", gvVolume(rec.ID) + ":/home/user/work",
 		"-v", agentConfig + ":" + gvAgentConfigPath + ":ro",
+		"-v", resolvConf + ":/etc/resolv.conf:ro",
 		image,
 	}
 }
@@ -257,6 +260,44 @@ func (g *GVisor) removeNetwork(ctx context.Context, id string) error {
 func (g *GVisor) cleanup(ctx context.Context, id string) {
 	_ = g.removeContainer(ctx, id)
 	_ = g.removeNetwork(ctx, id)
+}
+
+// gvFallbackDNS is what Docker itself uses when the host has no usable resolver.
+var gvFallbackDNS = []string{"8.8.8.8", "8.8.4.4"}
+
+// gvResolvConf builds the dock's resolv.conf from the host's IPv4 upstream nameservers.
+// Loopback resolvers (systemd-resolved's 127.0.0.53) are unreachable from the container, so
+// the real upstreams come from /run/systemd/resolve/resolv.conf, as Docker does.
+func gvResolvConf(read func(string) ([]byte, error)) []byte {
+	var servers []string
+	for _, path := range []string{"/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"} {
+		raw, err := read(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			f := strings.Fields(line)
+			if len(f) < 2 || f[0] != "nameserver" {
+				continue
+			}
+			ip := net.ParseIP(f[1])
+			if ip == nil || ip.To4() == nil || ip.IsLoopback() || slices.Contains(servers, f[1]) {
+				continue
+			}
+			servers = append(servers, f[1])
+		}
+		if len(servers) > 0 {
+			break
+		}
+	}
+	if len(servers) == 0 {
+		servers = gvFallbackDNS
+	}
+	var b strings.Builder
+	for _, s := range servers {
+		b.WriteString("nameserver " + s + "\n")
+	}
+	return []byte(b.String())
 }
 
 // running reports whether the dock's container is running.
@@ -324,6 +365,15 @@ func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error
 	if err := os.Chmod(cfg, 0o644); err != nil {
 		return errf("store_error", "%v", err)
 	}
+	// Docker points a user-defined network at its embedded DNS (127.0.0.11), which runsc's
+	// own network stack cannot reach, so the dock gets the host's upstream resolvers instead.
+	resolv := filepath.Join(filepath.Dir(cfg), "resolv.conf")
+	if err := os.WriteFile(resolv, gvResolvConf(os.ReadFile), 0o644); err != nil {
+		return errf("store_error", "%v", err)
+	}
+	if err := os.Chmod(resolv, 0o644); err != nil {
+		return errf("store_error", "%v", err)
+	}
 	for attempt := 1; ; attempt++ {
 		port, err := freePort()
 		if err != nil {
@@ -339,7 +389,7 @@ func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error
 		if err := g.ensureNetwork(ctx, rec.ID); err != nil {
 			return err
 		}
-		_, stderr, err := g.docker(ctx, nil, gvRunArgs(rec, port, cfg, image)...)
+		_, stderr, err := g.docker(ctx, nil, gvRunArgs(rec, port, cfg, resolv, image)...)
 		if err != nil {
 			g.cleanup(ctx, rec.ID)
 			low := strings.ToLower(stderr)
