@@ -4,8 +4,8 @@ package local
 
 import (
 	"context"
-	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,32 +19,32 @@ func TestE2ELocalGVisorDockDebug(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sh := func(name string, args ...string) {
+	sh := func(name string, args ...string) string {
 		out, _ := exec.CommandContext(ctx, name, args...).CombinedOutput()
-		t.Logf("$ %s %v\n%s", name, args, out)
+		return strings.TrimSpace(string(out))
 	}
-	sh("runsc", "--version")
-	sh("sh", "-c", "cat /etc/docker/daemon.json; docker info --format '{{json .Runtimes}}'")
-	script := `echo "--- NoNewPrivs/caps"; grep -E "NoNewPrivs|^Cap|Seccomp" /proc/self/status
-echo "--- root mount"; grep -E " / | /usr " /proc/self/mountinfo
-echo "--- sudo file"; ls -l /usr/bin/sudo; stat -c '%a %u' /usr/bin/sudo
-echo "--- sudo"; sudo -n id -u 2>&1
-echo "--- su-like setuid test"; /usr/bin/passwd -S 2>&1 | head -2`
-	base := []string{"run", "--rm", "--runtime=runsc", "--entrypoint", "sh"}
-	variants := map[string][]string{
-		"A baseline user 1001":            {"--user", "1001:1001"},
-		"B seccomp unconfined":            {"--user", "1001:1001", "--security-opt", "seccomp=unconfined"},
-		"C apparmor unconfined":           {"--user", "1001:1001", "--security-opt", "apparmor=unconfined"},
-		"D cap-add setuid setgid":         {"--user", "1001:1001", "--cap-add=SETUID", "--cap-add=SETGID"},
-		"E user 1001 + tmpfs /tmp + pids": {"--user", "1001:1001", "--tmpfs", "/tmp", "--pids-limit", "1024"},
-		"F as root (no --user)":           {},
+	t.Logf("docker: %s", sh("docker", "--version"))
+	// Probes: passwd -S root only works with euid 0; sudo -n id -u prints 0 when setuid works.
+	script := `echo "sudo: $(sudo -n id -u 2>&1 | head -1)"; echo "passwd: $(passwd -S root 2>&1 | head -1)"; echo "mount: $(mount --bind /tmp /tmp 2>&1 | head -1)"; grep -E "NoNewPrivs" /proc/self/status`
+	variants := []struct {
+		name string
+		args []string
+	}{
+		{"runc control, user 1001", []string{"--runtime=runc", "--user", "1001:1001"}},
+		{"runsc user 1001", []string{"--runtime=runsc", "--user", "1001:1001"}},
+		{"runsc user name 'user'", []string{"--runtime=runsc", "--user", "user"}},
+		{"runsc, no-new-privileges=false", []string{"--runtime=runsc", "--user", "1001:1001", "--security-opt", "no-new-privileges=false"}},
+		{"runsc, read-only rootfs", []string{"--runtime=runsc", "--user", "1001:1001", "--read-only"}},
+		{"runsc, cap-add ALL", []string{"--runtime=runsc", "--user", "1001:1001", "--cap-add=ALL"}},
+		{"runsc, annotation overlay2=none", []string{"--runtime=runsc", "--user", "1001:1001", "--annotation", "dev.gvisor.flag.overlay2=none"}},
+		{"runsc, host network", []string{"--runtime=runsc", "--user", "1001:1001", "--network=host"}},
 	}
-	for name, extra := range variants {
-		args := append(append(append([]string{}, base...), extra...), tag, "-c", script)
-		t.Logf("=== %s", name)
-		sh("docker", args...)
+	for _, v := range variants {
+		args := append(append([]string{"run", "--rm", "--entrypoint", "sh"}, v.args...), tag, "-c", script)
+		t.Logf("=== %s\n%s", v.name, sh("docker", args...))
 	}
-	// An ubuntu image with the stock rootfs, to separate our image from the runtime.
-	sh("docker", "run", "--rm", "--runtime=runsc", "--user", "1001:1001", "--entrypoint", "sh", tag, "-c", "grep -c . /proc/self/mountinfo; id")
-	_ = os.Stderr
+	// Stock image, no setuid binary of ours: does passwd work as euid 0?
+	t.Logf("=== stock ubuntu:noble runsc user 1001\n%s", sh("docker", "run", "--rm", "--runtime=runsc", "--user", "1001:1001", "ubuntu:noble", "sh", "-c", `echo "passwd: $(passwd -S root 2>&1 | head -1)"; ls -l /usr/bin/passwd`))
+	// A setuid check from a process that has just exec'd as the unprivileged user via su from root.
+	t.Logf("=== root su to user\n%s", sh("docker", "run", "--rm", "--runtime=runsc", "--entrypoint", "sh", tag, "-c", `su user -c 'sudo -n id -u 2>&1 | head -1'`))
 }
