@@ -43,6 +43,7 @@ func (l localAPI) do(ctx context.Context, method, path string, body any) (json.R
 		Name           string `json:"name"`
 		Image          string `json:"image"`
 		Network        string `json:"network"`
+		Runtime        string `json:"runtime"`
 		Command        string `json:"command"`
 		Cwd            string `json:"cwd"`
 		CPUs           int    `json:"cpus"`
@@ -77,7 +78,7 @@ func (l localAPI) do(ctx context.Context, method, path string, body any) (json.R
 		}
 		return json.Marshal(docks)
 	case parts[0] == "docks" && len(parts) == 1 && method == http.MethodPost:
-		d, err := l.e.New(ctx, local.Spec{Name: in.Name, Image: in.Image, Network: in.Network, CPUs: in.CPUs, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB})
+		d, err := l.e.New(ctx, local.Spec{Name: in.Name, Image: in.Image, Network: in.Network, Runtime: in.Runtime, CPUs: in.CPUs, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB})
 		if err != nil {
 			return nil, err
 		}

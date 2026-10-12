@@ -114,7 +114,7 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) error {
 	checks := e.Doctor(ctx)
 	bad := false
 	for _, ck := range checks {
-		bad = bad || !ck.OK
+		bad = bad || (!ck.OK && !ck.Optional)
 	}
 	if *c.json {
 		if err := a.printValue(checks); err != nil {
@@ -125,6 +125,9 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) error {
 			mark := "ok     "
 			if !ck.OK {
 				mark = "missing"
+				if ck.Optional {
+					mark = "info   "
+				}
 			}
 			fmt.Fprintf(a.Stdout, "[%s] %-14s %s\n", mark, ck.Name, ck.Detail)
 			if ck.Fix != "" {

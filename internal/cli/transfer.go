@@ -634,6 +634,9 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if localName == "" {
 		localName = rd.Name
 	}
+	if rd.Runtime == local.RuntimeGVisor {
+		return newError("not_supported", "pull is not supported for gvisor docks (only /home/user/work persists; there is no disk image to export)")
+	}
 	// Fail on a taken name before the long export and download.
 	if err := eng.CheckName(localName); err != nil {
 		return localError(err)

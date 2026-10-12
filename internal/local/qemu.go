@@ -182,6 +182,9 @@ const (
 	kvmOtherFix      = "Check that the CPU supports virtualization, that it is enabled in firmware, and that your user can read and write /dev/kvm."
 )
 
+// GVisorHint is appended to every Linux no_accelerator message and reused by dock doctor.
+const GVisorHint = "Without KVM, you can run docks with gVisor through Docker: dock new --runtime gvisor (needs Docker and runsc)."
+
 // kvmFix is the fix line for a kvmUsable error.
 func kvmFix(err error) string {
 	switch {
@@ -197,11 +200,11 @@ func kvmFix(err error) string {
 func kvmMessage(err error) string {
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		return fmt.Sprintf("KVM is present but your user cannot open /dev/kvm (%v). %s", err, kvmPermissionFix)
+		return fmt.Sprintf("KVM is present but your user cannot open /dev/kvm (%v). %s %s", err, kvmPermissionFix, GVisorHint)
 	case errors.Is(err, fs.ErrNotExist):
-		return "this machine has no KVM device (/dev/kvm is missing). " + kvmMissingFix
+		return "this machine has no KVM device (/dev/kvm is missing). " + kvmMissingFix + " " + GVisorHint
 	}
-	return fmt.Sprintf("KVM is not usable (%v). %s", err, kvmOtherFix)
+	return fmt.Sprintf("KVM is not usable (%v). %s %s", err, kvmOtherFix, GVisorHint)
 }
 
 func kvmUsable() error {

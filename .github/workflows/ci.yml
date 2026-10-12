@@ -72,6 +72,35 @@ jobs:
       - name: test
         run: go test -timeout 8m ./internal/local/... ./internal/guestagent/... ./internal/cli/...
 
+  # Runs a real local gVisor dock (Docker + runsc, no KVM needed) through the engine.
+  e2e-local-gvisor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: install runsc
+        run: |
+          set -eux
+          # Same pinned release and sha256 as the fleet hosts; the bucket's latest/ layout changes.
+          eval "$(grep -E '^RUNSC_(VERSION|SHA256_X86_64)=' scripts/bootstrap-host.sh)"
+          tmp=$(mktemp -d)
+          curl -fsSL -o "${tmp}/gvisor.tar.bz2" "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/gvisor-x86_64.tar.bz2"
+          echo "${RUNSC_SHA256_X86_64}  ${tmp}/gvisor.tar.bz2" | sha256sum -c -
+          tar -xjf "${tmp}/gvisor.tar.bz2" -C "${tmp}" runsc
+          sudo install -m 0755 "${tmp}/runsc" /usr/local/bin/runsc
+          sudo /usr/local/bin/runsc install
+          # Separate runtime so docks get sudo (--allow-suid) and a rootfs that survives stop (--overlay2=none); plain runsc stays the default.
+          sudo /usr/local/bin/runsc install --runtime=runsc-suid -- --allow-suid --overlay2=none
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}'
+      - name: gvisor engine e2e
+        env:
+          DOCK_E2E_REQUIRE_GVISOR: "1"
+        run: go test -tags e2e -run TestE2ELocalGVisorDock -v -timeout 25m ./internal/local/
+
   # Boots real local docks with KVM from the pinned Dockyard release, through the dock CLI and the engine.
   e2e-local:
     runs-on: ubuntu-latest

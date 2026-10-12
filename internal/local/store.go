@@ -16,16 +16,21 @@ import (
 // Record is one dock in docks.json. Runtime facts (token, port, pid) live in the dock's
 // own directory so a crashed CLI never leaves them half-written in the shared file.
 type Record struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name,omitempty"`
-	Image     string    `json:"image"`
-	ImageDir  string    `json:"imageDir"`
-	CPUs      int       `json:"cpus"`
-	MemoryMiB int       `json:"memoryMiB"`
-	DiskGiB   int       `json:"diskGiB"`
-	Network   string    `json:"network"`
-	Parent    string    `json:"parent,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Image     string `json:"image"`
+	ImageDir  string `json:"imageDir"`
+	CPUs      int    `json:"cpus"`
+	MemoryMiB int    `json:"memoryMiB"`
+	DiskGiB   int    `json:"diskGiB"`
+	Network   string `json:"network"`
+	// Runtime is "gvisor" for container docks; empty means qemu, so older records keep working.
+	Runtime string `json:"runtime,omitempty"`
+	// GVisorRuntime is the Docker runtime a gvisor dock was created with (runsc or
+	// runsc-suid); empty means runsc. A container keeps its runtime for life.
+	GVisorRuntime string    `json:"gvisorRuntime,omitempty"`
+	Parent        string    `json:"parent,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // Store is docks.json under Dir, guarded by a lock file across processes.

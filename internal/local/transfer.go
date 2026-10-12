@@ -107,6 +107,9 @@ func (e *Engine) CheckFreeSpace(need int64, what string) error {
 
 // CheckPushSpace checks there is room to flatten and compress rec's disk.
 func (e *Engine) CheckPushSpace(rec Record) error {
+	if rec.runtime() == RuntimeGVisor {
+		return gvUnsupported("push")
+	}
 	data := allocatedBytes(e.file(rec.ID, "disk.qcow2"))
 	if rec.ImageDir != "" {
 		data += allocatedBytes(filepath.Join(rec.ImageDir, "base.qcow2"))
@@ -189,6 +192,9 @@ func (e *Engine) Flatten(ctx context.Context, ref, dir string, stop bool) (*Flat
 	rec, err := e.Lookup(ref)
 	if err != nil {
 		return nil, err
+	}
+	if rec.runtime() == RuntimeGVisor {
+		return nil, gvUnsupported("push")
 	}
 	if e.alive(rec.ID) {
 		if !stop {

@@ -19,7 +19,7 @@ import (
 )
 
 // Runtime is the runtime name local docks report in API-shaped output.
-const Runtime = "qemu"
+const Runtime = RuntimeQEMU
 
 // Defaults for a dock that sets no size.
 const (
@@ -45,6 +45,8 @@ type Dock struct {
 type Spec struct {
 	Name, Image, Network     string
 	CPUs, MemoryMiB, DiskGiB int
+	// Runtime is "qemu" (default) or "gvisor".
+	Runtime string
 }
 
 // ExecResult is what a command run in a dock produced.
@@ -62,7 +64,9 @@ type Engine struct {
 	Driver  Driver
 	Catalog Catalog
 	Cache   *Cache
-	Arch    string
+	// GVisor runs gvisor docks; nil uses the real Docker CLI.
+	GVisor *GVisor
+	Arch   string
 	// BootTimeout bounds waiting for the guest agent after boot; zero means two minutes.
 	BootTimeout time.Duration
 	// StopTimeout bounds a graceful shutdown before the VM is killed; zero means 30 seconds.
@@ -176,6 +180,22 @@ func (e *Engine) livePID(id string) int {
 
 func (e *Engine) alive(id string) bool { return e.livePID(id) > 0 }
 
+// runtime is the dock's runtime; records written before gvisor existed have none and are qemu.
+func (r Record) runtime() string {
+	if r.Runtime == "" {
+		return RuntimeQEMU
+	}
+	return r.Runtime
+}
+
+// aliveRec reports whether the dock's VM or container is running.
+func (e *Engine) aliveRec(ctx context.Context, r Record) bool {
+	if r.runtime() == RuntimeGVisor {
+		return e.gvisor().running(ctx, r.ID)
+	}
+	return e.alive(r.ID)
+}
+
 func (e *Engine) ping(ctx context.Context, id string) bool {
 	tok, err := e.token(id)
 	if err != nil {
@@ -188,18 +208,18 @@ func (e *Engine) ping(ctx context.Context, id string) bool {
 }
 
 // State of a dock: ready (agent answers), starting (vm up, agent not yet), archived (stopped).
-func (e *Engine) state(ctx context.Context, id string) string {
-	if !e.alive(id) {
+func (e *Engine) state(ctx context.Context, r Record) string {
+	if !e.aliveRec(ctx, r) {
 		return "archived"
 	}
-	if e.ping(ctx, id) {
+	if e.ping(ctx, r.ID) {
 		return "ready"
 	}
 	return "starting"
 }
 
 func (e *Engine) view(ctx context.Context, r Record) Dock {
-	return Dock{ID: r.ID, Name: r.Name, State: e.state(ctx, r.ID), Image: r.Image, Runtime: Runtime,
+	return Dock{ID: r.ID, Name: r.Name, State: e.state(ctx, r), Image: r.Image, Runtime: r.runtime(),
 		Environment: "local", CPUs: r.CPUs, MemoryMiB: r.MemoryMiB, DiskGiB: r.DiskGiB}
 }
 
@@ -259,6 +279,9 @@ func (s Spec) withDefaults() (Spec, error) {
 	if s.Network == "" {
 		s.Network = "on"
 	}
+	if s.Runtime == "" {
+		s.Runtime = RuntimeQEMU
+	}
 	switch {
 	case s.Name != "" && !nameRE.MatchString(s.Name):
 		return s, errf("invalid_argument", "invalid dock name %q (letters, digits, '.', '_', '-')", s.Name)
@@ -270,6 +293,8 @@ func (s Spec) withDefaults() (Spec, error) {
 		return s, errf("invalid_argument", "disk must be at least 1 GiB")
 	case s.Network != "on" && s.Network != "off":
 		return s, errf("invalid_argument", "network must be on or off")
+	case s.Runtime != RuntimeQEMU && s.Runtime != RuntimeGVisor:
+		return s, errf("invalid_runtime", "runtime must be qemu or gvisor, not %q", s.Runtime)
 	}
 	return s, nil
 }
@@ -288,6 +313,7 @@ func (e *Engine) ResolveImage(ctx context.Context, name string) (dockyard.Image,
 
 // New creates a dock and boots it.
 func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
+	diskSet := spec.DiskGiB != 0
 	spec, err := spec.withDefaults()
 	if err != nil {
 		return Dock{}, err
@@ -296,6 +322,9 @@ func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
 		if _, err := e.Lookup(spec.Name); err == nil {
 			return Dock{}, errf("dock_name_taken", "Dock name already in use")
 		}
+	}
+	if spec.Runtime == RuntimeGVisor {
+		return e.newGVisor(ctx, spec, diskSet)
 	}
 	// Fail on a missing hypervisor before downloading anything.
 	if err := e.Driver.Preflight(ctx); err != nil {
@@ -514,7 +543,7 @@ func (e *Engine) running(ref string) (Record, string, error) {
 	if err != nil {
 		return rec, "", err
 	}
-	if !e.alive(rec.ID) {
+	if !e.aliveRec(context.Background(), rec) {
 		return rec, "", errf("dock_not_running", "dock %s is stopped; run: dock resume %s", ref, ref)
 	}
 	tok, err := e.token(rec.ID)
@@ -563,7 +592,11 @@ func (e *Engine) Stop(ctx context.Context, ref string, force bool) (Dock, error)
 	if err != nil {
 		return Dock{}, err
 	}
-	if err := e.stopVM(ctx, rec.ID, force); err != nil {
+	stop := e.stopVM
+	if rec.runtime() == RuntimeGVisor {
+		stop = e.stopGVisor
+	}
+	if err := stop(ctx, rec.ID, force); err != nil {
 		return Dock{}, err
 	}
 	return e.view(ctx, rec), nil
@@ -623,7 +656,17 @@ func (e *Engine) Resume(ctx context.Context, ref string) (Dock, error) {
 	if err != nil {
 		return Dock{}, err
 	}
-	if e.alive(rec.ID) {
+	if e.aliveRec(ctx, rec) {
+		return e.view(ctx, rec), nil
+	}
+	if rec.runtime() == RuntimeGVisor {
+		image, suid, err := e.gvPrepare(ctx)
+		if err != nil {
+			return Dock{}, err
+		}
+		if err := e.resumeGVisor(ctx, rec, image, suid); err != nil {
+			return Dock{}, err
+		}
 		return e.view(ctx, rec), nil
 	}
 	if err := e.Driver.Preflight(ctx); err != nil {
@@ -652,6 +695,9 @@ func (e *Engine) Branch(ctx context.Context, ref string, count int, name string,
 	src, err := e.Lookup(ref)
 	if err != nil {
 		return nil, err
+	}
+	if src.runtime() == RuntimeGVisor {
+		return nil, gvUnsupported("branch")
 	}
 	if count < 1 {
 		count = 1
@@ -754,7 +800,19 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.stopVM(ctx, rec.ID, true); err != nil {
+	if rec.runtime() == RuntimeGVisor {
+		// With no docker CLI at all (uninstalled) the record must still be removable; a docker
+		// that is installed but whose daemon is down fails with docker_unavailable so the
+		// user can start it and retry without leaking the volume.
+		if g := e.gvisor(); !g.hasDocker() {
+			e.logf("warning: docker was not found, so the container %s, volume %s and network %s could not be removed; remove them by hand if Docker comes back",
+				gvContainer(rec.ID), gvVolume(rec.ID), gvNetwork(rec.ID))
+		} else {
+			if err := e.removeGVisor(ctx, rec.ID); err != nil {
+				return err
+			}
+		}
+	} else if err := e.stopVM(ctx, rec.ID, true); err != nil {
 		return err
 	}
 	if err := e.store().Update(func(recs *[]Record) error {

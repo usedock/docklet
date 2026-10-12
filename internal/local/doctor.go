@@ -13,6 +13,8 @@ type Check struct {
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
 	Fix    string `json:"fix,omitempty"`
+	// Optional rows are informational: a failing one never fails `dock doctor`.
+	Optional bool `json:"optional,omitempty"`
 }
 
 // minFreeBytes is the free space below which a new dock is likely to fail.
@@ -23,6 +25,13 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	var checks []Check
 	add := func(c Check) { checks = append(checks, c) }
 	q, isQEMU := e.Driver.(*QEMU)
+	// gvisor is informational and Linux only; gvErr is nil when it can run docks.
+	showGVisor := isQEMU && q.GOOS == "linux"
+	var gvErr error
+	var gvSUID bool
+	if showGVisor {
+		gvSUID, gvErr = e.gvisor().Probe(ctx)
+	}
 	if !isQEMU {
 		add(Check{Name: "driver", OK: e.Driver.Preflight(ctx) == nil, Detail: "custom driver"})
 	} else {
@@ -37,8 +46,11 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 		switch {
 		case aerr != nil:
 			c := Check{Name: "accelerator", Detail: aerr.Error()}
-			if q.GOOS == "linux" && ErrCode(aerr) == "no_accelerator" {
+			if showGVisor && ErrCode(aerr) == "no_accelerator" {
 				c.Fix = kvmFix(q.kvmErr())
+				if gvErr == nil {
+					c.Fix += " Or, without KVM: dock new --runtime gvisor."
+				}
 			}
 			add(c)
 		case err != nil:
@@ -54,6 +66,22 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 				add(Check{Name: "accelerator", OK: true, Detail: accel})
 			}
 		}
+	}
+	if showGVisor {
+		c := Check{Name: "gvisor", OK: gvErr == nil, Optional: true, Detail: "docker with runsc: dock new --runtime gvisor"}
+		if gvErr == nil && gvSUID {
+			c.Detail += " (sudo and a persistent rootfs: runsc-suid found)"
+		} else if gvErr == nil {
+			c.Detail += " (no sudo and only /home/user/work persists: runsc-suid is not registered)"
+			c.Fix = GVisorSUIDFix
+		}
+		if gvErr != nil {
+			c.Detail = gvErr.Error()
+			if code := ErrCode(gvErr); code == "docker_not_found" || code == "runsc_not_found" {
+				c.Fix = GVisorInstallFix
+			}
+		}
+		add(c)
 	}
 	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
 		add(Check{Name: "data dir", Detail: err.Error()})
