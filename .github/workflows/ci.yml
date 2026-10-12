@@ -72,6 +72,31 @@ jobs:
       - name: test
         run: go test -timeout 8m ./internal/local/... ./internal/guestagent/... ./internal/cli/...
 
+  # Runs a real local gVisor dock (Docker + runsc, no KVM needed) through the engine.
+  e2e-local-gvisor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: install runsc
+        run: |
+          set -eux
+          arch=$(uname -m)
+          url=https://storage.googleapis.com/gvisor/releases/release/latest/${arch}
+          wget -q "${url}/runsc" "${url}/runsc.sha512" "${url}/containerd-shim-runsc-v1" "${url}/containerd-shim-runsc-v1.sha512"
+          sha512sum -c runsc.sha512 containerd-shim-runsc-v1.sha512
+          sudo install -m 0755 runsc containerd-shim-runsc-v1 /usr/local/bin/
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}'
+      - name: gvisor engine e2e
+        env:
+          DOCK_E2E_REQUIRE_GVISOR: "1"
+        run: go test -tags e2e -run TestE2ELocalGVisorDock -v -timeout 25m ./internal/local/
+
   # Boots real local docks with KVM from the pinned Dockyard release, through the dock CLI and the engine.
   e2e-local:
     runs-on: ubuntu-latest

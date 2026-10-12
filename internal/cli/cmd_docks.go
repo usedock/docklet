@@ -163,10 +163,11 @@ func (a *App) resolveDock(ctx context.Context, cl *target, ref string) (string, 
 }
 
 func (a *App) cmdNew(ctx context.Context, args []string) error {
-	c := a.flags("new", "new [name] [--cpus N] [--memory 8gb] [--disk 40gb] [--image X] [--env E] [--workspace ID] [--network on|off]")
+	c := a.flags("new", "new [name] [--cpus N] [--memory 8gb] [--disk 40gb] [--image X] [--env E] [--workspace ID] [--network on|off] [--runtime qemu|gvisor]")
 	sf := registerSpecFlags(c)
 	ws := c.fs.String("workspace", "", "workspace id (default: the context's, else your only workspace)")
 	network := c.fs.String("network", "on", "local only: off blocks all network access (QEMU restrict); on lets the dock reach the internet, with the guest refusing the host-loopback gateway 10.0.2.2 (a guest-side block that root in the dock can undo, see README)")
+	runtimeFlag := c.fs.String("runtime", "", "local only: qemu (default, needs KVM, WHPX or HVF) or gvisor (Linux with Docker and runsc, no KVM needed; weaker isolation than a VM, only /home/user/work persists). Default from DOCK_LOCAL_RUNTIME")
 	pos, err := c.parse(args, 0, 1)
 	if err != nil {
 		return err
@@ -197,7 +198,17 @@ func (a *App) cmdNew(ctx context.Context, args []string) error {
 		if c.isSet("network") {
 			body["network"] = *network
 		}
+		rt := *runtimeFlag
+		if !c.isSet("runtime") {
+			rt = a.env("DOCK_LOCAL_RUNTIME")
+		}
+		if rt != "" {
+			body["runtime"] = rt
+		}
 	} else {
+		if c.isSet("runtime") {
+			return usagef("--runtime is only supported by the local context")
+		}
 		if c.isSet("network") {
 			return usagef("--network is only supported by the local context")
 		}

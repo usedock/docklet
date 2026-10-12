@@ -437,3 +437,41 @@ func TestLsFilterIsRejectedForLocal(t *testing.T) {
 	}
 	mustExit(t, te, 0, "ls", "--all")
 }
+
+func TestRuntimeFlagReachesTheEngine(t *testing.T) {
+	te, drv := newLocalEnv(t)
+	// A non-Linux fake host: the gvisor preflight must refuse, which proves the flag was routed.
+	te.app.Engine.GVisor = &local.GVisor{GOOS: "windows"}
+	mustExit(t, te, 1, "new", "g", "--runtime", "gvisor")
+	if !strings.Contains(te.errb.String(), "unsupported_os") || len(drv.starts) != 0 {
+		t.Fatalf("err %q starts %v", te.errb, drv.starts)
+	}
+	te.errb.Reset()
+	mustExit(t, te, 1, "new", "g", "--runtime", "lxc")
+	if !strings.Contains(te.errb.String(), "invalid_runtime") {
+		t.Fatalf("err %q", te.errb)
+	}
+	te.errb.Reset()
+	te.env["DOCK_LOCAL_RUNTIME"] = "gvisor"
+	mustExit(t, te, 1, "new", "g")
+	if !strings.Contains(te.errb.String(), "unsupported_os") {
+		t.Fatalf("the env default must select gvisor: %q", te.errb)
+	}
+	te.errb.Reset()
+	mustExit(t, te, 0, "new", "q", "--runtime", "qemu")
+	if len(drv.starts) != 1 {
+		t.Fatalf("an explicit qemu runtime overrides the env: %v", drv.starts)
+	}
+	mustExit(t, te, 0, "ls", "--json")
+	if rows := jsonOut(t, te).([]any); rows[0].(map[string]any)["runtime"] != "qemu" {
+		t.Fatalf("rows %v", rows)
+	}
+}
+
+func TestRuntimeFlagIsLocalOnly(t *testing.T) {
+	te := newEnv(t)
+	mustExit(t, te, 2, "new", "x", "--runtime", "gvisor")
+	if len(te.api.reqs) != 0 {
+		t.Fatal("no API call for a usage error")
+	}
+}
