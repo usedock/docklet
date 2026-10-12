@@ -801,11 +801,19 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 		return err
 	}
 	if rec.runtime() == RuntimeGVisor {
-		if err := e.stopGVisor(ctx, rec.ID, true); err != nil {
-			return err
-		}
-		if err := e.gvisor().removeVolume(ctx, rec.ID); err != nil {
-			return err
+		// With no docker CLI at all (uninstalled) the record must still be removable; a docker
+		// that is installed but whose daemon is down fails with docker_unavailable so the
+		// user can start it and retry without leaking the volume.
+		if g := e.gvisor(); !g.hasDocker() {
+			e.logf("warning: docker was not found, so the container %s, volume %s and network %s could not be removed; remove them by hand if Docker comes back",
+				gvContainer(rec.ID), gvVolume(rec.ID), gvNetwork(rec.ID))
+		} else {
+			if err := e.stopGVisor(ctx, rec.ID, true); err != nil {
+				return err
+			}
+			if err := g.removeVolume(ctx, rec.ID); err != nil {
+				return err
+			}
 		}
 	} else if err := e.stopVM(ctx, rec.ID, true); err != nil {
 		return err

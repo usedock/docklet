@@ -78,12 +78,15 @@ winget install SoftwareFreedomConservancy.QEMU
 
 On a Linux machine without usable KVM (for example a cloud VM without nested virtualization), opt in to gVisor containers instead: `dock new --runtime gvisor` or `DOCK_LOCAL_RUNTIME=gvisor`. There is no silent fallback: without the flag, local docks stay QEMU only.
 
-- Needs Docker Engine and the gVisor `runsc` runtime registered with it ([install gVisor](https://gvisor.dev/docs/user_guide/install/), then `sudo runsc install` and `sudo systemctl restart docker`). `dock new` checks both before building anything. The first dock builds a small `dock-local-gvisor:<hash>` image with `docker build` (Ubuntu 24.04, python3, git, curl, sudo); nothing is published.
+- Needs Docker Engine and the gVisor `runsc` runtime registered with it ([install gVisor](https://gvisor.dev/docs/user_guide/install/), then `sudo runsc install` and `sudo systemctl restart docker`). `dock new` checks both before building anything. The first dock builds a small `dock-local-gvisor:<hash>` image with `docker build` (Ubuntu 24.04, python3, git, curl); nothing is published.
 - On Linux, the `no_accelerator` error and `dock doctor` point to this option when KVM is unusable. `dock doctor` shows an informational `gvisor` row that never makes it fail.
 - Only `/home/user/work` persists (a named Docker volume). `dock stop` removes the container and keeps the volume, `dock resume` runs a new container on it, `dock rm` removes both.
 - `exec`, `ssh` and `port` work as for QEMU docks, through the guest agent on `127.0.0.1`. `dock ls --json` shows `runtime: gvisor`.
+- gVisor docks have no root: the container runs as an unprivileged user with `no-new-privileges`, so there is no `sudo` and `apt-get install` fails. Install tools into `/home/user/work`, or use a QEMU dock when you need root.
 - Not supported: `--network off`, `dock branch`, `dock push` and `dock pull`. `--disk` is not enforced on the volume.
 - Isolation is gVisor's user-space kernel, which is weaker than a hardware VM. Being able to use Docker is root-equivalent on most setups, so anyone who can run Docker on the machine can reach every gVisor dock.
+- Network: each dock gets its own Docker bridge network (`dock-local-<id>-net`, removed on stop and rm), so it cannot reach your other containers or other docks. It is not walled off from the host, though: with the default egress-open network a gVisor dock can reach the internet and the host's network services through the bridge gateway (for example a service listening on the host's `0.0.0.0`), unlike a QEMU dock, whose guest refuses the host loopback gateway. Treat a hostile gVisor dock as able to reach services the host exposes on the network, and do not run untrusted code in it.
+- `dock rm` also removes the container, volume and network. If the `docker` binary is gone it still removes the record and warns with the names to clean up by hand; if Docker is installed but its daemon is down, it fails with `docker_unavailable` and you can retry after starting Docker.
 
 ## Layout
 

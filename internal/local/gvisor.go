@@ -43,11 +43,9 @@ COPY dock-entrypoint /usr/local/bin/dock-entrypoint
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3; \
+    apt-get install -y --no-install-recommends ca-certificates curl git python3; \
     chmod 0755 /usr/local/bin/dock-entrypoint /usr/local/libexec/dock-fast-agent.py; \
-    useradd -u 1001 -m -s /bin/bash -G sudo user; \
-    echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user; \
-    chmod 0440 /etc/sudoers.d/user; \
+    useradd -u 1001 -m -s /bin/bash user; \
     mkdir -p /home/user/work /run/dock-fast; \
     chown user:user /home/user/work /run/dock-fast; \
     apt-get clean; \
@@ -192,11 +190,13 @@ func lastLines(s string, n int) string {
 
 func gvContainer(id string) string { return "dock-local-" + id }
 func gvVolume(id string) string    { return "dock-local-" + id + "-work" }
+func gvNetwork(id string) string   { return "dock-local-" + id + "-net" }
 
 // gvRunArgs returns the docker run arguments for one dock.
 func gvRunArgs(rec Record, port int, agentConfig, image string) []string {
 	return []string{
 		"run", "-d", "--runtime=runsc", "--name", gvContainer(rec.ID),
+		"--network", gvNetwork(rec.ID),
 		"-p", "127.0.0.1:" + strconv.Itoa(port) + ":" + strconv.Itoa(guestagent.Port),
 		"--cpus", strconv.Itoa(rec.CPUs),
 		"--memory", strconv.Itoa(rec.MemoryMiB) + "m",
@@ -212,7 +212,51 @@ func gvRunArgs(rec Record, port int, agentConfig, image string) []string {
 
 func notFound(stderr string) bool {
 	s := strings.ToLower(stderr)
-	return strings.Contains(s, "no such container") || strings.Contains(s, "no such volume") || strings.Contains(s, "no such object")
+	return strings.Contains(s, "no such container") || strings.Contains(s, "no such volume") || strings.Contains(s, "no such object") ||
+		strings.Contains(s, "no such network") || (strings.Contains(s, "network") && strings.Contains(s, "not found"))
+}
+
+// dockerFailure turns a failed docker call into a coded error; an unreachable daemon is
+// docker_unavailable (start Docker and retry) whatever the verb was.
+func dockerFailure(code, what string, err error, stderr string) error {
+	low := strings.ToLower(stderr)
+	if strings.Contains(low, "cannot connect to the docker daemon") || strings.Contains(low, "error during connect") ||
+		strings.Contains(low, "permission denied while trying to connect") {
+		return errf("docker_unavailable", "cannot talk to the Docker daemon to %s: %s. Start Docker (or fix access to it) and retry", what, strings.TrimSpace(stderr))
+	}
+	return errf(code, "%s: %v: %s", what, err, strings.TrimSpace(stderr))
+}
+
+// hasDocker reports whether the docker CLI is on PATH.
+func (g *GVisor) hasDocker() bool {
+	look := g.LookPath
+	if look == nil {
+		look = exec.LookPath
+	}
+	_, err := look("docker")
+	return err == nil
+}
+
+// ensureNetwork creates the dock's own bridge network; one that already exists is fine.
+// Each dock gets its own so it cannot reach the user's other containers or other docks.
+func (g *GVisor) ensureNetwork(ctx context.Context, id string) error {
+	if _, stderr, err := g.docker(ctx, nil, "network", "create", "--driver", "bridge", gvNetwork(id)); err != nil && !strings.Contains(strings.ToLower(stderr), "already exists") {
+		return dockerFailure("boot_failed", "docker network create "+gvNetwork(id), err, stderr)
+	}
+	return nil
+}
+
+func (g *GVisor) removeNetwork(ctx context.Context, id string) error {
+	if _, stderr, err := g.docker(ctx, nil, "network", "rm", gvNetwork(id)); err != nil && !notFound(stderr) {
+		return dockerFailure("stop_failed", "docker network rm "+gvNetwork(id), err, stderr)
+	}
+	return nil
+}
+
+// cleanup removes the container and the network, best effort, after a failed start.
+func (g *GVisor) cleanup(ctx context.Context, id string) {
+	_ = g.removeContainer(ctx, id)
+	_ = g.removeNetwork(ctx, id)
 }
 
 // running reports whether the dock's container is running.
@@ -224,14 +268,14 @@ func (g *GVisor) running(ctx context.Context, id string) bool {
 // removeContainer force-removes the container; one that is already gone is not an error.
 func (g *GVisor) removeContainer(ctx context.Context, id string) error {
 	if _, stderr, err := g.docker(ctx, nil, "rm", "-f", gvContainer(id)); err != nil && !notFound(stderr) {
-		return errf("stop_failed", "docker rm %s: %v: %s", gvContainer(id), err, strings.TrimSpace(stderr))
+		return dockerFailure("stop_failed", "docker rm "+gvContainer(id), err, stderr)
 	}
 	return nil
 }
 
 func (g *GVisor) removeVolume(ctx context.Context, id string) error {
 	if _, stderr, err := g.docker(ctx, nil, "volume", "rm", "-f", gvVolume(id)); err != nil && !notFound(stderr) {
-		return errf("remove_failed", "docker volume rm %s: %v: %s", gvVolume(id), err, strings.TrimSpace(stderr))
+		return dockerFailure("remove_failed", "docker volume rm "+gvVolume(id), err, stderr)
 	}
 	return nil
 }
@@ -292,9 +336,12 @@ func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error
 		if err := g.removeContainer(ctx, rec.ID); err != nil {
 			return err
 		}
+		if err := g.ensureNetwork(ctx, rec.ID); err != nil {
+			return err
+		}
 		_, stderr, err := g.docker(ctx, nil, gvRunArgs(rec, port, cfg, image)...)
 		if err != nil {
-			_ = g.removeContainer(ctx, rec.ID)
+			g.cleanup(ctx, rec.ID)
 			low := strings.ToLower(stderr)
 			if attempt < bootAttempts && (strings.Contains(low, "port is already allocated") || strings.Contains(low, "address already in use")) {
 				e.logf("port taken, retrying with another one")
@@ -310,7 +357,7 @@ func (e *Engine) waitReadyGVisor(ctx context.Context, id string) error {
 	g := e.gvisor()
 	fail := func(code, format string, a ...any) error {
 		logs := g.logs(ctx, id)
-		_ = g.removeContainer(context.WithoutCancel(ctx), id)
+		g.cleanup(context.WithoutCancel(ctx), id)
 		return errf(code, format+"%s", append(a, logs)...)
 	}
 	deadline := time.NewTimer(e.bootTimeout())
@@ -326,7 +373,7 @@ func (e *Engine) waitReadyGVisor(ctx context.Context, id string) error {
 		}
 		select {
 		case <-ctx.Done():
-			_ = g.removeContainer(context.WithoutCancel(ctx), id)
+			g.cleanup(context.WithoutCancel(ctx), id)
 			return ctx.Err()
 		case <-deadline.C:
 			return fail("boot_timeout", "the guest agent did not answer within %s.", e.bootTimeout())
@@ -335,7 +382,7 @@ func (e *Engine) waitReadyGVisor(ctx context.Context, id string) error {
 	}
 }
 
-// stopGVisor removes the container and keeps the work volume.
+// stopGVisor removes the container and its network and keeps the work volume.
 func (e *Engine) stopGVisor(ctx context.Context, id string, force bool) error {
 	g := e.gvisor()
 	if !force && g.running(ctx, id) {
@@ -346,6 +393,9 @@ func (e *Engine) stopGVisor(ctx context.Context, id string, force bool) error {
 		}
 	}
 	if err := g.removeContainer(ctx, id); err != nil {
+		return err
+	}
+	if err := g.removeNetwork(ctx, id); err != nil {
 		return err
 	}
 	e.clearRuntime(id)

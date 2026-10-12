@@ -22,6 +22,8 @@ type fakeDocker struct {
 	calls      [][]string
 	containers map[string]net.Listener
 	volumes    map[string]bool
+	networks   map[string]bool
+	daemonDown bool
 	images     map[string]bool
 	builds     int
 	runtimes   string // docker info output
@@ -33,7 +35,7 @@ type fakeDocker struct {
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, images: map[string]bool{},
+	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, images: map[string]bool{},
 		runtimes: `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`, drv: newFakeDriver()}
 }
 
@@ -45,6 +47,9 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 	f.calls = append(f.calls, args)
 	last := args[len(args)-1]
 	gone := errors.New("exit status 1")
+	if f.daemonDown && args[0] != "info" {
+		return "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", gone
+	}
 	switch args[0] {
 	case "info":
 		return f.runtimes, "", nil
@@ -65,6 +70,8 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 		var name, port, cfg string
 		for i, a := range args {
 			switch {
+			case a == "--network" && !f.networks[args[i+1]]:
+				return "", "docker: Error response from daemon: network " + args[i+1] + " not found", gone
 			case a == "--name":
 				name = args[i+1]
 			case a == "-p":
@@ -106,6 +113,19 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			l.Close()
 		}
 		delete(f.containers, last)
+		return "", "", nil
+	case "network":
+		if args[1] == "create" {
+			if f.networks[last] {
+				return "", "Error response from daemon: network with name " + last + " already exists", gone
+			}
+			f.networks[last] = true
+			return "nid", "", nil
+		}
+		if !f.networks[last] {
+			return "", "Error response from daemon: network " + last + " not found", gone
+		}
+		delete(f.networks, last)
 		return "", "", nil
 	case "volume":
 		delete(f.volumes, last)
@@ -155,6 +175,7 @@ func TestGVisorRoundTrip(t *testing.T) {
 	cfg := e.file(d.ID, "fast-agent.json")
 	for _, want := range []string{
 		"run -d --runtime=runsc --name dock-local-" + d.ID,
+		"--network dock-local-" + d.ID + "-net",
 		"-p 127.0.0.1:" + itoa(port) + ":2222",
 		"--cpus 3", "--memory 1024m", "--user 1001:1001", "--cap-drop=ALL", "--security-opt no-new-privileges",
 		"--pids-limit 1024", "--tmpfs /tmp",
@@ -186,8 +207,8 @@ func TestGVisorRoundTrip(t *testing.T) {
 	if !fd.volumes["dock-local-"+d.ID+"-work"] {
 		t.Fatal("stop must keep the work volume")
 	}
-	if len(fd.containers) != 0 {
-		t.Fatalf("stop must remove the container: %v", fd.containers)
+	if len(fd.containers) != 0 || len(fd.networks) != 0 {
+		t.Fatalf("stop must remove the container and its network: %v %v", fd.containers, fd.networks)
 	}
 	if _, err := e.Exec(ctx, "gv", "x", 0); codeOf(err) != "dock_not_running" {
 		t.Fatalf("exec on a stopped dock: %v", err)
@@ -207,8 +228,8 @@ func TestGVisorRoundTrip(t *testing.T) {
 	if err := e.Remove(ctx, "gv"); err != nil {
 		t.Fatal(err)
 	}
-	if fd.volumes["dock-local-"+d.ID+"-work"] || len(fd.containers) != 0 {
-		t.Fatalf("rm must remove container and volume: %v %v", fd.containers, fd.volumes)
+	if fd.volumes["dock-local-"+d.ID+"-work"] || len(fd.containers) != 0 || len(fd.networks) != 0 {
+		t.Fatalf("rm must remove container, volume and network: %v %v %v", fd.containers, fd.volumes, fd.networks)
 	}
 	if recs, _ := e.store().List(); len(recs) != 0 {
 		t.Fatalf("records %v", recs)
@@ -366,7 +387,7 @@ func TestGVisorBootFailuresCleanUp(t *testing.T) {
 	if codeOf(err) != "boot_failed" || !strings.Contains(err.Error(), "boom from the container") {
 		t.Fatalf("exited container: %v", err)
 	}
-	if recs, _ := e.store().List(); len(recs) != 0 || len(fd.containers) != 0 || len(fd.volumes) != 0 {
+	if recs, _ := e.store().List(); len(recs) != 0 || len(fd.containers) != 0 || len(fd.volumes) != 0 || len(fd.networks) != 0 {
 		t.Fatalf("failed dock must leave nothing: %v %v %v", recs, fd.containers, fd.volumes)
 	}
 
@@ -376,7 +397,7 @@ func TestGVisorBootFailuresCleanUp(t *testing.T) {
 	if _, err := e2.New(ctx, Spec{Runtime: RuntimeGVisor}); codeOf(err) != "boot_timeout" {
 		t.Fatalf("silent agent: %v", err)
 	}
-	if len(fd2.containers) != 0 {
+	if len(fd2.containers) != 0 || len(fd2.networks) != 0 {
 		t.Fatal("a timed out container must be removed")
 	}
 
@@ -426,5 +447,83 @@ func TestRecordRuntimeBackCompat(t *testing.T) {
 	raw, _ := json.Marshal(Record{ID: "a"})
 	if strings.Contains(string(raw), "runtime") {
 		t.Fatalf("empty runtime must be omitted: %s", raw)
+	}
+}
+
+func TestGVisorNetworkIsPerDockAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	a, err := e.New(ctx, Spec{Name: "a", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.New(ctx, Spec{Name: "b", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fd.networks["dock-local-"+a.ID+"-net"] || !fd.networks["dock-local-"+b.ID+"-net"] || len(fd.networks) != 2 {
+		t.Fatalf("each dock needs its own network: %v", fd.networks)
+	}
+	// A network left behind by a crash must not break resume.
+	if _, err := e.Stop(ctx, "a", true); err != nil {
+		t.Fatal(err)
+	}
+	fd.networks["dock-local-"+a.ID+"-net"] = true
+	if _, err := e.Resume(ctx, "a"); err != nil {
+		t.Fatalf("resume with an existing network: %v", err)
+	}
+	// rm when the network is already gone.
+	delete(fd.networks, "dock-local-"+a.ID+"-net")
+	if err := e.Remove(ctx, "a"); err != nil {
+		t.Fatalf("rm with the network already removed: %v", err)
+	}
+	if err := e.Remove(ctx, "b"); err != nil || len(fd.networks) != 0 {
+		t.Fatalf("rm must remove the network: %v %v", err, fd.networks)
+	}
+}
+
+func TestGVisorRemoveWithoutDockerStillClearsTheRecord(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	d, err := e.New(ctx, Spec{Name: "orphan", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.GVisor.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	var progress strings.Builder
+	e.Progress = &progress
+	before := len(fd.calls)
+	if err := e.Remove(ctx, "orphan"); err != nil {
+		t.Fatalf("rm without docker: %v", err)
+	}
+	if len(fd.calls) != before {
+		t.Fatal("no docker call without docker")
+	}
+	for _, want := range []string{"warning", "dock-local-" + d.ID, "dock-local-" + d.ID + "-work", "dock-local-" + d.ID + "-net"} {
+		if !strings.Contains(progress.String(), want) {
+			t.Errorf("warning lacks %q: %q", want, progress.String())
+		}
+	}
+	if recs, _ := e.store().List(); len(recs) != 0 {
+		t.Fatalf("record must be gone: %v", recs)
+	}
+}
+
+func TestGVisorRemoveWithDaemonDownKeepsTheRecord(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	if _, err := e.New(ctx, Spec{Name: "down", Runtime: RuntimeGVisor}); err != nil {
+		t.Fatal(err)
+	}
+	fd.daemonDown = true
+	if err := e.Remove(ctx, "down"); codeOf(err) != "docker_unavailable" {
+		t.Fatalf("got %v", err)
+	}
+	if recs, _ := e.store().List(); len(recs) != 1 {
+		t.Fatal("the record must stay so rm can be retried")
+	}
+	fd.daemonDown = false
+	if err := e.Remove(ctx, "down"); err != nil {
+		t.Fatalf("retry after starting Docker: %v", err)
 	}
 }
