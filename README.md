@@ -89,7 +89,8 @@ On a Linux machine without usable KVM (for example a cloud VM without nested vir
   - DNS uses the host's upstream resolvers.
   - No Docker or systemd inside by default, and one built-in image instead of Dockyard images.
   - `--disk` is not enforced: the work volume and, with `runsc-suid`, everything written elsewhere in the dock live in Docker's storage (`/var/lib/docker`) with no size limit. `docker container prune` or `docker system prune` deletes a stopped dock's container and everything installed in it; only `/home/user/work` (a named volume) survives.
-  - Not supported: `--network off`, `dock branch`, `dock push` and `dock pull`.
+  - `dock branch` works: the source is stopped if running, its container filesystem is committed to a `dock-local-gvisor-branch:<id>` image and its work volume copied (by a short-lived, network-less runsc container), then the source is resumed and the branch starts as a new dock with its own token, port and network. With the `runsc-suid` runtime the branch carries rootfs changes (installed packages) too; with plain `runsc` only `/home/user/work` carries over. `dock rm` removes the branch image.
+  - Not supported: `--network off`, `dock push` and `dock pull`.
   - Some syscall-heavy or file-I/O-heavy workloads are slower than in a VM.
 - If the `docker` binary is gone, `dock rm` still removes the record and warns with the names to clean up by hand; if Docker is installed but its daemon is down, it fails with `docker_unavailable` and you can retry after starting Docker.
 

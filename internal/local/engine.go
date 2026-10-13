@@ -689,15 +689,13 @@ func (e *Engine) markResetKeys(id string) error {
 	return nil
 }
 
-// Branch makes count independent docks from a copy of the dock's disk. There is no live
-// VM fork: a running source is stopped for the copy and resumed afterwards.
+// Branch makes count independent docks from a copy of the dock's disk (gVisor: its committed
+// rootfs layer and work volume). There is no live fork: a running source is stopped for the
+// copy and resumed afterwards.
 func (e *Engine) Branch(ctx context.Context, ref string, count int, name string, over Spec) ([]Dock, error) {
 	src, err := e.Lookup(ref)
 	if err != nil {
 		return nil, err
-	}
-	if src.runtime() == RuntimeGVisor {
-		return nil, gvUnsupported("branch")
 	}
 	if count < 1 {
 		count = 1
@@ -712,6 +710,9 @@ func (e *Engine) Branch(ctx context.Context, ref string, count int, name string,
 		if _, err := e.Lookup(name); err == nil {
 			return nil, errf("dock_name_taken", "Dock name already in use")
 		}
+	}
+	if src.runtime() == RuntimeGVisor {
+		return e.branchGVisor(ctx, src, count, name, over)
 	}
 	if err := e.Driver.Preflight(ctx); err != nil {
 		return nil, err
@@ -805,7 +806,7 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 		// that is installed but whose daemon is down fails with docker_unavailable so the
 		// user can start it and retry without leaking the volume.
 		if g := e.gvisor(); !g.hasDocker() {
-			e.logf("warning: docker was not found, so the container %s, volume %s and network %s could not be removed; remove them by hand if Docker comes back",
+			e.logf("warning: docker was not found, so the container %s, volume %s and network %s (and any branch image) could not be removed; remove them by hand if Docker comes back",
 				gvContainer(rec.ID), gvVolume(rec.ID), gvNetwork(rec.ID))
 		} else {
 			if err := e.removeGVisor(ctx, rec.ID); err != nil {
@@ -815,19 +816,24 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 	} else if err := e.stopVM(ctx, rec.ID, true); err != nil {
 		return err
 	}
-	if err := e.store().Update(func(recs *[]Record) error {
+	if err := e.dropRecord(rec.ID); err != nil {
+		return err
+	}
+	return e.removeFiles(rec.ID)
+}
+
+// dropRecord deletes a dock's record from the store.
+func (e *Engine) dropRecord(id string) error {
+	return e.store().Update(func(recs *[]Record) error {
 		kept := (*recs)[:0]
 		for _, r := range *recs {
-			if r.ID != rec.ID {
+			if r.ID != id {
 				kept = append(kept, r)
 			}
 		}
 		*recs = kept
 		return nil
-	}); err != nil {
-		return err
-	}
-	return e.removeFiles(rec.ID)
+	})
 }
 
 // removeFiles deletes a dock directory, retrying briefly because Windows keeps a dead

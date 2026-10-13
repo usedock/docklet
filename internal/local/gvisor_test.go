@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +36,8 @@ type fakeDocker struct {
 	exitOnRun  bool // container is created but exits at once
 	agentDead  bool // container runs but the agent never answers
 	buildStdin []byte
+	commitErr  error // docker commit fails
+	copyErr    error // the work-volume copy helper fails
 	drv        *fakeDriver
 }
 
@@ -57,7 +60,29 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 	switch args[0] {
 	case "info":
 		return f.runtimes, "", nil
+	case "commit":
+		if f.commitErr != nil {
+			return "", "Error: " + f.commitErr.Error(), f.commitErr
+		}
+		if _, ok := f.containers[args[1]]; !ok {
+			return "", "Error response from daemon: No such container: " + args[1], gone
+		}
+		f.images[last] = true
+		return "sha256:x\n", "", nil
+	case "tag":
+		if !f.images[args[1]] {
+			return "", "Error response from daemon: No such image: " + args[1], gone
+		}
+		f.images[last] = true
+		return "", "", nil
 	case "image":
+		if args[1] == "rm" {
+			if !f.images[last] {
+				return "", "Error response from daemon: No such image: " + last, gone
+			}
+			delete(f.images, last)
+			return "Untagged: " + last, "", nil
+		}
 		if f.images[last] {
 			return "", "", nil
 		}
@@ -68,6 +93,18 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 		f.images[args[2]] = true
 		return "", "", nil
 	case "run":
+		if slices.Contains(args, "--rm") {
+			// The work-volume copy helper.
+			if f.copyErr != nil {
+				return "", "docker: " + f.copyErr.Error(), f.copyErr
+			}
+			for i, a := range args {
+				if a == "-v" && strings.HasSuffix(args[i+1], ":/to") {
+					f.volumes[strings.TrimSuffix(args[i+1], ":/to")] = true
+				}
+			}
+			return "", "", nil
+		}
 		if f.runErr != nil {
 			return "", "docker: " + f.runErr.Error(), f.runErr
 		}
@@ -442,9 +479,6 @@ func TestGVisorUnsupportedVerbsAndOptions(t *testing.T) {
 	if _, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Branch(ctx, "gv", 1, "", Spec{}); codeOf(err) != "not_supported" {
-		t.Fatalf("branch: %v", err)
-	}
 	rec, _ := e.Lookup("gv")
 	if err := e.CheckPushSpace(rec); codeOf(err) != "not_supported" {
 		t.Fatalf("push space: %v", err)
@@ -817,5 +851,211 @@ func TestRecordGVisorRuntimeBackCompat(t *testing.T) {
 	raw, _ := json.Marshal(Record{ID: "a"})
 	if strings.Contains(string(raw), "gvisorRuntime") {
 		t.Fatalf("empty field must be omitted: %s", raw)
+	}
+}
+
+// branchCalls returns the verb (plus subverb for network and image) of each docker call, in order.
+func branchCalls(fd *fakeDocker) []string {
+	var out []string
+	for _, c := range fd.calls {
+		switch {
+		case c[0] == "run" && slices.Contains(c, "--rm"):
+			out = append(out, "copy")
+		case c[0] == "network" || c[0] == "image":
+			out = append(out, c[0]+"-"+c[1])
+		default:
+			out = append(out, c[0])
+		}
+	}
+	return out
+}
+
+func TestGVisorBranchRunningSource(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	src, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor, CPUs: 2, MemoryMiB: 768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd.calls = nil
+	bs, err := e.Branch(ctx, "gv", 1, "gv2", Spec{})
+	if err != nil || len(bs) != 1 {
+		t.Fatalf("branch %+v %v", bs, err)
+	}
+	b := bs[0]
+	if b.ID == src.ID || b.Name != "gv2" || b.Runtime != RuntimeGVisor || b.State != "ready" {
+		t.Fatalf("branch %+v", b)
+	}
+	rec, _ := e.Lookup("gv2")
+	if rec.Parent != src.ID || rec.CPUs != 2 || rec.MemoryMiB != 768 || rec.gvRuntime() != gvRuntimePlain {
+		t.Fatalf("record %+v", rec)
+	}
+	srcTok, _ := e.token(src.ID)
+	if tok, _ := e.token(b.ID); tok == "" || tok == srcTok {
+		t.Fatal("a branch needs its own token")
+	}
+	if e.readInt(b.ID, "port") == e.readInt(src.ID, "port") {
+		t.Fatal("a branch needs its own port")
+	}
+
+	// Source stopped, rootfs committed, volume copied, source resumed, then the branch is booted.
+	order := strings.Join(branchCalls(fd), ",")
+	idx := func(s string) int { return strings.Index(order, s) }
+	if !(idx("stop,") >= 0 && idx("stop,") < idx("commit") && idx("commit") < idx("copy") && idx("copy") < idx("start") && idx("start") < idx("run")) {
+		t.Fatalf("order: %s", order)
+	}
+	img := "dock-local-gvisor-branch:" + b.ID
+	if c := fd.callsWith("commit"); len(c) != 1 || strings.Join(c[0], " ") != "commit dock-local-"+src.ID+" "+img {
+		t.Fatalf("commit %v", c)
+	}
+	var helper string
+	for _, c := range fd.callsWith("run") {
+		if slices.Contains(c, "--rm") {
+			helper = strings.Join(c, " ")
+		}
+	}
+	for _, want := range []string{"--runtime=runsc ", "--network none", "--user 0:0", "--entrypoint cp",
+		"-v dock-local-" + src.ID + "-work:/from:ro", "-v dock-local-" + b.ID + "-work:/to", " dock-local-gvisor:", "-a /from/. /to/"} {
+		if !strings.Contains(helper, want) {
+			t.Errorf("copy helper lacks %q: %s", want, helper)
+		}
+	}
+	runs := fd.callsWith("run")
+	last := strings.Join(runs[len(runs)-1], " ")
+	for _, want := range []string{"--name dock-local-" + b.ID + " ", "--network dock-local-" + b.ID + "-net", "--cpus 2", "--memory 768m", "-v dock-local-" + b.ID + "-work:/home/user/work", " " + img} {
+		if !strings.Contains(last, want) {
+			t.Errorf("branch run lacks %q: %s", want, last)
+		}
+	}
+	if st, _ := e.Get(ctx, "gv"); st.State != "ready" {
+		t.Fatalf("a running source must be resumed, state %s", st.State)
+	}
+	if !fd.images[img] {
+		t.Fatal("the committed image must exist")
+	}
+
+	// rm of the branch removes its image and nothing of the source or the base image.
+	if err := e.Remove(ctx, "gv2"); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := GVisorImageTag()
+	if fd.images[img] || !fd.images[base] {
+		t.Fatalf("rm must drop only the branch image: %v", fd.images)
+	}
+	if fd.volumes["dock-local-"+b.ID+"-work"] {
+		t.Fatal("rm must remove the branch volume")
+	}
+	if !fd.volumes["dock-local-"+src.ID+"-work"] {
+		t.Fatal("the source volume must stay")
+	}
+	if err := e.Remove(ctx, "gv"); err != nil {
+		t.Fatalf("rm of a dock without a branch image must tolerate the missing image: %v", err)
+	}
+}
+
+func TestGVisorBranchStoppedSourceStaysStopped(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	if _, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Stop(ctx, "gv", false); err != nil {
+		t.Fatal(err)
+	}
+	fd.calls = nil
+	bs, err := e.Branch(ctx, "gv", 2, "", Spec{CPUs: 4})
+	if err != nil || len(bs) != 2 {
+		t.Fatalf("branch %+v %v", bs, err)
+	}
+	if len(fd.callsWith("stop")) != 0 || len(fd.callsWith("start")) != 0 {
+		t.Fatalf("a stopped source must be left alone: %v", fd.calls)
+	}
+	if st, _ := e.Get(ctx, "gv"); st.State != "archived" {
+		t.Fatalf("source state %s", st.State)
+	}
+	// Two branches share one commit.
+	if n := len(fd.callsWith("commit")); n != 1 {
+		t.Fatalf("commits %d", n)
+	}
+	if n := len(fd.callsWith("tag")); n != 1 {
+		t.Fatalf("tags %d", n)
+	}
+	for _, b := range bs {
+		if !fd.images["dock-local-gvisor-branch:"+b.ID] {
+			t.Fatalf("branch %s has no image", b.ID)
+		}
+		if rec, _ := e.Lookup(b.ID); rec.CPUs != 4 {
+			t.Fatalf("cpus override: %+v", rec)
+		}
+	}
+	// Removing one branch keeps the other's image.
+	if err := e.Remove(ctx, bs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if !fd.images["dock-local-gvisor-branch:"+bs[1].ID] || fd.images["dock-local-gvisor-branch:"+bs[0].ID] {
+		t.Fatalf("images %v", fd.images)
+	}
+	if _, err := e.Branch(ctx, "gv", 2, "x", Spec{}); codeOf(err) != "invalid_argument" {
+		t.Fatalf("a name needs a single branch: %v", err)
+	}
+}
+
+func TestGVisorBranchFailureLeavesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*fakeDocker)
+	}{
+		{"copy fails", func(fd *fakeDocker) { fd.copyErr = errors.New("cp failed") }},
+		{"commit fails", func(fd *fakeDocker) { fd.commitErr = errors.New("commit failed") }},
+		{"branch container does not start", func(fd *fakeDocker) { fd.runErr = errors.New("boom") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			e, fd := newGVisorEngine(t)
+			src, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			images := len(fd.images)
+			tc.set(fd)
+			if _, err := e.Branch(ctx, "gv", 1, "", Spec{}); err == nil {
+				t.Fatal("branch must fail")
+			}
+			recs, _ := e.store().List()
+			if len(recs) != 1 || recs[0].ID != src.ID {
+				t.Fatalf("records %+v", recs)
+			}
+			if len(fd.containers) != 1 || len(fd.volumes) != 1 || len(fd.images) != images || len(fd.networks) != 1 {
+				t.Fatalf("leftovers: containers %v volumes %v images %v networks %v", fd.containers, fd.volumes, fd.images, fd.networks)
+			}
+			if st, _ := e.Get(ctx, "gv"); st.State != "ready" {
+				t.Fatalf("the source must be resumed after a failed branch, state %s", st.State)
+			}
+		})
+	}
+}
+
+func TestGVisorBranchRuntimeMissing(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	fd.runtimes = rtSUID
+	if _, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor}); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := e.Lookup("gv"); rec.GVisorRuntime != gvRuntimeSUID {
+		t.Fatalf("runtime %q", rec.GVisorRuntime)
+	}
+	fd.runtimes = `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`
+	fd.calls = nil
+	if _, err := e.Branch(ctx, "gv", 1, "", Spec{}); codeOf(err) != "runtime_missing" {
+		t.Fatalf("branch: %v", err)
+	}
+	for _, v := range []string{"stop", "commit", "run"} {
+		if len(fd.callsWith(v)) != 0 {
+			t.Fatalf("a refused branch must not touch the source (%s): %v", v, fd.calls)
+		}
+	}
+	if recs, _ := e.store().List(); len(recs) != 1 {
+		t.Fatalf("records %+v", recs)
 	}
 }
