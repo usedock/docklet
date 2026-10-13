@@ -42,12 +42,15 @@ type fakeDocker struct {
 	copyFailAt int   // with copyErr, only the nth copy (1-based) fails; 0 means every copy
 	copies     int
 	drv        *fakeDriver
-	noNet      map[string]bool // containers run with --network none
-	streams    [][]string      // docker exec stream calls
+	noNet      map[string]bool     // containers run with --network none
+	streams    [][]string          // docker exec stream calls
+	hostRules  map[string][]string // host block per chain: bridge, then DNS servers
+	hostErr    error               // the host-block install helper fails
+	hostRmErr  error               // the host-block remove helper fails
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, stopped: map[string]bool{}, attached: map[string]bool{}, noNet: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{},
+	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, stopped: map[string]bool{}, attached: map[string]bool{}, noNet: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{}, hostRules: map[string][]string{},
 		runtimes: `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`, drv: newFakeDriver()}
 }
 
@@ -98,6 +101,9 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 		f.images[args[2]] = true
 		return "", "", nil
 	case "run":
+		if i := slices.Index(args, "--network"); i >= 0 && args[i+1] == "host" {
+			return f.hostHelper(args)
+		}
 		if slices.Contains(args, "--rm") {
 			// The work-volume copy helper.
 			f.copies++
@@ -281,7 +287,7 @@ func (f *fakeDocker) callsWith(verb string) [][]string {
 	defer f.mu.Unlock()
 	var out [][]string
 	for _, c := range f.calls {
-		if c[0] == verb {
+		if c[0] == verb && !isHostHelper(c) {
 			out = append(out, c)
 		}
 	}
@@ -897,6 +903,8 @@ func branchCalls(fd *fakeDocker) []string {
 	var out []string
 	for _, c := range fd.calls {
 		switch {
+		case isHostHelper(c):
+			out = append(out, "block")
 		case c[0] == "run" && slices.Contains(c, "--rm"):
 			out = append(out, "copy")
 		case c[0] == "network" || c[0] == "image":

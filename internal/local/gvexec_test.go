@@ -388,3 +388,19 @@ func TestTailBufferKeepsTheEnd(t *testing.T) {
 		t.Fatalf("tail %d bytes", len(s))
 	}
 }
+
+// A relay that cannot reach the agent prints a Python traceback; the user sees its last line
+// labelled as an unreachable agent, while docker's own refusals keep the docker label.
+func TestExecConnStderrIsOneAccurateLine(t *testing.T) {
+	traceback := "Traceback (most recent call last):\n  File \"<string>\", line 2, in <module>\n  File \"/usr/lib/python3.12/socket.py\", line 852, in create_connection\n    raise exceptions[0]\nConnectionRefusedError: [Errno 111] Connection refused\n\n"
+	for _, tc := range []struct{ stderr, want string }{
+		{traceback, "guest agent unreachable: ConnectionRefusedError: [Errno 111] Connection refused"},
+		{"Error response from daemon: container is paused\n", "docker exec failed: Error response from daemon: container is paused"},
+		{"warning: x\nError: No such container: dock-local-x\n", "docker exec failed: Error: No such container: dock-local-x"},
+	} {
+		err := stderrError(tc.stderr)
+		if err.Error() != tc.want || strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "Traceback") {
+			t.Errorf("stderr %q: got %q, want %q", tc.stderr, err, tc.want)
+		}
+	}
+}

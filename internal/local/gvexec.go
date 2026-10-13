@@ -164,7 +164,7 @@ func (c *execConn) Read(b []byte) (int, error) {
 	} else if err != nil && n == 0 && !c.gotData.Load() && c.p.Stderr != nil {
 		// The stream ended before the relay sent anything: docker refused, so say why.
 		if msg := c.p.Stderr(); msg != "" {
-			err = fmt.Errorf("docker exec failed: %s", msg)
+			err = stderrError(msg)
 		}
 	}
 	return n, err
@@ -230,3 +230,19 @@ func (execAddr) String() string  { return "docker-exec:" + strconv.Itoa(guestage
 
 func (c *execConn) LocalAddr() net.Addr  { return execAddr{} }
 func (c *execConn) RemoteAddr() net.Addr { return execAddr{} }
+
+// stderrError turns the stderr of a docker exec that ended before any data into one line. A
+// Python traceback comes from the relay (it could not reach the agent, for example while the
+// agent restarts); anything else is docker refusing the exec.
+func stderrError(stderr string) error {
+	last := ""
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			last = l
+		}
+	}
+	if strings.Contains(stderr, "Traceback (most recent call last)") {
+		return fmt.Errorf("guest agent unreachable: %s", last)
+	}
+	return fmt.Errorf("docker exec failed: %s", last)
+}
