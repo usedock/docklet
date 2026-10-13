@@ -172,6 +172,45 @@ func TestE2ELocalGVisorDock(t *testing.T) {
 		t.Fatalf("port forward after resume: %q %v", head, err)
 	}
 	conn.Close()
+
+	// Branch: the new dock carries the rootfs changes and the work files, and stays independent.
+	bs, err := e.Branch(ctx, "e2egv", 1, "e2egv-branch", Spec{})
+	if err != nil || len(bs) != 1 || bs[0].State != "ready" || bs[0].Runtime != RuntimeGVisor {
+		t.Fatalf("branch %+v %v", bs, err)
+	}
+	t.Cleanup(func() { _ = e.Remove(context.Background(), bs[0].ID) })
+	if st, _ := e.Get(ctx, "e2egv"); st.State != "ready" {
+		t.Fatalf("a running source must be resumed after branching, state %s", st.State)
+	}
+	brun := func(script string) string {
+		t.Helper()
+		res, err := e.Exec(ctx, "e2egv-branch", script, 60*time.Second)
+		if err != nil || res.ExitCode != 0 {
+			t.Fatalf("branch %q: %+v %v", script, res, err)
+		}
+		return res.Stdout
+	}
+	if out := brun("cat /home/user/work/f; stat -c %u /home/user/work/f; ls /usr/local/bin/e2e-marker; command -v tree"); !strings.Contains(out, "keep") || !strings.Contains(out, "1001") || !strings.Contains(out, "e2e-marker") || !strings.Contains(out, "tree") {
+		t.Fatalf("the branch must carry the work files (owned by uid 1001) and the rootfs changes: %q", out)
+	}
+	brun("echo branch-only > /home/user/work/g; sudo touch /usr/local/bin/branch-marker")
+	if res, _ := e.Exec(ctx, "e2egv", "test ! -e /home/user/work/g && test ! -e /usr/local/bin/branch-marker", 60*time.Second); res.ExitCode != 0 {
+		t.Fatalf("changes in the branch must not show in the source: %+v", res)
+	}
+	run("echo source-only > /home/user/work/h")
+	if res, _ := e.Exec(ctx, "e2egv-branch", "test ! -e /home/user/work/h", 60*time.Second); res.ExitCode != 0 {
+		t.Fatalf("changes in the source must not show in the branch: %+v", res)
+	}
+	branchImage := gvBranchImage(bs[0].ID)
+	if err := e.Remove(ctx, "e2egv-branch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.gvisor().docker(ctx, nil, "image", "inspect", branchImage); err == nil {
+		t.Fatalf("rm must remove the branch image %s", branchImage)
+	}
+	if _, _, err := e.gvisor().docker(ctx, nil, "volume", "inspect", gvVolume(bs[0].ID)); err == nil {
+		t.Fatal("rm must remove the branch volume")
+	}
 	if err := e.Remove(ctx, "e2egv"); err != nil {
 		t.Fatal(err)
 	}

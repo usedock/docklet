@@ -595,7 +595,7 @@ func (e *Engine) stopGVisor(ctx context.Context, id string, force bool) error {
 	return e.gvisor().halt(ctx, id, grace)
 }
 
-// removeGVisor deletes the container, its network and the work volume.
+// removeGVisor deletes the container, its network, the work volume and a branch image.
 func (e *Engine) removeGVisor(ctx context.Context, id string) error {
 	g := e.gvisor()
 	if err := g.removeContainer(ctx, id); err != nil {
@@ -604,7 +604,11 @@ func (e *Engine) removeGVisor(ctx context.Context, id string) error {
 	if err := g.removeNetwork(ctx, id); err != nil {
 		return err
 	}
-	return g.removeVolume(ctx, id)
+	if err := g.removeVolume(ctx, id); err != nil {
+		return err
+	}
+	// Only a branched dock has its own image; the base image stays.
+	return g.removeImage(ctx, gvBranchImage(id))
 }
 
 // newGVisor creates a gVisor dock and boots it.
@@ -649,4 +653,153 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 // gvUnsupported is the error for verbs a gVisor dock cannot do.
 func gvUnsupported(verb string) error {
 	return errf("not_supported", "%s is not supported for gvisor docks (only /home/user/work persists; there is no disk image to copy)", verb)
+}
+
+// gvBranchRepo is the repository of the per-branch images made by docker commit.
+const gvBranchRepo = "dock-local-gvisor-branch"
+
+func gvBranchImage(id string) string { return gvBranchRepo + ":" + id }
+func gvCopier(id string) string      { return "dock-local-" + id + "-copy" }
+
+// tagImage gives an existing image another name, so n branches share one committed layer.
+func (g *GVisor) tagImage(ctx context.Context, from, to string) error {
+	if _, stderr, err := g.docker(ctx, nil, "tag", from, to); err != nil {
+		return dockerFailure("branch_failed", "docker tag "+from, err, stderr)
+	}
+	return nil
+}
+
+// removeImage untags a branch image; one that is gone or still in use is left alone.
+func (g *GVisor) removeImage(ctx context.Context, tag string) error {
+	_, stderr, err := g.docker(ctx, nil, "image", "rm", tag)
+	low := strings.ToLower(stderr)
+	if err != nil && !strings.Contains(low, "no such image") && !strings.Contains(low, "in use") && !strings.Contains(low, "being used") && !strings.Contains(low, "conflict") {
+		return dockerFailure("remove_failed", "docker image rm "+tag, err, stderr)
+	}
+	return nil
+}
+
+// copyVolume copies the work volume of src into the (new) volume of dst. A short-lived
+// container of the dock image does it under plain runsc with no network, so the user's data
+// is only ever touched inside the same sandbox as the docks, never by host root. It runs as
+// root in the sandbox so cp -a can keep the uid 1001 ownership.
+func (g *GVisor) copyVolume(ctx context.Context, srcID, dstID, image string) error {
+	args := []string{"run", "--rm", "--runtime=" + gvRuntimePlain, "--name", gvCopier(dstID), "--network", "none", "--user", "0:0",
+		"--entrypoint", "cp", "-v", gvVolume(srcID) + ":/from:ro", "-v", gvVolume(dstID) + ":/to", image, "-a", "/from/.", "/to/"}
+	if _, stderr, err := g.docker(ctx, nil, args...); err != nil {
+		_, _, _ = g.docker(context.WithoutCancel(ctx), nil, "rm", "-f", gvCopier(dstID))
+		return dockerFailure("branch_failed", "copy the work volume of "+srcID, err, stderr)
+	}
+	return nil
+}
+
+// branchGVisor makes count docks from a gVisor dock: the source is stopped if running, its
+// rootfs layer is committed to an image and its work volume copied, then the source is resumed
+// and the new docks are booted (like QEMU branch, they come up running).
+func (e *Engine) branchGVisor(ctx context.Context, src Record, count int, name string, over Spec) ([]Dock, error) {
+	g := e.gvisor()
+	image, suid, err := e.gvPrepare(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if src.gvRuntime() == gvRuntimeSUID && !suid {
+		return nil, errf("runtime_missing", "dock %s was created with the %s runtime, which is no longer registered with Docker; register it again (%s) or remove the dock", src.ID, gvRuntimeSUID, GVisorSUIDFix)
+	}
+	wasRunning := e.aliveRec(ctx, src)
+	if wasRunning {
+		e.logf("stopping %s for a consistent copy", src.ID)
+		if err := e.stopGVisor(ctx, src.ID, false); err != nil {
+			return nil, err
+		}
+	}
+	type made struct {
+		rec Record
+		img string
+	}
+	var all []made
+	// discard removes everything a new dock owns, best effort (the container and network may not exist yet).
+	discard := func(rec Record) {
+		bg := context.WithoutCancel(ctx)
+		g.cleanup(bg, rec.ID)
+		_ = g.removeVolume(bg, rec.ID)
+		_ = g.removeImage(bg, gvBranchImage(rec.ID))
+		_ = e.dropRecord(rec.ID)
+		_ = e.removeFiles(rec.ID)
+	}
+	var committed string
+	copyErr := func() error {
+		for range count {
+			rec := src
+			rec.ID, rec.Name, rec.Parent, rec.CreatedAt = NewID(), name, src.ID, e.now()
+			if over.CPUs > 0 {
+				rec.CPUs = over.CPUs
+			}
+			if over.MemoryMiB > 0 {
+				rec.MemoryMiB = over.MemoryMiB
+			}
+			if err := e.mkDockDir(rec.ID); err != nil {
+				return errf("store_error", "%v", err)
+			}
+			if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
+				_ = e.removeFiles(rec.ID)
+				return errf("store_error", "%v", err)
+			}
+			if err := e.addRecord(rec); err != nil {
+				_ = e.removeFiles(rec.ID)
+				return err
+			}
+			// A container that is gone (docker prune) has no layer to commit; the branch then starts
+			// from the plain image, like resume does, and only the work volume carries over.
+			img := image
+			if committed == "" {
+				switch _, stderr, err := g.docker(ctx, nil, "commit", gvContainer(src.ID), gvBranchImage(rec.ID)); {
+				case err == nil:
+					committed, img = gvBranchImage(rec.ID), gvBranchImage(rec.ID)
+				case notFound(stderr):
+					e.logf("the container of %s is gone; the branch starts from the base image (only /home/user/work carries over)", src.ID)
+					committed, img = "-", image
+				default:
+					discard(rec)
+					return dockerFailure("branch_failed", "docker commit "+gvContainer(src.ID), err, stderr)
+				}
+			} else if committed != "-" {
+				if err := g.tagImage(ctx, committed, gvBranchImage(rec.ID)); err != nil {
+					discard(rec)
+					return err
+				}
+				img = gvBranchImage(rec.ID)
+			}
+			if err := g.copyVolume(ctx, src.ID, rec.ID, image); err != nil {
+				discard(rec)
+				return err
+			}
+			all = append(all, made{rec, img})
+		}
+		return nil
+	}()
+	var resumeErr error
+	if wasRunning {
+		resumeErr = e.resumeGVisor(ctx, src, image, suid)
+	}
+	if copyErr != nil {
+		// Branches copied before the failure are removed: a failed branch leaves nothing behind.
+		for _, m := range all {
+			discard(m.rec)
+		}
+		return nil, copyErr
+	}
+	var docks []Dock
+	for i, m := range all {
+		if err := e.bootGVisor(ctx, m.rec, m.img); err != nil {
+			for _, rest := range all[i:] {
+				discard(rest.rec)
+			}
+			return docks, err
+		}
+		docks = append(docks, e.view(ctx, m.rec))
+	}
+	if resumeErr != nil {
+		return docks, resumeErr
+	}
+	return docks, nil
 }
