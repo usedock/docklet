@@ -548,6 +548,8 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 			}
 		}
 	}
+	// Set below: a runc container publishing on every host address (Docker DNATs that to FORWARD).
+	pubPort, pubIP := "", ""
 	targetsFor := func(id string) []string {
 		gw := netGateway(gvNetwork(id))
 		hosts := map[string]bool{gw: true}
@@ -557,6 +559,12 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 		var args []string
 		for h := range hosts {
 			args = append(args, "tcp,any,"+h+","+port(anyL), "udp,udp,"+h+","+udpPort)
+			if pubPort != "" {
+				args = append(args, "tcp,published,"+h+","+pubPort)
+			}
+		}
+		if pubIP != "" {
+			args = append(args, "tcp,published-direct,"+pubIP+",8000")
 		}
 		// The 127.0.0.1-only listener is never reachable, directly or through the gateway.
 		args = append(args, "tcp,loopback,127.0.0.1,"+port(loL), "tcp,loopback-gw,"+gw+","+port(loL))
@@ -624,6 +632,39 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 	run("e2ehb", "sudo sh -c 'iptables -F; iptables -P OUTPUT ACCEPT; iptables-legacy -F; ip route flush cache' >/dev/null 2>&1; true")
 	blocked("e2ehb", d.ID, "as root after flushing iptables", "sudo ")
 
+	// Another container (runc, default bridge) publishes on 0.0.0.0, like a user's database: a
+	// connection to a host address on that port is DNATed and forwarded, it never hits INPUT.
+	pubImage, err := g.EnsureImage(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubName := "dock-e2e-pub-" + d.ID
+	t.Cleanup(func() { _, _, _ = g.docker(context.Background(), nil, "rm", "-f", pubName) })
+	if _, stderr, err := g.docker(ctx, nil, "run", "-d", "--runtime=runc", "--name", pubName, "-p", "0.0.0.0::8000",
+		"--entrypoint", "python3", pubImage, "-m", "http.server", "8000"); err != nil {
+		t.Fatalf("published container: %v %s", err, stderr)
+	}
+	pubOut, _, err := g.docker(ctx, nil, "port", pubName, "8000/tcp")
+	if err != nil {
+		t.Fatalf("docker port: %v", err)
+	}
+	first := strings.TrimSpace(strings.Split(strings.TrimSpace(pubOut), "\n")[0])
+	pubPort = first[strings.LastIndex(first, ":")+1:]
+	ipOut, _, _ := g.docker(ctx, nil, "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", pubName)
+	pubIP = strings.TrimSpace(ipOut)
+	for i := 0; ; i++ {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+pubPort, 2*time.Second)
+		if err == nil {
+			c.Close()
+			break
+		}
+		if i == 30 {
+			t.Fatalf("the published container never listened on %s: %v", pubPort, err)
+		}
+		time.Sleep(time.Second)
+	}
+	blocked("e2ehb", d.ID, "as root, against a published container port", "sudo ")
+
 	// Internet by IP and by name (DNS from the host resolvers), and dock port, still work.
 	if res := run("e2ehb", "curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://github.com"); res.ExitCode != 0 || !strings.HasPrefix(res.Stdout, "2") && !strings.HasPrefix(res.Stdout, "3") {
 		t.Fatalf("egress by name: %+v", res)
@@ -656,6 +697,14 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	noTrace(d.ID)
+	// A network left by an older dock (Docker's br-<id> bridge name, the container still attached,
+	// as after a host reboot) must not let resume run the dock behind a rule for another interface.
+	if _, stderr, err := g.docker(ctx, nil, "network", "create", "--driver", "bridge", gvNetwork(d.ID)); err != nil {
+		t.Fatalf("old-style network: %v %s", err, stderr)
+	}
+	if _, stderr, err := g.docker(ctx, nil, "network", "connect", gvNetwork(d.ID), gvContainer(d.ID)); err != nil {
+		t.Fatalf("attach to the old-style network: %v %s", err, stderr)
+	}
 	if _, err := e.Resume(ctx, "e2ehb"); err != nil {
 		t.Fatal(err)
 	}
