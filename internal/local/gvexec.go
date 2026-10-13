@@ -2,12 +2,15 @@ package local
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/usedock/docklet/internal/guestagent"
@@ -49,6 +52,33 @@ type ExecPipe struct {
 	Out io.Reader
 	// Close ends the command.
 	Close func() error
+	// Stderr returns what the command wrote to stderr (a bounded tail); nil means none is kept.
+	Stderr func() string
+}
+
+// stderrTailBytes bounds the stderr kept from a docker exec.
+const stderrTailBytes = 4 << 10
+
+// tailBuffer keeps the last stderrTailBytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > stderrTailBytes {
+		t.buf = t.buf[len(t.buf)-stderrTailBytes:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.buf))
 }
 
 // DockerStream starts the docker CLI with args and returns its stdin and stdout as a stream.
@@ -65,11 +95,28 @@ func execStream(_ context.Context, args ...string) (*ExecPipe, error) {
 	if err != nil {
 		return nil, err
 	}
+	errPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	tail := &tailBuffer{}
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(tail, errPipe)
+	}()
 	var once sync.Once
-	return &ExecPipe{In: in, Out: out, Close: func() error {
+	return &ExecPipe{In: in, Out: out, Stderr: func() string {
+		// stderr ends when docker exits, which is right behind its stdout.
+		select {
+		case <-drained:
+		case <-time.After(2 * time.Second):
+		}
+		return tail.String()
+	}, Close: func() error {
 		once.Do(func() {
 			_ = in.Close()
 			_ = cmd.Process.Kill()
@@ -102,14 +149,23 @@ type execConn struct {
 	timer   *time.Timer
 	expired bool
 	closed  sync.Once
+	gotData atomic.Bool
 }
 
 func newExecConn(p *ExecPipe) *execConn { return &execConn{p: p} }
 
 func (c *execConn) Read(b []byte) (int, error) {
 	n, err := c.p.Out.Read(b)
+	if n > 0 {
+		c.gotData.Store(true)
+	}
 	if err != nil && c.timedOut() {
 		err = os.ErrDeadlineExceeded
+	} else if err != nil && n == 0 && !c.gotData.Load() && c.p.Stderr != nil {
+		// The stream ended before the relay sent anything: docker refused, so say why.
+		if msg := c.p.Stderr(); msg != "" {
+			err = fmt.Errorf("docker exec failed: %s", msg)
+		}
 	}
 	return n, err
 }

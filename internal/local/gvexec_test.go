@@ -328,3 +328,63 @@ func TestNetworkOnDocksKeepTCPDial(t *testing.T) {
 		t.Fatalf("qemu launch %+v", drv.starts)
 	}
 }
+
+func TestNetworkOffRemoveWithoutDockerDoesNotNameANetwork(t *testing.T) {
+	ctx := context.Background()
+	e, _ := newGVisorEngine(t)
+	d, err := e.New(ctx, Spec{Name: "off", Runtime: RuntimeGVisor, Network: "off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.GVisor.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	var progress strings.Builder
+	e.Progress = &progress
+	if err := e.Remove(ctx, "off"); err != nil {
+		t.Fatal(err)
+	}
+	out := progress.String()
+	if !strings.Contains(out, "dock-local-"+d.ID+" ") || !strings.Contains(out, "dock-local-"+d.ID+"-work") || strings.Contains(out, "-net") {
+		t.Fatalf("warning must list the container and volume only: %q", out)
+	}
+}
+
+// A docker exec that refuses (paused or just-stopped container) says why instead of a bare EOF,
+// but only when nothing came through the stream.
+func TestExecConnReportsDockerStderrOnlyBeforeAnyData(t *testing.T) {
+	refused := func(data string) *execConn {
+		outR, outW := io.Pipe()
+		go func() {
+			if data != "" {
+				_, _ = outW.Write([]byte(data))
+			}
+			_ = outW.Close()
+		}()
+		return newExecConn(&ExecPipe{In: nopWriteCloser{io.Discard}, Out: outR, Close: func() error { return nil },
+			Stderr: func() string { return "Error response from daemon: container is paused" }})
+	}
+	_, err := io.ReadAll(refused(""))
+	if err == nil || !strings.Contains(err.Error(), "container is paused") {
+		t.Fatalf("want docker's message, got %v", err)
+	}
+	c := refused("data")
+	b := make([]byte, 4)
+	if _, err := io.ReadFull(c, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Read(b); err != io.EOF {
+		t.Fatalf("after data the plain EOF must stay: %v", err)
+	}
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
+func TestTailBufferKeepsTheEnd(t *testing.T) {
+	var tb tailBuffer
+	_, _ = tb.Write(bytes.Repeat([]byte("a"), stderrTailBytes))
+	_, _ = tb.Write([]byte("END\n"))
+	if s := tb.String(); len(s) > stderrTailBytes || !strings.HasSuffix(s, "END") {
+		t.Fatalf("tail %d bytes", len(s))
+	}
+}

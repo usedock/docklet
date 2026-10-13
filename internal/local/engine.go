@@ -816,8 +816,11 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 		// that is installed but whose daemon is down fails with docker_unavailable so the
 		// user can start it and retry without leaking the volume.
 		if g := e.gvisor(); !g.hasDocker() {
-			e.logf("warning: docker was not found, so the container %s, volume %s and network %s (and any branch image) could not be removed; remove them by hand if Docker comes back",
-				gvContainer(rec.ID), gvVolume(rec.ID), gvNetwork(rec.ID))
+			what := "container " + gvContainer(rec.ID) + " and volume " + gvVolume(rec.ID)
+			if !rec.gvNoNet() {
+				what = "container " + gvContainer(rec.ID) + ", volume " + gvVolume(rec.ID) + " and network " + gvNetwork(rec.ID)
+			}
+			e.logf("warning: docker was not found, so the %s (and any branch image) could not be removed; remove them by hand if Docker comes back", what)
 		} else {
 			if err := e.removeGVisor(ctx, rec); err != nil {
 				return err
