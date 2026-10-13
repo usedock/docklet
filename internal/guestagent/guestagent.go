@@ -68,16 +68,29 @@ type Refusal string
 
 func (e Refusal) Error() string { return string(e) }
 
+// DialFunc opens one connection to a guest agent; the default is TCP, a dock with no
+// network reaches its agent another way.
+type DialFunc func(ctx context.Context) (net.Conn, error)
+
+// TCPDial dials the agent at addr (host:port).
+func TCPDial(addr string) DialFunc {
+	return func(ctx context.Context) (net.Conn, error) { return Dial(ctx, addr) }
+}
+
 // Call sends one request to the agent at addr (host:port) and returns its reply.
 // Exec holds the connection for the script's own budget plus a minute of slack.
 func Call(ctx context.Context, addr, token string, request Request) (Response, error) {
+	return CallDial(ctx, TCPDial(addr), token, request)
+}
+
+// CallDial is Call over any connection dial opens.
+func CallDial(ctx context.Context, dial DialFunc, token string, request Request) (Response, error) {
 	request.Token = token
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return Response{}, err
 	}
-	dialer := net.Dialer{Timeout: dialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	conn, err := dial(ctx)
 	if err != nil {
 		return Response{}, err
 	}

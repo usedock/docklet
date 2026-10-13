@@ -146,6 +146,15 @@ func (e *Engine) agentAddr(id string) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(e.readInt(id, "port")))
 }
 
+// dial is how the engine reaches rec's guest agent: the forwarded TCP port, except for a gvisor
+// dock with no network, which has no published port and is reached through docker exec.
+func (e *Engine) dial(rec Record) guestagent.DialFunc {
+	if rec.runtime() == RuntimeGVisor && rec.Network == "off" {
+		return e.gvisor().execDial(gvContainer(rec.ID))
+	}
+	return func(ctx context.Context) (net.Conn, error) { return guestagent.Dial(ctx, e.agentAddr(rec.ID)) }
+}
+
 // stamper is a Driver that can tell one process from a later one with the same pid.
 type stamper interface {
 	StartStamp(pid int) (uint64, bool)
@@ -196,14 +205,14 @@ func (e *Engine) aliveRec(ctx context.Context, r Record) bool {
 	return e.alive(r.ID)
 }
 
-func (e *Engine) ping(ctx context.Context, id string) bool {
-	tok, err := e.token(id)
+func (e *Engine) ping(ctx context.Context, rec Record) bool {
+	tok, err := e.token(rec.ID)
 	if err != nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
-	_, err = guestagent.Call(ctx, e.agentAddr(id), tok, guestagent.Request{Op: "ping"})
+	_, err = guestagent.CallDial(ctx, e.dial(rec), tok, guestagent.Request{Op: "ping"})
 	return err == nil
 }
 
@@ -212,7 +221,7 @@ func (e *Engine) state(ctx context.Context, r Record) string {
 	if !e.aliveRec(ctx, r) {
 		return "archived"
 	}
-	if e.ping(ctx, r.ID) {
+	if e.ping(ctx, r) {
 		return "ready"
 	}
 	return "starting"
@@ -469,10 +478,11 @@ func (e *Engine) bootOnce(ctx context.Context, rec Record, kernel, initrd, cfg, 
 		_ = e.Driver.Kill(pid)
 		return errf("store_error", "%v", err)
 	}
-	return e.waitReady(ctx, rec.ID, pid)
+	return e.waitReady(ctx, rec, pid)
 }
 
-func (e *Engine) waitReady(ctx context.Context, id string, pid int) error {
+func (e *Engine) waitReady(ctx context.Context, rec Record, pid int) error {
+	id := rec.ID
 	deadline := time.NewTimer(e.bootTimeout())
 	defer deadline.Stop()
 	tick := time.NewTicker(300 * time.Millisecond)
@@ -483,7 +493,7 @@ func (e *Engine) waitReady(ctx context.Context, id string, pid int) error {
 		if e.livePID(id) != pid {
 			return errf("boot_failed", "the VM exited during boot.%s", e.logTail(id))
 		}
-		if e.ping(ctx, id) {
+		if e.ping(ctx, rec) {
 			return nil
 		}
 		select {
@@ -528,7 +538,7 @@ func (e *Engine) Exec(ctx context.Context, ref, script string, timeout time.Dura
 		seconds = 300
 	}
 	start := e.now()
-	res, err := guestagent.Call(ctx, e.agentAddr(rec.ID), tok, guestagent.Request{
+	res, err := guestagent.CallDial(ctx, e.dial(rec), tok, guestagent.Request{
 		Op: "exec", Script: script, TimeoutSeconds: seconds, OutputLimit: guestagent.MaxExecOutput,
 	})
 	if err != nil {
@@ -556,7 +566,7 @@ func (e *Engine) OpenTerminal(ctx context.Context, ref string, cols, rows int) (
 	if err != nil {
 		return nil, err
 	}
-	conn, err := guestagent.Dial(ctx, e.agentAddr(rec.ID))
+	conn, err := e.dial(rec)(ctx)
 	if err != nil {
 		return nil, errf("exec_failed", "%v", err)
 	}
@@ -574,7 +584,7 @@ func (e *Engine) OpenPort(ctx context.Context, ref string, port int) (net.Conn, 
 	if err != nil {
 		return nil, err
 	}
-	conn, err := guestagent.Dial(ctx, e.agentAddr(rec.ID))
+	conn, err := e.dial(rec)(ctx)
 	if err != nil {
 		return nil, errf("exec_failed", "%v", err)
 	}
@@ -594,7 +604,7 @@ func (e *Engine) Stop(ctx context.Context, ref string, force bool) (Dock, error)
 	}
 	stop := e.stopVM
 	if rec.runtime() == RuntimeGVisor {
-		stop = e.stopGVisor
+		stop = func(ctx context.Context, _ string, force bool) error { return e.stopGVisor(ctx, rec, force) }
 	}
 	if err := stop(ctx, rec.ID, force); err != nil {
 		return Dock{}, err
@@ -806,10 +816,13 @@ func (e *Engine) Remove(ctx context.Context, ref string) error {
 		// that is installed but whose daemon is down fails with docker_unavailable so the
 		// user can start it and retry without leaking the volume.
 		if g := e.gvisor(); !g.hasDocker() {
-			e.logf("warning: docker was not found, so the container %s, volume %s and network %s (and any branch image) could not be removed; remove them by hand if Docker comes back",
-				gvContainer(rec.ID), gvVolume(rec.ID), gvNetwork(rec.ID))
+			what := "container " + gvContainer(rec.ID) + " and volume " + gvVolume(rec.ID)
+			if !rec.gvNoNet() {
+				what = "container " + gvContainer(rec.ID) + ", volume " + gvVolume(rec.ID) + " and network " + gvNetwork(rec.ID)
+			}
+			e.logf("warning: docker was not found, so the %s (and any branch image) could not be removed; remove them by hand if Docker comes back", what)
 		} else {
-			if err := e.removeGVisor(ctx, rec.ID); err != nil {
+			if err := e.removeGVisor(ctx, rec); err != nil {
 				return err
 			}
 		}

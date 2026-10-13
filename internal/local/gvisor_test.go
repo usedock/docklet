@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,10 +42,12 @@ type fakeDocker struct {
 	copyFailAt int   // with copyErr, only the nth copy (1-based) fails; 0 means every copy
 	copies     int
 	drv        *fakeDriver
+	noNet      map[string]bool // containers run with --network none
+	streams    [][]string      // docker exec stream calls
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, stopped: map[string]bool{}, attached: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{},
+	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, stopped: map[string]bool{}, attached: map[string]bool{}, noNet: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{},
 		runtimes: `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`, drv: newFakeDriver()}
 }
 
@@ -112,8 +115,11 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			return "", "docker: " + f.runErr.Error(), f.runErr
 		}
 		var name, port, cfg string
+		var noNet bool
 		for i, a := range args {
 			switch {
+			case a == "--network" && args[i+1] == "none":
+				noNet = true
 			case a == "--network" && !f.networks[args[i+1]]:
 				return "", "docker: Error response from daemon: network " + args[i+1] + " not found", gone
 			case a == "--name":
@@ -134,15 +140,20 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			}
 			var c GuestConfig
 			_ = json.Unmarshal(raw, &c)
+			// With no published port the agent listens on a private loopback port the exec stream reaches.
 			if l, err = net.Listen("tcp", "127.0.0.1:"+port); err != nil {
 				return "", "port is already allocated", err
+			}
+			if noNet {
+				port = strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 			}
 			f.tokens[name] = c.Token
 			go f.drv.serve(0, l, c.Token)
 		}
 		f.containers[name] = l
 		f.ports[name] = port
-		f.attached[name] = true
+		f.noNet[name] = noNet
+		f.attached[name] = !noNet
 		return "cid\n", "", nil
 	case "inspect":
 		_, ok := f.containers[last]
@@ -174,7 +185,7 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 		if _, ok := f.containers[last]; !ok {
 			return "", "Error response from daemon: No such container: " + last, gone
 		}
-		if !f.attached[last] || !f.networks[last+"-net"] {
+		if !f.noNet[last] && (!f.attached[last] || !f.networks[last+"-net"]) {
 			return "", "Error response from daemon: network not found", gone
 		}
 		l, err := net.Listen("tcp", "127.0.0.1:"+f.ports[last])
@@ -241,6 +252,30 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 	return "", "", errors.New("unexpected docker " + args[0])
 }
 
+// stream is the fake of docker exec -i <container> python3 -c <relay>: it pipes to the
+// container's agent the way the relay does, and half-closes on the stdin close.
+func (f *fakeDocker) stream(_ context.Context, args ...string) (*ExecPipe, error) {
+	f.mu.Lock()
+	f.streams = append(f.streams, args)
+	l, ok := f.containers[args[2]]
+	port := f.ports[args[2]]
+	f.mu.Unlock()
+	if !ok || l == nil || args[0] != "exec" || args[1] != "-i" || args[3] != "python3" {
+		return nil, errors.New("Error response from daemon: container is not running")
+	}
+	conn, err := net.Dial("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		return nil, err
+	}
+	return &ExecPipe{In: halfCloser{conn.(*net.TCPConn)}, Out: conn, Close: conn.Close}, nil
+}
+
+// halfCloser turns Close into the relay's shutdown of the socket's write side.
+type halfCloser struct{ c *net.TCPConn }
+
+func (h halfCloser) Write(b []byte) (int, error) { return h.c.Write(b) }
+func (h halfCloser) Close() error                { return h.c.CloseWrite() }
+
 func (f *fakeDocker) callsWith(verb string) [][]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -257,7 +292,7 @@ func newGVisorEngine(t *testing.T) (*Engine, *fakeDocker) {
 	t.Helper()
 	e, _, _ := newTestEngine(t)
 	fd := newFakeDocker()
-	e.GVisor = &GVisor{GOOS: "linux", Run: fd.run, LookPath: func(string) (string, error) { return "/usr/bin/docker", nil }}
+	e.GVisor = &GVisor{GOOS: "linux", Run: fd.run, Stream: fd.stream, LookPath: func(string) (string, error) { return "/usr/bin/docker", nil }}
 	return e, fd
 }
 
@@ -470,8 +505,8 @@ func TestGVisorPreflightFailsBeforeAnyBuildOrRecord(t *testing.T) {
 func TestGVisorUnsupportedVerbsAndOptions(t *testing.T) {
 	ctx := context.Background()
 	e, fd := newGVisorEngine(t)
-	if _, err := e.New(ctx, Spec{Runtime: RuntimeGVisor, Network: "off"}); codeOf(err) != "not_supported" || !strings.Contains(err.Error(), "--network off") {
-		t.Fatalf("network off: %v", err)
+	if _, err := e.New(ctx, Spec{Runtime: RuntimeGVisor, Network: "sideways"}); codeOf(err) != "invalid_argument" {
+		t.Fatalf("bad network: %v", err)
 	}
 	if len(fd.calls) != 0 {
 		t.Fatalf("a rejected spec must not touch docker: %v", fd.calls)
