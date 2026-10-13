@@ -1,0 +1,23 @@
+name: probe
+on:
+  push:
+    branches: [feat/gvisor-host-block]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: install runsc
+        run: |
+          set -eux
+          eval "$(grep -E '^RUNSC_(VERSION|SHA256_X86_64)=' scripts/bootstrap-host.sh)"
+          tmp=$(mktemp -d)
+          curl -fsSL -o "${tmp}/gvisor.tar.bz2" "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/gvisor-x86_64.tar.bz2"
+          echo "${RUNSC_SHA256_X86_64}  ${tmp}/gvisor.tar.bz2" | sha256sum -c -
+          tar -xjf "${tmp}/gvisor.tar.bz2" -C "${tmp}" runsc
+          sudo install -m 0755 "${tmp}/runsc" /usr/local/bin/runsc
+          sudo /usr/local/bin/runsc install
+          sudo systemctl restart docker
+      - name: probe
+        run: bash probe/probe.sh
