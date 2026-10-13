@@ -38,6 +38,8 @@ type fakeDocker struct {
 	buildStdin []byte
 	commitErr  error // docker commit fails
 	copyErr    error // the work-volume copy helper fails
+	copyFailAt int   // with copyErr, only the nth copy (1-based) fails; 0 means every copy
+	copies     int
 	drv        *fakeDriver
 }
 
@@ -95,7 +97,8 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 	case "run":
 		if slices.Contains(args, "--rm") {
 			// The work-volume copy helper.
-			if f.copyErr != nil {
+			f.copies++
+			if f.copyErr != nil && (f.copyFailAt == 0 || f.copyFailAt == f.copies) {
 				return "", "docker: " + f.copyErr.Error(), f.copyErr
 			}
 			for i, a := range args {
@@ -1057,5 +1060,77 @@ func TestGVisorBranchRuntimeMissing(t *testing.T) {
 	}
 	if recs, _ := e.store().List(); len(recs) != 1 {
 		t.Fatalf("records %+v", recs)
+	}
+}
+
+func TestGVisorBranchPrunedSourceUsesBaseImage(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	src, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Stop(ctx, "gv", false); err != nil {
+		t.Fatal(err)
+	}
+	delete(fd.containers, "dock-local-"+src.ID) // docker container prune
+	delete(fd.stopped, "dock-local-"+src.ID)
+	fd.calls = nil
+	bs, err := e.Branch(ctx, "gv", 2, "", Spec{})
+	if err != nil || len(bs) != 2 {
+		t.Fatalf("branch %+v %v", bs, err)
+	}
+	base, _ := GVisorImageTag()
+	if n := len(fd.callsWith("tag")); n != 0 {
+		t.Fatalf("nothing was committed, so nothing may be tagged: %d", n)
+	}
+	for _, b := range bs {
+		if fd.images["dock-local-gvisor-branch:"+b.ID] {
+			t.Fatalf("branch %s must not have its own image", b.ID)
+		}
+		var run string
+		for _, c := range fd.callsWith("run") {
+			if slices.Contains(c, "dock-local-"+b.ID) {
+				run = strings.Join(c, " ")
+			}
+		}
+		if !strings.HasSuffix(run, " "+base) {
+			t.Fatalf("branch %s must start from the base image: %s", b.ID, run)
+		}
+		if !fd.volumes["dock-local-"+b.ID+"-work"] {
+			t.Fatalf("branch %s must get the work volume copy", b.ID)
+		}
+		if err := e.Remove(ctx, b.ID); err != nil {
+			t.Fatalf("rm of a branch without an image: %v", err)
+		}
+	}
+	if !fd.images[base] || !fd.volumes["dock-local-"+src.ID+"-work"] {
+		t.Fatalf("the base image and the source volume must stay: %v %v", fd.images, fd.volumes)
+	}
+	if _, err := e.Lookup(src.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGVisorBranchLaterFailureRemovesEarlierBranches(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	src, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	images := len(fd.images)
+	fd.copyErr, fd.copyFailAt = errors.New("cp failed"), 3
+	if _, err := e.Branch(ctx, "gv", 3, "", Spec{}); codeOf(err) != "branch_failed" {
+		t.Fatalf("branch: %v", err)
+	}
+	if recs, _ := e.store().List(); len(recs) != 1 || recs[0].ID != src.ID {
+		t.Fatalf("records %+v", recs)
+	}
+	if len(fd.images) != images || len(fd.volumes) != 1 || len(fd.containers) != 1 {
+		t.Fatalf("leftovers: images %v volumes %v containers %v", fd.images, fd.volumes, fd.containers)
+	}
+	if st, _ := e.Get(ctx, "gv"); st.State != "ready" {
+		t.Fatalf("the source must be resumed, state %s", st.State)
 	}
 }
