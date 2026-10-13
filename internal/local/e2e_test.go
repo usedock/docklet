@@ -681,6 +681,7 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 	prepare("e2ehb-branch")
 	blocked("e2ehb-branch", bs[0].ID, "in the branch, as root", "sudo ")
 	// The branch's address on its own network is not reachable from the source (Docker isolates the networks).
+	prepare("e2ehb") // the branch stopped and resumed the source, which cleared its /tmp
 	out, _, err := g.docker(ctx, nil, "inspect", "--format", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", gvContainer(bs[0].ID))
 	if bip := strings.TrimSpace(out); err != nil || bip == "" {
 		t.Fatalf("branch address: %q %v", out, err)
