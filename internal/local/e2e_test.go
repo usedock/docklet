@@ -5,7 +5,9 @@ package local
 import (
 	"context"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -213,5 +215,125 @@ func TestE2ELocalGVisorDock(t *testing.T) {
 	}
 	if err := e.Remove(ctx, "e2egv"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestE2ELocalGVisorNetworkOff runs a real --network off gVisor dock: the agent is reached through
+// docker exec, and the sandbox has no internet, no DNS and no route to the host.
+func TestE2ELocalGVisorNetworkOff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	t.Setenv("DOCK_DATA_DIR", t.TempDir())
+	e, err := NewEngine(os.Getenv, os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.gvisor().Preflight(ctx); err != nil {
+		if os.Getenv("DOCK_E2E_REQUIRE_GVISOR") != "" {
+			t.Fatalf("gvisor docks cannot run here: %v", err)
+		}
+		t.Skipf("gvisor docks cannot run here: %v", err)
+	}
+	d, err := e.New(ctx, Spec{Name: "e2eoff", Runtime: RuntimeGVisor, Network: "off", CPUs: 1, MemoryMiB: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Remove(context.Background(), d.ID) })
+	if d.State != "ready" {
+		t.Fatalf("dock %+v", d)
+	}
+	exec := func(script string) ExecResult {
+		t.Helper()
+		res, err := e.Exec(ctx, "e2eoff", script, 60*time.Second)
+		if err != nil {
+			t.Fatalf("%q: %v", script, err)
+		}
+		return res
+	}
+	if res := exec("uname -s; id -u"); res.ExitCode != 0 || !strings.Contains(res.Stdout, "Linux") || !strings.Contains(res.Stdout, "1001") {
+		t.Fatalf("uname/id: %+v", res)
+	}
+	if res := exec("curl -sS --max-time 5 https://github.com"); res.ExitCode == 0 {
+		t.Fatalf("a network-off dock must not reach the internet: %+v", res)
+	}
+	if res := exec("getent hosts github.com"); res.ExitCode == 0 {
+		t.Fatalf("a network-off dock must not resolve names: %+v", res)
+	}
+	// A listener on every host interface must be unreachable from the dock, through the docker bridge gateway too.
+	l, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	gw := "172.17.0.1"
+	if out, _, err := e.gvisor().docker(ctx, nil, "network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"); err == nil && strings.TrimSpace(out) != "" {
+		gw = strings.TrimSpace(out)
+	}
+	connect := "python3 -c \"import socket,sys; socket.create_connection(('" + gw + "', " + strconv.Itoa(l.Addr().(*net.TCPAddr).Port) + "), 3)\""
+	if res := exec(connect); res.ExitCode == 0 {
+		t.Fatalf("a network-off dock must not reach the host's docker gateway %s: %+v", gw, res)
+	}
+	exec("echo keep > /home/user/work/f")
+
+	portHead := func(port string) {
+		t.Helper()
+		exec("(python3 -m http.server " + port + " >/dev/null 2>&1 &) ; sleep 1")
+		n, _ := strconv.Atoi(port)
+		conn, err := e.OpenPort(ctx, "e2eoff", n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+		head := make([]byte, 8)
+		if _, err := io.ReadFull(conn, head); err != nil || !strings.HasPrefix(string(head), "HTTP/") {
+			t.Fatalf("port forward: %q %v", head, err)
+		}
+	}
+	portHead("3000")
+
+	if _, err := e.Stop(ctx, "e2eoff", false); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := e.Get(ctx, "e2eoff"); st.State != "archived" {
+		t.Fatalf("stopped dock state %s", st.State)
+	}
+	if _, err := e.Resume(ctx, "e2eoff"); err != nil {
+		t.Fatal(err)
+	}
+	if res := exec("cat /home/user/work/f"); strings.TrimSpace(res.Stdout) != "keep" {
+		t.Fatalf("the work volume must survive stop and resume: %+v", res)
+	}
+	if res := exec("curl -sS --max-time 5 https://github.com"); res.ExitCode == 0 {
+		t.Fatalf("still no internet after resume: %+v", res)
+	}
+	portHead("3001")
+
+	bs, err := e.Branch(ctx, "e2eoff", 1, "e2eoff-branch", Spec{})
+	if err != nil || len(bs) != 1 || bs[0].State != "ready" {
+		t.Fatalf("branch %+v %v", bs, err)
+	}
+	t.Cleanup(func() { _ = e.Remove(context.Background(), bs[0].ID) })
+	res, err := e.Exec(ctx, "e2eoff-branch", "cat /home/user/work/f; curl -sS --max-time 5 https://github.com", 60*time.Second)
+	if err != nil || res.ExitCode == 0 || !strings.Contains(res.Stdout, "keep") {
+		t.Fatalf("a branch of a network-off dock has the files and no network: %+v %v", res, err)
+	}
+	if err := e.Remove(ctx, "e2eoff-branch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Remove(ctx, "e2eoff"); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, _ := e.gvisor().docker(ctx, nil, "ps", "-a", "--filter", "name=dock-local-"+d.ID, "--format", "{{.Names}}"); strings.TrimSpace(out) != "" {
+		t.Fatalf("rm must remove the container: %q", out)
 	}
 }
