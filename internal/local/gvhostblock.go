@@ -91,24 +91,32 @@ func hostHelperArgs(image, script string, args ...string) []string {
 }
 
 // installHostBlock blocks the dock's bridge from the host's own addresses. It fails closed:
-// without the rule the dock would reach host services.
-func (g *GVisor) installHostBlock(ctx context.Context, id string, nameservers []string) error {
+// without the rule the dock would reach host services. On success it returns the helper's
+// "warning:" lines (such as a missing IPv6 rule) for the caller to show.
+func (g *GVisor) installHostBlock(ctx context.Context, id string, nameservers []string) ([]string, error) {
 	if g.AllowHost {
-		return nil
+		return nil, nil
 	}
 	image, err := g.EnsureImage(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	args := hostHelperArgs(image, gvHostBlockScript, append([]string{"install", gvChain(id), gvBridge(id)}, nameservers...)...)
-	if _, stderr, err := g.docker(ctx, nil, args...); err != nil {
+	_, stderr, err := g.docker(ctx, nil, args...)
+	if err != nil {
 		low := strings.ToLower(stderr)
 		if strings.Contains(low, "cannot connect to the docker daemon") || strings.Contains(low, "permission denied while trying to connect") {
-			return dockerFailure("boot_failed", "install the host block", err, stderr)
+			return nil, dockerFailure("boot_failed", "install the host block", err, stderr)
 		}
-		return errf("host_block_failed", "cannot block the dock's network from this machine's services: %v: %s. Docker must allow a short-lived helper container with NET_ADMIN in the host network. To run the dock anyway, with access to your machine's network services, set %s=1; or use --network off", err, strings.TrimSpace(lastLines(stderr, 3)), gvHostBlockEnv)
+		return nil, errf("host_block_failed", "cannot block the dock's network from this machine's services: %v: %s. Docker must allow a short-lived helper container with NET_ADMIN in the host network. To run the dock anyway, with access to your machine's network services, set %s=1; or use --network off", err, strings.TrimSpace(lastLines(stderr, 3)), gvHostBlockEnv)
 	}
-	return nil
+	var warns []string
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "warning:") {
+			warns = append(warns, l)
+		}
+	}
+	return warns, nil
 }
 
 // removeHostBlock deletes the dock's rules; rules that are already gone are fine.
@@ -132,5 +140,9 @@ func (e *Engine) gvHostBlock(ctx context.Context, rec Record) error {
 		return nil
 	}
 	raw, _ := os.ReadFile(e.file(rec.ID, "resolv.conf"))
-	return g.installHostBlock(ctx, rec.ID, gvNameservers(raw))
+	warns, err := g.installHostBlock(ctx, rec.ID, gvNameservers(raw))
+	for _, w := range warns {
+		e.logf("%s", w)
+	}
+	return err
 }

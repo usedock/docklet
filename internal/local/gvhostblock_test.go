@@ -33,6 +33,7 @@ func (f *fakeDocker) hostHelper(args []string) (string, string, error) {
 			return "", "cannot install the INPUT rule with iptables", f.hostErr
 		}
 		f.hostRules[chain] = append([]string{bridge}, rest...)
+		return "", f.hostWarn, nil
 	case "remove":
 		if f.hostRmErr != nil {
 			return "", "remove failed", f.hostRmErr
@@ -192,6 +193,30 @@ func TestGVisorHostBlockOptOut(t *testing.T) {
 	}
 	if err := e.Remove(ctx, d.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGVisorHostBlockShowsHelperWarnings(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	var logs strings.Builder
+	e.Progress = &logs
+	fd.hostWarn = "warning: no IPv6 rule (ip6tables)\n"
+	if _, err := e.New(ctx, Spec{Name: "warn", Runtime: RuntimeGVisor, CPUs: 1, MemoryMiB: 512}); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(logs.String(), "warning: no IPv6 rule (ip6tables)"); n != 1 {
+		t.Fatalf("want the warning logged once, got %d: %q", n, logs.String())
+	}
+
+	e2, _ := newGVisorEngine(t)
+	var quiet strings.Builder
+	e2.Progress = &quiet
+	if _, err := e2.New(ctx, Spec{Name: "quiet", Runtime: RuntimeGVisor, CPUs: 1, MemoryMiB: 512}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(quiet.String(), "no IPv6") {
+		t.Fatalf("no warning expected: %q", quiet.String())
 	}
 }
 

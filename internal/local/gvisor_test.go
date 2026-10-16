@@ -47,6 +47,7 @@ type fakeDocker struct {
 	streams    [][]string          // docker exec stream calls
 	hostRules  map[string][]string // host block per chain: bridge, then DNS servers
 	hostErr    error               // the host-block install helper fails
+	hostWarn   string              // stderr of a successful host-block install
 	hostRmErr  error               // the host-block remove helper fails
 }
 
