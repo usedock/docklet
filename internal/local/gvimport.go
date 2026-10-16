@@ -17,8 +17,8 @@ import (
 // the first resume boots it as a first start and removes the marker.
 const gvFreshMarker = "imported"
 
-// gvImportingMarker is a file in the dock directory that exists from before the import helper
-// starts until its copy has succeeded. A dock that has it (the process died mid-copy) holds a
+// gvImportingMarker is a file in the dock directory (of a gVisor or a qemu dock) that exists from
+// before the import helper (or the import boot of a qemu dock) starts until its copy has succeeded. A dock that has it (the process died mid-copy) holds a
 // partial work directory, so it cannot be resumed, pushed or branched; it can only be removed.
 const gvImportingMarker = "importing"
 

@@ -338,26 +338,42 @@ func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
 	if spec.Runtime == RuntimeGVisor {
 		return e.newGVisor(ctx, spec, diskSet)
 	}
+	rec, err := e.createQEMU(ctx, spec, false)
+	if err != nil {
+		return Dock{}, err
+	}
+	e.logf("booting %s", rec.ID)
+	if err := e.boot(ctx, rec); err != nil {
+		_ = e.Remove(ctx, rec.ID)
+		return Dock{}, err
+	}
+	return e.view(ctx, rec), nil
+}
+
+// createQEMU makes the files and the record of a new qemu dock without starting it; spec must
+// already have its defaults. importing writes the importing marker before the record exists, so
+// a crash leaves a dock that is refused until it is removed. A failure leaves nothing behind.
+func (e *Engine) createQEMU(ctx context.Context, spec Spec, importing bool) (Record, error) {
 	// Fail on a missing hypervisor before downloading anything.
 	if err := e.Driver.Preflight(ctx); err != nil {
-		return Dock{}, err
+		return Record{}, err
 	}
 	im, err := e.ResolveImage(ctx, spec.Image)
 	if err != nil {
-		return Dock{}, err
+		return Record{}, err
 	}
 	cached, err := e.Cache.Ensure(ctx, im)
 	if err != nil {
-		return Dock{}, err
+		return Record{}, err
 	}
 	rec := Record{ID: NewID(), Name: spec.Name, Image: im.Name, ImageDir: cached.Dir, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
 		DiskGiB: spec.DiskGiB, Network: spec.Network, CreatedAt: e.now()}
 	if err := e.mkDockDir(rec.ID); err != nil {
-		return Dock{}, errf("store_error", "%v", err)
+		return Record{}, errf("store_error", "%v", err)
 	}
-	fail := func(err error) (Dock, error) {
+	fail := func(err error) (Record, error) {
 		_ = e.removeFiles(rec.ID)
-		return Dock{}, err
+		return Record{}, err
 	}
 	disk := e.file(rec.ID, "disk.qcow2")
 	if err := e.Driver.CreateOverlay(ctx, cached.Base, disk); err != nil {
@@ -369,15 +385,15 @@ func (e *Engine) New(ctx context.Context, spec Spec) (Dock, error) {
 	if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
 		return fail(errf("store_error", "%v", err))
 	}
+	if importing {
+		if err := os.WriteFile(e.file(rec.ID, gvImportingMarker), nil, 0o600); err != nil {
+			return fail(errf("store_error", "%v", err))
+		}
+	}
 	if err := e.addRecord(rec); err != nil {
 		return fail(err)
 	}
-	e.logf("booting %s", rec.ID)
-	if err := e.boot(ctx, rec); err != nil {
-		_ = e.Remove(ctx, rec.ID)
-		return Dock{}, err
-	}
-	return e.view(ctx, rec), nil
+	return rec, nil
 }
 
 // addRecord stores rec, re-checking name uniqueness under the store lock: another dock
@@ -422,7 +438,11 @@ func freePort() (int, error) {
 const bootAttempts = 3
 
 // boot starts the VM for rec and waits for its agent.
-func (e *Engine) boot(ctx context.Context, rec Record) error {
+func (e *Engine) boot(ctx context.Context, rec Record) error { return e.bootWith(ctx, rec, "") }
+
+// bootWith is boot with importDrive, a raw file the guest sees as a read-only drive; only the
+// import boot of a pulled work archive passes one.
+func (e *Engine) bootWith(ctx context.Context, rec Record, importDrive string) error {
 	kernel, initrd := filepath.Join(rec.ImageDir, dockyard.FileKernel), filepath.Join(rec.ImageDir, dockyard.FileInitrd)
 	if _, err := os.Stat(kernel); err != nil {
 		return errf("image_missing", "the image files of %s are gone (%s); run: dock images pull %s", rec.ID, rec.ImageDir, rec.Image)
@@ -439,7 +459,7 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 		return errf("store_error", "%v", err)
 	}
 	for attempt := 1; ; attempt++ {
-		err := e.bootOnce(ctx, rec, kernel, initrd, cfg, tok)
+		err := e.bootOnce(ctx, rec, kernel, initrd, cfg, tok, importDrive)
 		if err == nil && opts.ResetHostKeys {
 			_ = os.Remove(e.file(rec.ID, resetKeysMarker))
 		}
@@ -450,7 +470,7 @@ func (e *Engine) boot(ctx context.Context, rec Record) error {
 	}
 }
 
-func (e *Engine) bootOnce(ctx context.Context, rec Record, kernel, initrd, cfg, tok string) error {
+func (e *Engine) bootOnce(ctx context.Context, rec Record, kernel, initrd, cfg, tok, importDrive string) error {
 	port, err := freePort()
 	if err != nil {
 		return errf("start_failed", "no free local port: %v", err)
@@ -462,6 +482,7 @@ func (e *Engine) bootOnce(ctx context.Context, rec Record, kernel, initrd, cfg, 
 		Kernel: kernel, Initrd: initrd, Disk: e.file(rec.ID, "disk.qcow2"),
 		SerialLog: e.file(rec.ID, "serial.log"), StderrLog: e.file(rec.ID, "qemu.log"),
 		HostPort: port, ConfigFile: cfg, Token: tok, CPUs: rec.CPUs, MemoryMiB: rec.MemoryMiB, Network: rec.Network,
+		ImportDrive: importDrive,
 	})
 	if err != nil {
 		return err
@@ -669,13 +690,13 @@ func (e *Engine) Resume(ctx context.Context, ref string) (Dock, error) {
 	if err != nil {
 		return Dock{}, err
 	}
+	if err := e.importIncomplete(rec); err != nil {
+		return Dock{}, err
+	}
 	if e.aliveRec(ctx, rec) {
 		return e.view(ctx, rec), nil
 	}
 	if rec.runtime() == RuntimeGVisor {
-		if err := e.importIncomplete(rec); err != nil {
-			return Dock{}, err
-		}
 		image, suid, err := e.gvPrepare(ctx)
 		if err != nil {
 			return Dock{}, err
@@ -711,6 +732,9 @@ func (e *Engine) markResetKeys(id string) error {
 func (e *Engine) Branch(ctx context.Context, ref string, count int, name string, over Spec) ([]Dock, error) {
 	src, err := e.Lookup(ref)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.importIncomplete(src); err != nil {
 		return nil, err
 	}
 	if count < 1 {

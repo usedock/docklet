@@ -81,7 +81,13 @@ type LaunchSpec struct {
 	CPUs, MemoryMiB int
 	// Network is "on" or "off"; off restricts the guest from the outside world.
 	Network string
+	// ImportDrive is a raw file attached as a read-only second virtio drive (serial
+	// ImportDriveSerial). Only the import boot of a pulled work archive sets it.
+	ImportDrive string
 }
+
+// ImportDriveSerial is the serial of the import drive; the guest finds it in /sys/block/vd*/serial.
+const ImportDriveSerial = "dockimport"
 
 // Driver is the hypervisor side of the engine. QEMU is the real one; tests use a fake.
 type Driver interface {
@@ -148,6 +154,9 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
 	)
+	if l.ImportDrive != "" {
+		args = append(args, "-drive", "file="+strings.ReplaceAll(l.ImportDrive, ",", ",,")+",if=virtio,format=raw,readonly=on,serial="+ImportDriveSerial)
+	}
 	return args
 }
 
