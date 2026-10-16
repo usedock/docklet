@@ -24,7 +24,13 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test
+        env:
+          DOCK_REQUIRE_E2FSPROGS: "1"
         run: go test -timeout 8m ./...
+      - name: real e2fsprogs (debugfs script)
+        env:
+          DOCK_REQUIRE_E2FSPROGS: "1"
+        run: go test -count=1 -v -run 'TestDebugfs' ./internal/local/
       - name: version ldflag
         run: |
           go build -ldflags "-X main.version=v0.0.0-ci" -o "$RUNNER_TEMP/docklet" ./cmd/docklet
