@@ -108,7 +108,9 @@ func (e *Engine) CheckFreeSpace(need int64, what string) error {
 // CheckPushSpace checks there is room to flatten and compress rec's disk.
 func (e *Engine) CheckPushSpace(rec Record) error {
 	if rec.runtime() == RuntimeGVisor {
-		return gvUnsupported("push")
+		// The work data and the base image are only known once the volume is listed, so
+		// flattenGVisor checks the space itself.
+		return nil
 	}
 	data := allocatedBytes(e.file(rec.ID, "disk.qcow2"))
 	if rec.ImageDir != "" {
@@ -184,17 +186,28 @@ func (e *Engine) checkFreeSpace(need int64, what, note string) error {
 type Flat struct {
 	Record  Record
 	RawPath string
+	// Image is the Dockyard image the disk is based on: the dock's own for qemu, the one
+	// chosen with PushOpts for gVisor.
+	Image string
+	// DiskGiB is the size of the disk.
+	DiskGiB int
 }
 
 // Flatten flattens the dock's disk into raw inside dir. A running dock is refused unless stop
 // is set, in which case it is shut down first so the disk is consistent.
 func (e *Engine) Flatten(ctx context.Context, ref, dir string, stop bool) (*Flat, error) {
+	return e.FlattenWith(ctx, ref, dir, stop, PushOpts{})
+}
+
+// FlattenWith is Flatten with the gVisor options (a qemu dock ignores them). A gVisor dock
+// becomes its work directory on a fresh Dockyard base, not a copy of its whole rootfs.
+func (e *Engine) FlattenWith(ctx context.Context, ref, dir string, stop bool, opt PushOpts) (*Flat, error) {
 	rec, err := e.Lookup(ref)
 	if err != nil {
 		return nil, err
 	}
 	if rec.runtime() == RuntimeGVisor {
-		return nil, gvUnsupported("push")
+		return e.flattenGVisor(ctx, rec, ref, dir, stop, opt)
 	}
 	if e.alive(rec.ID) {
 		if !stop {
@@ -215,7 +228,7 @@ func (e *Engine) Flatten(ctx context.Context, ref, dir string, stop bool) (*Flat
 	if err := e.rotateToken(rec.ID); err != nil {
 		return nil, err
 	}
-	return &Flat{Record: rec, RawPath: raw}, nil
+	return &Flat{Record: rec, RawPath: raw, Image: rec.Image, DiskGiB: rec.DiskGiB}, nil
 }
 
 // rotateToken replaces a stopped dock's agent token, atomically so a crash never leaves it empty.
