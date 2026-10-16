@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -115,16 +117,118 @@ func TestGenerationImageNamesTheDockyardBase(t *testing.T) {
 	}
 }
 
-func TestSnapshotCreateFullRefusesContainerDocks(t *testing.T) {
-	h, _, _, _ := testContainerHost(t)
+func TestSnapshotCreateFullExportsAContainerDocksWorkTar(t *testing.T) {
 	ctx := context.Background()
-	if _, _, _, err := h.SnapshotCreateFull(ctx, "dock-1", nil, apiv1.SnapshotFull, false, false); err == nil || !strings.Contains(err.Error(), "microvm") {
-		t.Fatalf("err = %v, want a microvm-only refusal", err)
+	h, driver, _, _ := testContainerHost(t)
+	var pausedDuringSave bool
+	driver.saveFn = func() { pausedDuringSave = driver.paused == 1 && driver.resumed == 0 }
+
+	id, size, _, err := h.SnapshotCreateFull(ctx, "dock-1", nil, apiv1.SnapshotFull, true, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	image, ierr := h.GenerationImage(ctx, "x")
-	sum, serr := h.GenerationSHA256(ctx, "x")
-	data, derr := h.GenerationDataBytes(ctx, "x")
-	if image != "" || sum != "" || data != 0 || ierr != nil || serr != nil || derr != nil {
-		t.Fatal("a container host reports no image, checksum or data size")
+	if !pausedDuringSave || driver.paused != 1 || driver.resumed != 1 {
+		t.Fatalf("pausedDuringSave=%v paused=%d resumed=%d, want a pause around SaveState and one resume", pausedDuringSave, driver.paused, driver.resumed)
+	}
+	manifest, err := store.GetManifest(ctx, h.cfg.Snaps.Store, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 1 || manifest.Files[0].Path != "state.tar.zst" {
+		t.Fatalf("files = %+v, want one state.tar.zst", manifest.Files)
+	}
+	rc, err := h.cfg.Snaps.Store.Get(ctx, id, "state.tar.zst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	sum := sha256.Sum256(stored)
+	if got, err := h.GenerationSHA256(ctx, id); err != nil || got != hex.EncodeToString(sum[:]) {
+		t.Fatalf("GenerationSHA256 = %q (%v), want the stored object's %x", got, err, sum)
+	}
+	if size != int64(len(stored)) || manifest.SizeBytes != size {
+		t.Fatalf("size = %d, manifest sizeBytes = %d, stored = %d", size, manifest.SizeBytes, len(stored))
+	}
+	// The fake tar holds one 8-byte member: 512 header + 512 padded data + 1024 end blocks.
+	if got, err := h.GenerationDataBytes(ctx, id); err != nil || got != 2048 || manifest.DataBytes != 2048 {
+		t.Fatalf("GenerationDataBytes = %d (%v), want the raw tar size 2048", got, err)
+	}
+	if got, err := h.GenerationImage(ctx, id); err != nil || got != apiv1.DefaultImage {
+		t.Fatalf("GenerationImage = %q (%v), want %q", got, err, apiv1.DefaultImage)
+	}
+	if got, err := h.GenerationBase(ctx, id); err != nil || got != "" {
+		t.Fatalf("GenerationBase = %q (%v), want none", got, err)
+	}
+}
+
+func TestSnapshotCreateFullResumesAfterAFailedCapture(t *testing.T) {
+	ctx := context.Background()
+	h, driver, _, _ := testContainerHost(t)
+	driver.saveErr = errors.New("tar failed")
+	if _, _, _, err := h.SnapshotCreateFull(ctx, "dock-1", nil, apiv1.SnapshotFull, false, false); err == nil {
+		t.Fatal("want the tar failure")
+	}
+	if driver.paused != 1 || driver.resumed != 1 {
+		t.Fatalf("paused=%d resumed=%d, a failed capture must thaw the container", driver.paused, driver.resumed)
+	}
+}
+
+func TestSnapshotCreateFullResumesWhenCancelledAndOnPanic(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	driver.saveFn = cancel
+	driver.saveErr = context.Canceled
+	_, _, _, _ = h.SnapshotCreateFull(ctx, "dock-1", nil, apiv1.SnapshotFull, true, false)
+	if driver.paused != 1 || driver.resumed != 1 {
+		t.Fatalf("cancelled: paused=%d resumed=%d", driver.paused, driver.resumed)
+	}
+	driver.saveErr = nil
+	driver.saveFn = func() { panic("boom") }
+	func() {
+		defer func() { _ = recover() }()
+		_, _, _, _ = h.SnapshotCreateFull(context.Background(), "dock-1", nil, apiv1.SnapshotFull, true, false)
+	}()
+	if driver.paused != 2 || driver.resumed != 2 {
+		t.Fatalf("panic: paused=%d resumed=%d", driver.paused, driver.resumed)
+	}
+}
+
+func TestSnapshotCreateFullSkipsThePauseForAStoppedDock(t *testing.T) {
+	ctx := context.Background()
+	h, driver, _, _ := testContainerHost(t)
+	driver.pauseErr = fmt.Errorf("%w: dock-1", fc.ErrNoMicroVM)
+	id, _, _, err := h.SnapshotCreateFull(ctx, "dock-1", nil, apiv1.SnapshotFull, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driver.resumed != 0 || driver.saved != 1 {
+		t.Fatalf("resumed=%d saved=%d, a stopped dock is captured without a thaw", driver.resumed, driver.saved)
+	}
+	if sum, err := h.GenerationSHA256(ctx, id); err != nil || sum == "" {
+		t.Fatalf("sha = %q (%v)", sum, err)
+	}
+}
+
+func TestSnapshotCreateFullFailsWhenThePauseFails(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	driver.pauseErr = errors.New("docker pause: boom")
+	if _, _, _, err := h.SnapshotCreateFull(context.Background(), "dock-1", nil, apiv1.SnapshotFull, false, false); err == nil || driver.saved != 0 {
+		t.Fatalf("err = %v saved = %d, an inconsistent tar must not be taken", err, driver.saved)
+	}
+}
+
+func TestOrdinaryContainerCaptureDoesNotPause(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	id, _, _, err := h.SnapshotCreate(context.Background(), "dock-1", nil, apiv1.SnapshotFull, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if driver.paused != 0 {
+		t.Fatalf("paused = %d, the stop-time capture keeps its behaviour", driver.paused)
+	}
+	manifest, _ := store.GetManifest(context.Background(), h.cfg.Snaps.Store, id)
+	if manifest.SHA256 != "" || manifest.SizeBytes != 0 {
+		t.Fatalf("an ordinary container capture must not claim a checksum: %+v", manifest)
 	}
 }

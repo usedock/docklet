@@ -34,6 +34,9 @@ type fakeVethDriver struct {
 	terminates []string
 	onBoot     func()
 	bootErr    error
+	pauseErr   error
+	saveErr    error
+	saveFn     func()
 }
 
 // writeTestImage writes size bytes of a deterministic pattern.
@@ -101,7 +104,13 @@ func (f *fakeVethDriver) Boot(_ context.Context, spec fc.BootSpec) (*fc.Handle, 
 func (f *fakeVethDriver) Adopt(_ string, jailRoot string, _ apiv1.Resources) (*fc.Handle, error) {
 	return &fc.Handle{JailRoot: jailRoot, Pid: 4242}, nil
 }
-func (f *fakeVethDriver) Pause(_ context.Context, _ *fc.Handle) error  { f.paused++; return nil }
+func (f *fakeVethDriver) Pause(_ context.Context, _ *fc.Handle) error {
+	if f.pauseErr != nil {
+		return f.pauseErr
+	}
+	f.paused++
+	return nil
+}
 func (f *fakeVethDriver) Resume(_ context.Context, _ *fc.Handle) error { f.resumed++; return nil }
 func (f *fakeVethDriver) CreateSnapshot(_ context.Context, _ *fc.Handle, _ string) error {
 	return nil
@@ -151,6 +160,12 @@ func (f *fakeVethDriver) RemoveWorkDisk(dockID string) error {
 
 func (f *fakeVethDriver) SaveState(dir, dest string) error {
 	f.saved++
+	if f.saveFn != nil {
+		f.saveFn()
+	}
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

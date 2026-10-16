@@ -13,6 +13,12 @@ var DockletFeatures = []string{"egress-on-resume"}
 // Older hosts refuse such a generation, so the control plane places imports only on these.
 const FeatureVerifiedImports = "verified-imports"
 
+// FeatureWorkExport is advertised by gVisor (disk-only) hosts that can capture a dock's work dir as
+// a checksummed full generation: a full snapshot writes state.tar.zst with the manifest sha256,
+// sizeBytes (stored bytes) and dataBytes (raw tar size). The control plane exports a gVisor dock
+// as a work-tar only from hosts that advertise it.
+const FeatureWorkExport = "work-export"
+
 // APIVersion is the docklet contract version served under /v1/*.
 const APIVersion = "v1"
 
