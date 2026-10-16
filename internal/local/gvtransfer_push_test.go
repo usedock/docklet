@@ -3,9 +3,11 @@ package local
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -91,10 +93,14 @@ func TestGVisorFlattenBuildsTheDiskOnADockyardBase(t *testing.T) {
 	if !strings.Contains(p.script, `write "/work/secret.txt" "/home/user/work/secret.txt"`) {
 		t.Fatalf("script %q", p.script)
 	}
-	if p.count() != 2 {
-		t.Fatalf("want a listing and a build helper, got %v", p.calls)
+	// Listed while running (the checks), again once stopped (the copy), then the build.
+	if p.count() != 3 {
+		t.Fatalf("want two listings and a build helper, got %v", p.calls)
 	}
-	list, build := strings.Join(p.calls[0], " "), strings.Join(p.calls[1], " ")
+	list, build := strings.Join(p.calls[1], " "), strings.Join(p.calls[2], " ")
+	if !slices.Contains(p.calls[0], "find") || !slices.Contains(p.calls[1], "find") {
+		t.Fatalf("want two listings first: %v", p.calls)
+	}
 	for _, c := range []string{list, build} {
 		if !strings.Contains(c, "--cap-drop ALL --cap-add DAC_READ_SEARCH") || !strings.Contains(c, "--runtime=runsc ") ||
 			!strings.Contains(c, "-v dock-local-"+flat.Record.ID+"-work:/work:ro ") || !strings.Contains(c, "--network none") {
@@ -155,7 +161,7 @@ func TestGVisorFlattenWorksOnAStoppedDockAndHonoursOptions(t *testing.T) {
 
 func TestGVisorFlattenFailsWhenTheDataExceedsTheDisk(t *testing.T) {
 	big := rec("f", "644", "1001", "1001", "1700000002.0", "2147483648", "", "64:9", "1", "big.bin")
-	e, _, p, _ := newPushEngine(t, workListing(big))
+	e, fd, p, _ := newPushEngine(t, workListing(big))
 	dir := t.TempDir()
 	_, err := e.Flatten(context.Background(), "gv", dir, true)
 	if codeOf(err) != "push_too_big" || !strings.Contains(err.Error(), "--disk") {
@@ -163,6 +169,9 @@ func TestGVisorFlattenFailsWhenTheDataExceedsTheDisk(t *testing.T) {
 	}
 	if p.count() != 1 {
 		t.Fatalf("no disk may be built: %v", p.calls)
+	}
+	if len(fd.callsWith("stop")) != 0 {
+		t.Fatalf("a push that cannot fit must not stop the dock: %v", fd.calls)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "disk.raw")); err == nil {
 		t.Fatal("no disk may be left behind")
@@ -219,5 +228,65 @@ func TestGVWorkBytes(t *testing.T) {
 		rec("l", "777", "1", "1", "1.0", "1", "a", "1:4", "1", "l")
 	if got, want := gvWorkBytes([]byte(l)), int64(4096+4096+8192); got != want {
 		t.Fatalf("got %d want %d", got, want)
+	}
+}
+
+func TestGVisorFlattenChecksFreeSpaceBeforeStopping(t *testing.T) {
+	huge := rec("f", "644", "1001", "1001", "1700000002.0", strconv.FormatInt(1<<50, 10), "", "64:9", "1", "huge.bin")
+	e, fd, p, _ := newPushEngine(t, workListing(huge))
+	_, err := e.FlattenWith(context.Background(), "gv", t.TempDir(), true, PushOpts{DiskGiB: 1 << 21})
+	if codeOf(err) != "insufficient_space" {
+		t.Fatalf("want insufficient_space: %v", err)
+	}
+	if len(fd.callsWith("stop")) != 0 || p.count() != 1 {
+		t.Fatalf("the space check must run before the stop and the build: %v | %v", fd.calls, p.calls)
+	}
+}
+
+func TestGVisorFlattenRefusesAMissingWorkVolume(t *testing.T) {
+	e, fd, p, _ := newPushEngine(t, workListing())
+	r, _ := e.Lookup("gv")
+	// docker volume prune after the container went: docker run -v would recreate it empty.
+	delete(fd.volumes, gvVolume(r.ID))
+	dir := t.TempDir()
+	_, err := e.Flatten(context.Background(), "gv", dir, true)
+	if codeOf(err) != "push_failed" || !strings.Contains(err.Error(), gvVolume(r.ID)) || !strings.Contains(err.Error(), "gone") {
+		t.Fatalf("a missing work volume must fail clearly: %v", err)
+	}
+	if p.count() != 0 || len(fd.callsWith("stop")) != 0 || fd.volumes[gvVolume(r.ID)] {
+		t.Fatalf("no helper may run (it would create the volume) and nothing may stop: %v | %v", fd.calls, p.calls)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Fatalf("nothing may be written: %v", ents)
+	}
+}
+
+func TestGVisorFlattenPushesAnEmptyVolumeThatExists(t *testing.T) {
+	root := rec("d", "755", "1001", "1001", "1700000000.0", "4096", "", "64:1", "2", "")
+	e, _, p, _ := newPushEngine(t, root)
+	if _, err := e.Flatten(context.Background(), "gv", t.TempDir(), true); err != nil {
+		t.Fatalf("an existing empty work volume pushes: %v", err)
+	}
+	if strings.Contains(p.script, "write ") {
+		t.Fatalf("script %q", p.script)
+	}
+}
+
+func TestGVisorFlattenRelistsWhenTheRunningListingFails(t *testing.T) {
+	e, fd, p, _ := newPushEngine(t, workListing())
+	inner, failed := fd.pushHelper, false
+	fd.pushHelper = func(args []string) (string, string, error) {
+		// find exits 1 when the running dock deletes a file during the walk (the first listing).
+		if slices.Contains(args, "find") && !failed {
+			failed = true
+			return "", "find: '/work/tmp.123': No such file or directory", errors.New("exit status 1")
+		}
+		return inner(args)
+	}
+	if _, err := e.Flatten(context.Background(), "gv", t.TempDir(), true); err != nil {
+		t.Fatalf("the listing of the stopped dock decides: %v", err)
+	}
+	if !failed || !strings.Contains(p.script, "secret.txt") || len(fd.callsWith("stop")) != 1 {
+		t.Fatalf("script %q", p.script)
 	}
 }

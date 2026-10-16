@@ -279,6 +279,12 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 		delete(f.bridges, last)
 		return "", "", nil
 	case "volume":
+		if args[1] == "inspect" {
+			if !f.volumes[last] {
+				return "", "Error response from daemon: get " + last + ": no such volume", gone
+			}
+			return "[]", "", nil
+		}
 		delete(f.volumes, last)
 		return "", "", nil
 	case "logs":

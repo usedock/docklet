@@ -95,39 +95,67 @@ func (e *Engine) flattenGVisor(ctx context.Context, rec Record, ref, dir string,
 	if err != nil {
 		return nil, err
 	}
-	if running {
-		e.logf("stopping %s", ref)
-		if err := e.stopGVisor(ctx, rec, false); err != nil {
-			return nil, err
-		}
-	}
 	g := e.gvisor()
 	helperImage, err := g.EnsureImage(ctx, func(s string) { e.logf("%s", s) })
 	if err != nil {
 		return nil, err
 	}
-	rt := rec.gvRuntime()
-	work := diskMount{Source: gvVolume(rec.ID), Target: gvWorkSrc, ReadOnly: true}
-	e.logf("reading the work directory of %s", ref)
-	listing, stderr, err := g.docker(ctx, nil, diskHelperArgs(rt, helperImage, gvListCaps, []diskMount{work}, `exec "$@"`, gvListArgs()...)...)
-	if err != nil {
-		return nil, dockerFailure("push_failed", "list the work directory", err, stderr)
+	// docker run -v creates a missing volume empty, which would push an empty work directory.
+	vol := gvVolume(rec.ID)
+	if _, stderr, err := g.docker(ctx, nil, "volume", "inspect", vol); err != nil {
+		if notFound(stderr) {
+			return nil, errf("push_failed", "the work volume %s of dock %s is gone, so there is no work directory to push", vol, ref)
+		}
+		return nil, dockerFailure("push_failed", "docker volume inspect "+vol, err, stderr)
 	}
-	script, warnings, err := buildDebugfsScript([]byte(listing))
-	if err != nil {
-		return nil, err
+	rt := rec.gvRuntime()
+	work := diskMount{Source: vol, Target: gvWorkSrc, ReadOnly: true}
+	list := func() (string, []string, int64, error) {
+		e.logf("reading the work directory of %s", ref)
+		listing, stderr, err := g.docker(ctx, nil, diskHelperArgs(rt, helperImage, gvListCaps, []diskMount{work}, `exec "$@"`, gvListArgs()...)...)
+		if err != nil {
+			return "", nil, 0, dockerFailure("push_failed", "list the work directory", err, stderr)
+		}
+		script, warnings, err := buildDebugfsScript([]byte(listing))
+		if err != nil {
+			return "", nil, 0, err
+		}
+		return script, warnings, gvWorkBytes([]byte(listing)), nil
 	}
 	disk := int64(diskGiB) << 30
-	data := gvWorkBytes([]byte(listing))
-	if data > disk {
-		return nil, errf("push_too_big", "the work directory holds %s but the pushed disk would be %d GiB; pass --disk with a larger size", HumanBytes(data), diskGiB)
-	}
 	var zstSize int64
 	if st, err := os.Stat(zst); err == nil {
 		zstSize = st.Size()
 	}
-	if err := e.checkFreeSpace(pushSpaceNeed(disk, zstSize*rawDataRatio+data), "push", ""); err != nil {
+	check := func(data int64) error {
+		if data > disk {
+			return errf("push_too_big", "the work directory holds %s but the pushed disk would be %d GiB; pass --disk with a larger size", HumanBytes(data), diskGiB)
+		}
+		return e.checkFreeSpace(pushSpaceNeed(disk, zstSize*rawDataRatio+data), "push", "")
+	}
+	// Listed and checked before the stop, so a push that cannot fit leaves the dock running.
+	// find fails when a running dock deletes a file mid-walk; the listing after the stop decides.
+	script, warnings, data, err := list()
+	switch {
+	case err != nil && !(running && ErrCode(err) == "push_failed"):
 		return nil, err
+	case err == nil:
+		if err := check(data); err != nil {
+			return nil, err
+		}
+	}
+	if running {
+		e.logf("stopping %s", ref)
+		if err := e.stopGVisor(ctx, rec, false); err != nil {
+			return nil, err
+		}
+		// The running dock may have changed the tree; the stopped one is what gets copied.
+		if script, warnings, data, err = list(); err != nil {
+			return nil, err
+		}
+		if err := check(data); err != nil {
+			return nil, err
+		}
 	}
 
 	raw := filepath.Join(dir, "disk.raw")
@@ -152,7 +180,7 @@ func (e *Engine) flattenGVisor(ctx context.Context, rec Record, ref, dir string,
 		return nil, errf("transfer_failed", "%v", err)
 	}
 	e.logf("copying the work directory into the disk")
-	_, stderr, err = g.docker(ctx, nil, diskHelperArgs(rt, helperImage, gvPushCaps, []diskMount{work, {Source: dir, Target: "/x"}}, gvPushScript)...)
+	_, stderr, err := g.docker(ctx, nil, diskHelperArgs(rt, helperImage, gvPushCaps, []diskMount{work, {Source: dir, Target: "/x"}}, gvPushScript)...)
 	if err != nil {
 		return nil, dockerFailure("push_failed", "build the disk", err, lastLines(stderr, 15))
 	}

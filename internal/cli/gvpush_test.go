@@ -14,8 +14,8 @@ import (
 	"github.com/usedock/docklet/internal/local"
 )
 
-// gvDocker is a fake docker for a stopped gVisor dock: it answers the image check, the work
-// listing and the disk build helper.
+// gvDocker is a fake docker for a stopped gVisor dock: it answers the image and volume checks,
+// the work listing and the disk build helper.
 type gvDocker struct {
 	mu      sync.Mutex
 	calls   [][]string
@@ -31,6 +31,10 @@ func (g *gvDocker) run(_ context.Context, _ io.Reader, args ...string) (string, 
 		return "false\n", "", nil
 	case "image":
 		return "", "", nil
+	case "volume":
+		if args[1] == "inspect" && args[len(args)-1] == "dock-local-dk_gv-work" {
+			return "[]", "", nil
+		}
 	case "run":
 		if slices.Contains(args, "find") {
 			return g.listing, "", nil

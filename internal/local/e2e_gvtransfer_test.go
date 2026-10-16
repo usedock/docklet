@@ -56,7 +56,15 @@ printf hard > h1
 ln h1 h2
 printf space > "a b.txt"
 printf quote > "it's \"q\".txt"
-chmod 755 sub`, 60*time.Second)
+chmod 755 sub
+ln -s /x/disk.raw esc-disk
+ln -s /x/script esc-script
+ln -s /proc/self/environ esc-proc
+ln -s ../../../../x/disk.raw esc-up
+ln -s /x esc-dir
+printf dots > ..dots
+printf hash > "#hash"
+printf tq > 'q" "x'`, 60*time.Second)
 	if err != nil || res.ExitCode != 0 {
 		t.Fatalf("make the tree: %+v %v", res, err)
 	}
@@ -100,6 +108,9 @@ chmod 755 sub`, 60*time.Second)
 		{w + "sub/hello.txt", "0644", "hello"},
 		{w + "a b.txt", "0644", "space"},
 		{w + `it's "q".txt`, "0644", "quote"},
+		{w + "..dots", "0644", "dots"},
+		{w + "#hash", "0644", "hash"},
+		{w + `q" "x`, "0644", "tq"},
 	} {
 		uid, gid, mode, _, _ := stat(c.path)
 		if uid != "1000" || gid != "1000" || !strings.HasSuffix(mode, c.mode) {
@@ -113,6 +124,21 @@ chmod 755 sub`, 60*time.Second)
 	}
 	if out := debugfs("stat " + debugfsQuote(w+"link")); !strings.Contains(out, "sub/hello.txt") || !strings.Contains(out, "symlink") {
 		t.Errorf("symlink: %q", out)
+	}
+	// The helper's debugfs write opens /work/<path> itself; a symlink must stay a symlink and
+	// never pull in the transfer directory, the disk being built or the helper's /proc.
+	for name, target := range map[string]string{"esc-disk": "/x/disk.raw", "esc-script": "/x/script",
+		"esc-proc": "/proc/self/environ", "esc-up": "../../../../x/disk.raw", "esc-dir": "/x"} {
+		out := debugfs("stat " + debugfsQuote(w+name))
+		if !strings.Contains(out, "Type: symlink") || !strings.Contains(out, `"`+target+`"`) {
+			t.Errorf("%s must stay a symlink to %s: %q", name, target, out)
+		}
+	}
+	if out := debugfs("ls " + debugfsQuote(w+"esc-dir")); strings.Contains(out, "disk.raw") || strings.Contains(out, "script") {
+		t.Errorf("a symlinked directory must not be followed: %q", out)
+	}
+	if ents, err := os.ReadDir(dir); err != nil || len(ents) != 3 {
+		t.Errorf("the transfer directory must hold only disk.raw, script and debugfs.err: %v %v", ents, err)
 	}
 	_, _, _, i1, l1 := stat(w + "h1")
 	_, _, _, i2, l2 := stat(w + "h2")
@@ -128,4 +154,25 @@ chmod 755 sub`, 60*time.Second)
 	}
 	// e2fsck -fn exits 0 only on a clean filesystem.
 	runTool(t, tools.e2fsck, "-fn", flat.RawPath)
+
+	// A work volume that is gone (container and volume pruned) fails the push instead of
+	// pushing an empty work directory, and is not recreated.
+	g := e.gvisor()
+	if _, stderr, err := g.docker(ctx, nil, "rm", "-f", gvContainer(d.ID)); err != nil {
+		t.Fatalf("docker rm: %v %s", err, stderr)
+	}
+	if _, stderr, err := g.docker(ctx, nil, "volume", "rm", gvVolume(d.ID)); err != nil {
+		t.Fatalf("docker volume rm: %v %s", err, stderr)
+	}
+	dir2, err := e.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir2) })
+	if _, err := e.Flatten(ctx, "e2egvpush", dir2, true); ErrCode(err) != "push_failed" || !strings.Contains(err.Error(), "gone") {
+		t.Fatalf("a missing work volume must fail the push: %v", err)
+	}
+	if _, _, err := g.docker(ctx, nil, "volume", "inspect", gvVolume(d.ID)); err == nil {
+		t.Fatal("a failed push must not create the work volume")
+	}
 }
