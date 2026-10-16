@@ -56,10 +56,13 @@ type fakePlane struct {
 	// pull
 	exportState   map[string]any
 	exportPosts   int
-	exportErr     *apiErr // POST /export answers this error
+	exportErr     *apiErr        // POST /export answers this error
+	exportBody    map[string]any // the last POST /export body
+	exportObject  string         // the object name in the download url, when set
 	payload       []byte
 	cutFirst      bool // the first download is cut half way
 	downloads     []string
+	objects       []string // object names the download route was asked for
 	downloadsAuth []string
 	flakyURL      bool // first GET of the export carries a url that 403s
 	relativeURL   bool // the export url is the control plane's own download route
@@ -141,8 +144,11 @@ func newFakePlane(t *testing.T, mode string) *fakePlane {
 		env(w, 200, map[string]any{"id": remoteID, "name": "web", "state": p.dockState, "image": "ubuntu-24.04", "runtime": p.dockRuntime})
 	})
 	mux.HandleFunc("/v1/docks/"+remoteID+"/export", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		p.mu.Lock()
 		p.exportPosts++
+		p.exportBody = body
 		e := p.exportErr
 		p.mu.Unlock()
 		if e != nil {
@@ -160,6 +166,9 @@ func newFakePlane(t *testing.T, mode string) *fakePlane {
 		}
 		if st["state"] == "ready" {
 			st["url"] = p.srv.URL + "/dl/export"
+			if p.exportObject != "" {
+				st["url"] = p.srv.URL + "/dl/export?object=" + p.exportObject
+			}
 			if p.relativeURL {
 				st["url"] = "/v1/docks/exports/" + exportID + "/download"
 			}
@@ -197,6 +206,9 @@ func newFakePlane(t *testing.T, mode string) *fakePlane {
 	})
 	mux.HandleFunc("/dl/export", func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
+		if o := r.URL.Query().Get("object"); o != "" {
+			p.objects = append(p.objects, o)
+		}
 		p.downloads = append(p.downloads, r.Header.Get("Range"))
 		p.downloadsAuth = append(p.downloadsAuth, r.Header.Get("Authorization"))
 		cut := p.cutFirst

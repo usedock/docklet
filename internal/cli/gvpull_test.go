@@ -152,19 +152,3 @@ func TestPullGVisorNameCollisionFailsBeforeExporting(t *testing.T) {
 		t.Fatalf("stderr %q exports %d helpers %v", te.errb, p.exportPosts, g.helpers)
 	}
 }
-
-func TestPullRefusesARemoteGVisorDock(t *testing.T) {
-	te, p, _ := gvisorPullEnv(t)
-	p.dockRuntime = "gvisor"
-	for _, args := range [][]string{{"pull", remoteID, "--from", "lab"}, {"pull", remoteID, "--from", "lab", "--runtime", "gvisor"}} {
-		te.errb.Reset()
-		mustExit(t, te, 1, args...)
-		got := te.errb.String()
-		if !strings.Contains(got, "not_supported") || !strings.Contains(got, "no disk image to export") || strings.Contains(got, "only /home/user/work persists") {
-			t.Fatalf("stderr %q", got)
-		}
-	}
-	if p.exportPosts != 0 {
-		t.Fatalf("exports %d", p.exportPosts)
-	}
-}

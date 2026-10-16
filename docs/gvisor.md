@@ -121,8 +121,17 @@ A gVisor dock has no disk image, so push and pull move only `/home/user/work`. T
 - The runtime's preflight runs before the export, so a pull fails early on a machine that cannot run it. On a machine where QEMU/KVM cannot run, the QEMU path fails with a hint to pass `--runtime gvisor`; the gVisor path fails without Docker or `runsc`.
 - With `gvisor`, the CLI prints a note that only `/home/user/work` is copied. That directory is copied out of the pulled disk into a new stopped gVisor dock (owner mapped to the dock user), and the first `dock resume` boots it.
 - The disk is read inside the gVisor sandbox and is never mounted by the host kernel.
-- Pulling a remote dock that itself runs on gVisor fails with `not_supported` (it has no disk image to export).
+- Pulling a remote dock that itself runs on gVisor into a gVisor dock works with a dock release after v0.3.7, and a control plane and host that support it; see [Pull a fleet gVisor dock](#pull-a-fleet-gvisor-dock) below. Into a QEMU dock it is not supported yet (issue #128): the CLI fails before the export and asks for `--runtime gvisor`.
 - The import is size-capped. It fails with `import_too_big` when the work directory grows past the cap (the disk size plus a little slack; hard links on the source disk become separate copies), and with `insufficient_space` when Docker's data root does not have enough free space.
+
+### Pull a fleet gVisor dock
+
+A dock that runs on gVisor in the fleet has no disk image; its durable state is the work directory, which the host saves as `state.tar.zst` on every stop. `dock pull` of such a dock needs a dock release after v0.3.7, and a control plane and dock host that support exporting gVisor docks.
+
+- `dock pull <dock> --from <context> --runtime gvisor` (or `DOCK_LOCAL_RUNTIME=gvisor`) asks the control plane for the work directory (`formats: ["work-tar"]`), downloads and verifies it (size and sha256), and unpacks it into a new stopped gVisor dock. The new dock starts from a fresh image with only `/home/user/work` copied, and the CLI prints a note saying so. `--json` reports `"source":"work"` (`"disk"` for a pulled disk).
+- With a control plane or host that cannot export gVisor docks yet, the pull fails with `gvisor_export_unsupported` ("this control plane (or the dock's host) cannot export gVisor docks yet") before anything is downloaded.
+- Pulling into a QEMU dock is coming (issue #128). Until then it fails before the export; pass `--runtime gvisor`.
+- The archive is untrusted. The CLI rewrites it into a canonical tar and refuses the whole pull (`invalid_archive`) on an absolute path, a `..` component, an entry below a symlink or file, a path reused for a different kind of entry (for example a directory replaced by a symlink), a hard link that does not point at an earlier file, or an entry of an unknown type. Named pipes and device nodes are left out with a warning that names them (`skipped N special files`); nothing may be written below their paths either; unix sockets are not in the archive. The archive is capped at the recorded data size (plus slack) and the dock's disk size: one that expands past the cap fails with `decompress_failed`, and one whose files declare more than the cap with `import_too_big`. The rewritten tar is unpacked by the same kind of helper as a disk import: read-only root filesystem, no network, only the new dock's work volume writable, and the same size cap and `import_incomplete` marker. Owners are set to the dock user.
 
 ### Interrupted imports
 

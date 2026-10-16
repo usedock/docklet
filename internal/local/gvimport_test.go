@@ -25,7 +25,9 @@ type importDocker struct {
 }
 
 func (d *importDocker) run(ctx context.Context, stdin io.Reader, args ...string) (string, string, error) {
-	if args[0] == "run" && slices.Contains(args, "--rm") && slices.ContainsFunc(args, func(a string) bool { return strings.HasSuffix(a, ":"+gvDiskPath+":ro") }) {
+	if args[0] == "run" && slices.Contains(args, "--rm") && slices.ContainsFunc(args, func(a string) bool {
+		return strings.HasSuffix(a, ":"+gvDiskPath+":ro") || strings.HasSuffix(a, ":"+gvTarPath+":ro")
+	}) {
 		d.fakeDocker.mu.Lock()
 		d.helper = append(d.helper, args)
 		d.fakeDocker.calls = append(d.fakeDocker.calls, args)
