@@ -31,6 +31,14 @@ on:
       - scripts/extract-vmlinux.sh
       - scripts/lib-verify.sh
       - scripts/e2e-selfhost.sh
+      - scripts/e2e-selfhost-gvisor.sh
+      - scripts/lib-e2e-selfhost.sh
+      # The pull and export code the gVisor round trip exercises.
+      - internal/cli/transfer.go
+      - internal/local/gvimport*.go
+      - internal/local/qemuimport.go
+      - internal/snapmgr/snapmgr.go
+      - internal/host/host.go
 
 permissions:
   contents: read
@@ -140,5 +148,124 @@ jobs:
         if: always()
         with:
           name: selfhost-e2e-logs
+          path: /home/runner/selfhost-logs
+          if-no-files-found: warn
+
+  # dock pull of a fleet gVisor dock (docklet#129, epic #125). The host is this runner bootstrapped with
+  # --runtime gvisor. The control plane is built from usedock/dock main, not pulled from ghcr: the work-tar
+  # export (usedock/dock#164, ca4431f) is newer than the latest published release.
+  selfhost-gvisor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      LOGS: /home/runner/selfhost-logs
+      DOCK_URL: http://localhost:8088
+      # usedock/dock commit that added the work-tar export; the checked-out ref must contain it.
+      DOCK_WORKTAR_COMMIT: ca4431f
+    steps:
+      - name: free disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          mkdir -p "$LOGS"
+          df -h / | tee "$LOGS/disk-before.txt"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: usedock/dock
+          ref: ${{ inputs.dock_ref || 'main' }}
+          path: dock-src
+          fetch-depth: 0
+      - name: control plane ref has the work-tar export
+        run: |
+          git -C dock-src rev-parse HEAD | tee "$LOGS/dock-ref.txt"
+          git -C dock-src merge-base --is-ancestor "$DOCK_WORKTAR_COMMIT" HEAD \
+            || { echo "::error::usedock/dock ref does not contain ${DOCK_WORKTAR_COMMIT} (work-tar export, usedock/dock#164)"; exit 1; }
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: QEMU and /dev/kvm for the qemu leg
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-x86 qemu-utils
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm || echo "no /dev/kvm on this runner"
+      - name: build dock and docklet from this checkout
+        run: |
+          go build -o "$RUNNER_TEMP/dock" ./cmd/dock
+          go build -o "$RUNNER_TEMP/docklet" ./cmd/docklet
+      - name: install runsc
+        run: |
+          set -eux
+          # Same pinned release and sha256 as the fleet hosts (and the e2e-local-gvisor job in ci.yml).
+          eval "$(grep -E '^RUNSC_(VERSION|SHA256_X86_64)=' scripts/bootstrap-host.sh)"
+          tmp=$(mktemp -d)
+          curl -fsSL -o "${tmp}/gvisor.tar.bz2" "https://github.com/google/gvisor/releases/download/${RUNSC_VERSION}/gvisor-x86_64.tar.bz2"
+          echo "${RUNSC_SHA256_X86_64}  ${tmp}/gvisor.tar.bz2" | sha256sum -c -
+          tar -xjf "${tmp}/gvisor.tar.bz2" -C "${tmp}" runsc
+          sudo install -m 0755 "${tmp}/runsc" /usr/local/bin/runsc
+      - name: self-host control plane (deploy/self-host/setup.sh --build)
+        env:
+          DOCKLET_DIR: ${{ github.workspace }}
+        run: |
+          cd dock-src/deploy/self-host
+          ./setup.sh --build 2>&1 | tee "$LOGS/setup.log"
+      - name: bootstrap this runner as a gVisor docklet host
+        run: |
+          token="$(sed -n 's/^FLEET_TOKEN=//p' dock-src/deploy/self-host/.env)"
+          echo "::add-mask::$token"
+          # The runner is single-use, so accept the CPU vulnerabilities it reports.
+          vulns="$(grep -l '^Vulnerable' /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null | xargs -r -n1 basename | paste -sd, -)"
+          echo "accepting CPU vulnerabilities: ${vulns:-none}"
+          sudo env DOCKLET_FLEET_TOKEN="$token" DOCKLET_BIN="$RUNNER_TEMP/docklet" \
+            bash scripts/bootstrap-host.sh --fleet-url "$DOCK_URL" --runtime gvisor \
+            ${vulns:+--allow-vulnerable "$vulns"} \
+            2>&1 | tee "$LOGS/bootstrap.log"
+      - name: runsc-suid runtime for the local gVisor engine
+        run: |
+          # Local docks get sudo and a persistent rootfs through a separate runtime, as in ci.yml; the host keeps plain runsc.
+          sudo /usr/local/bin/runsc install --runtime=runsc-suid -- --allow-suid --overlay2=none
+          sudo systemctl restart docker
+          docker info --format '{{json .Runtimes}}'
+          # The restart took the control plane containers down with it; wait for the API and the host to be back.
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "$DOCK_URL/api/auth/ok" || true)"
+            ready="$(curl -s http://127.0.0.1:8081/v1/readiness | jq -r '.data.ready' 2>/dev/null || true)"
+            echo "control plane HTTP ${code}, host ready: ${ready}"
+            case "$code" in 000|502|503|504) sleep 5; continue ;; esac; [ "$ready" = true ] && exit 0
+            sleep 5
+          done
+          echo "::error::control plane or host did not come back after the docker restart"; exit 1
+      - name: dock pull of a fleet gVisor dock
+        env:
+          DOCK: ${{ runner.temp }}/dock
+        # fd 3 bypasses tee so the API key mask reaches the runner without landing in the artifact.
+        run: |
+          { bash scripts/e2e-selfhost-gvisor.sh 2>&1 | tee "$LOGS/e2e.log"; } 3>&1
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo "## selfhost-e2e (gvisor pull)"
+            echo "usedock/dock ref: \`$(cat "$LOGS/dock-ref.txt" 2>/dev/null || echo unknown)\`"
+            echo '```'
+            cat "$LOGS/timings.txt" 2>/dev/null || echo "no timings recorded"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: collect logs
+        if: always()
+        run: |
+          sudo journalctl -u docklet --no-pager > "$LOGS/docklet.journal.txt" 2>&1 || true
+          (cd dock-src/deploy/self-host && docker compose logs --no-color > "$LOGS/compose.log" 2>&1) || true
+          docker ps -a > "$LOGS/docker-ps.txt" 2>&1 || true
+          df -h / > "$LOGS/disk-after.txt"
+          sudo chmod -R a+r "$LOGS" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: selfhost-gvisor-logs
           path: /home/runner/selfhost-logs
           if-no-files-found: warn
