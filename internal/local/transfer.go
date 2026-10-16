@@ -154,6 +154,12 @@ func (e *Engine) PullSpaceNeed(ctx context.Context, exportBytes, dataBytes, disk
 	return pullSpaceNeed(exportBytes, dataBytes, diskBytes, imgPeak, imgKept)
 }
 
+// PullSpaceNeedGVisor is the peak space of a pull into a gVisor dock in the data dir: the
+// downloaded zstd file beside the sparse raw disk. There is no base image and no qcow2.
+func (e *Engine) PullSpaceNeedGVisor(exportBytes, dataBytes, diskBytes int64) int64 {
+	return pullSpaceNeed(exportBytes, dataBytes, diskBytes, 0, 0)
+}
+
 func pullSpaceNeed(exportBytes, dataBytes, diskBytes, imgPeak, imgKept int64) int64 {
 	exportBytes = min(exportBytes, 1<<50) // keeps the arithmetic far from overflow
 	data := exportBytes * rawDataRatio

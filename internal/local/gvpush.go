@@ -2,10 +2,13 @@ package local
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/usedock/docklet/internal/dockyard"
 )
@@ -73,10 +76,43 @@ func gvWorkBytes(listing []byte) int64 {
 	return total
 }
 
+// zstContentSize is the uncompressed size a zstd file's first frame declares, or 0 when the
+// file is unreadable or its encoder did not record one.
+func zstContentSize(path string) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	var h zstd.Header
+	if err := h.Decode(readHead(f, 64)); err != nil || !h.HasFCS {
+		return 0
+	}
+	return int64(min(h.FrameContentSize, 1<<62))
+}
+
+// readHead returns up to n bytes from the start of f.
+func readHead(f *os.File, n int) []byte {
+	b := make([]byte, n)
+	m, _ := io.ReadFull(f, b)
+	return b[:m]
+}
+
+// baseFits fails with push_too_big when the base image's raw size (0 when unknown) is larger than the disk.
+func baseFits(image string, raw, disk int64, diskGiB int) error {
+	if raw > disk {
+		return errf("push_too_big", "the %s image alone is %s but the pushed disk would be %d GiB; pass --disk with a larger size", image, HumanBytes(raw), diskGiB)
+	}
+	return nil
+}
+
 // flattenGVisor builds a raw ext4 disk in dir: the Dockyard base image with the dock's work
 // directory copied in. Only the work volume is read; the agent config is a bind mount outside
 // it, so no token reaches the disk and none needs rotating.
 func (e *Engine) flattenGVisor(ctx context.Context, rec Record, ref, dir string, stop bool, opt PushOpts) (*Flat, error) {
+	if err := e.importIncomplete(rec); err != nil {
+		return nil, err
+	}
 	image := opt.Image
 	if image == "" {
 		image = DefaultImage
@@ -93,6 +129,12 @@ func (e *Engine) flattenGVisor(ctx context.Context, rec Record, ref, dir string,
 	// Fetched before the dock stops, so a failed download leaves it running.
 	zst, err := e.Cache.EnsureRootfs(ctx, im)
 	if err != nil {
+		return nil, err
+	}
+	disk := int64(diskGiB) << 30
+	// The catalog records only compressed sizes; the zstd frame header may say the raw size.
+	// Checked before the stop, so a --disk below the base leaves the dock running.
+	if err := baseFits(im.Name, zstContentSize(zst), disk, diskGiB); err != nil {
 		return nil, err
 	}
 	g := e.gvisor()
@@ -122,7 +164,6 @@ func (e *Engine) flattenGVisor(ctx context.Context, rec Record, ref, dir string,
 		}
 		return script, warnings, gvWorkBytes([]byte(listing)), nil
 	}
-	disk := int64(diskGiB) << 30
 	var zstSize int64
 	if st, err := os.Stat(zst); err == nil {
 		zstSize = st.Size()

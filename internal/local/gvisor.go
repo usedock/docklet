@@ -785,6 +785,9 @@ func (g *GVisor) copyVolume(ctx context.Context, srcID, dstID, image string) err
 // rootfs layer is committed to an image and its work volume copied, then the source is resumed
 // and the new docks are booted (like QEMU branch, they come up running).
 func (e *Engine) branchGVisor(ctx context.Context, src Record, count int, name string, over Spec) ([]Dock, error) {
+	if err := e.importIncomplete(src); err != nil {
+		return nil, err
+	}
 	g := e.gvisor()
 	image, suid, err := e.gvPrepare(ctx)
 	if err != nil {

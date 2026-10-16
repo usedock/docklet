@@ -219,6 +219,9 @@ func (e *Engine) ping(ctx context.Context, rec Record) bool {
 // State of a dock: ready (agent answers), starting (vm up, agent not yet), archived (stopped).
 func (e *Engine) state(ctx context.Context, r Record) string {
 	if !e.aliveRec(ctx, r) {
+		if e.importIncomplete(r) != nil {
+			return "import_incomplete"
+		}
 		return "archived"
 	}
 	if e.ping(ctx, r) {
@@ -670,6 +673,9 @@ func (e *Engine) Resume(ctx context.Context, ref string) (Dock, error) {
 		return e.view(ctx, rec), nil
 	}
 	if rec.runtime() == RuntimeGVisor {
+		if err := e.importIncomplete(rec); err != nil {
+			return Dock{}, err
+		}
 		image, suid, err := e.gvPrepare(ctx)
 		if err != nil {
 			return Dock{}, err

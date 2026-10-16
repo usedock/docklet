@@ -164,6 +164,70 @@ func TestE2ELocalGVisorPullBadDisk(t *testing.T) {
 	}
 }
 
+// TestE2ELocalGVisorPullHardLinkBomb refuses a small disk whose hard links rdump would expand
+// into far more data than the disk can hold, and leaves nothing behind.
+func TestE2ELocalGVisorPullHardLinkBomb(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	tools := needE2fs(t)
+	e := gvPullEngine(t, ctx)
+	src := filepath.Join(t.TempDir(), "big")
+	if err := os.WriteFile(src, make([]byte, 10<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const w = gvWorkDest
+	q := debugfsQuote
+	lines := []string{"write " + q(src) + " " + q(w+"/big")}
+	// 30 names for a 10 MiB file: 300 MiB once rdump copies each, in a 64 MiB disk (limit ~136 MiB).
+	for i := 0; i < 30; i++ {
+		lines = append(lines, fmt.Sprintf("ln %s %s", q(w+"/big"), q(fmt.Sprintf("%s/link%d", w, i))))
+	}
+	img := tools.newBaseImage(t)
+	_, stderr := runTool(t, tools.debugfs, "-w", "-f", writeScript(t, lines), img)
+	if errs := debugfsErrors(stderr); len(errs) > 0 {
+		t.Fatalf("building the disk: %v", errs)
+	}
+	_, err := e.ImportWork(ctx, ImportWork{Name: "e2ebomb", RawPath: img})
+	if ErrCode(err) != "import_too_big" && ErrCode(err) != "insufficient_space" {
+		t.Fatalf("want import_too_big, got %v", err)
+	}
+	if docks, _ := e.List(ctx); len(docks) != 0 {
+		t.Fatalf("a refused import leaves no dock: %+v", docks)
+	}
+	if out, _, _ := e.gvisor().docker(ctx, nil, "volume", "ls", "-q", "--filter", "name=dock-local-"); strings.TrimSpace(out) != "" {
+		t.Fatalf("a refused import leaves no volume: %q", out)
+	}
+}
+
+// TestE2ELocalGVisorPullIncompleteImport checks a dock whose import never finished (its marker
+// is still there) refuses to boot and can be removed.
+func TestE2ELocalGVisorPullIncompleteImport(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	tools := needE2fs(t)
+	e := gvPullEngine(t, ctx)
+	d, err := e.ImportWork(ctx, ImportWork{Name: "e2epartial", RawPath: tools.newBaseImage(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Remove(context.Background(), d.ID) })
+	if _, err := os.Stat(e.file(d.ID, gvImportingMarker)); err == nil {
+		t.Fatal("a finished import has no importing marker")
+	}
+	if err := os.WriteFile(e.file(d.ID, gvImportingMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Resume(ctx, "e2epartial"); ErrCode(err) != "import_incomplete" {
+		t.Fatalf("resume must refuse: %v", err)
+	}
+	if docks, _ := e.List(ctx); len(docks) != 1 || docks[0].State != "import_incomplete" {
+		t.Fatalf("ls: %+v", docks)
+	}
+	if err := e.Remove(ctx, "e2epartial"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeScript(t *testing.T, lines []string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "script")
