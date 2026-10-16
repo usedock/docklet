@@ -47,7 +47,8 @@ const (
 // gvImportScript copies gvWorkDest out of the disk into /work. $1 is a random stage name and $2
 // the most KiB the copy may take. debugfs rdump turns every hard link into a full copy, so a
 // small crafted disk can expand without bound; the copy runs in the background and is killed
-// once the stage directory is over the limit. debugfs exits 0 even when rdump fails, so its
+// once the whole (fresh) volume is over the limit: that counts the error file, which a
+// directory loop grows far faster than files, and anything a crafted name writes past the stage. debugfs exits 0 even when rdump fails, so its
 // stderr is kept in a file, relayed with gvDebugfsPrefix and checked by the caller. After the
 // move /work itself is made the dock user's (a fresh volume root is root-owned), then ids 1000
 // (the cloud user) are mapped to 1001 (the gVisor user). debugfs rdump leaves symlinks owned
@@ -66,7 +67,7 @@ case "$out" in
   while :; do
     alive=0
     kill -0 $p 2>/dev/null && alive=1
-    u=$(du -sk "$s" | cut -f1 || true)
+    u=$(du -sk ` + gvWorkSrc + ` 2>/dev/null | cut -f1 || true)
     if [ "${u:-0}" -gt "$2" ]; then
       kill -9 $p 2>/dev/null || true
       echo ` + gvImportTooBigMarker + `
@@ -182,7 +183,13 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 	if st, err := os.Stat(disk); err == nil {
 		diskSize = st.Size()
 	}
-	rec, err := e.gvNewRecord(spec, false, suid)
+	limit, byFree := e.gvImportLimit(ctx, diskSize)
+	if byFree && limit < max(diskSize/64, 16<<20) {
+		return Dock{}, errf("insufficient_space", "Docker's data directory has too little free space left to import into (%s)", HumanBytes(limit))
+	}
+	// The importing marker is written with the record: a crash from then until the copy succeeds
+	// leaves a partial (or empty) work directory, and the marker keeps anyone from booting it.
+	rec, err := e.gvNewRecord(spec, false, suid, true)
 	if err != nil {
 		return Dock{}, err
 	}
@@ -195,15 +202,6 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 		_ = e.dropRecord(rec.ID)
 		_ = e.removeFiles(rec.ID)
 		return Dock{}, err
-	}
-	limit, byFree := e.gvImportLimit(ctx, diskSize)
-	if byFree && limit < max(diskSize/64, 16<<20) {
-		return fail(errf("insufficient_space", "Docker's data directory has too little free space left to import into (%s)", HumanBytes(limit)))
-	}
-	// Before the helper starts: a crash from here until the copy succeeds leaves a partial work
-	// directory, and the marker keeps anyone from booting it.
-	if err := os.WriteFile(e.file(rec.ID, gvImportingMarker), nil, 0o600); err != nil {
-		return fail(errf("store_error", "%v", err))
 	}
 	e.logf("importing the work directory into %s", rec.ID)
 	stdout, stderr, err := g.docker(ctx, nil, gvImportArgs(rec.gvRuntime(), image, rec.ID, disk, NewID(), limit>>10)...)

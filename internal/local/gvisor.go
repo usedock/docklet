@@ -679,6 +679,12 @@ func (e *Engine) stopGVisor(ctx context.Context, rec Record, force bool) error {
 func (e *Engine) removeGVisor(ctx context.Context, rec Record) error {
 	g := e.gvisor()
 	id := rec.ID
+	// A pull killed mid-import (SIGKILL, SIGHUP) leaves its helper running on the volume.
+	if e.importIncomplete(rec) != nil {
+		if _, stderr, err := g.docker(ctx, nil, "rm", "-f", gvImporter(id)); err != nil && !notFound(stderr) {
+			return dockerFailure("remove_failed", "docker rm "+gvImporter(id), err, stderr)
+		}
+	}
 	if err := g.removeContainer(ctx, id); err != nil {
 		return err
 	}
@@ -703,7 +709,7 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 	if err != nil {
 		return Dock{}, err
 	}
-	rec, err := e.gvNewRecord(spec, diskSet, suid)
+	rec, err := e.gvNewRecord(spec, diskSet, suid, false)
 	if err != nil {
 		return Dock{}, err
 	}
@@ -716,8 +722,9 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 }
 
 // gvNewRecord registers a new gVisor dock (record, directory, token) without starting it. suid
-// says whether runsc-suid is registered; spec must already have its defaults.
-func (e *Engine) gvNewRecord(spec Spec, diskSet, suid bool) (Record, error) {
+// says whether runsc-suid is registered; spec must already have its defaults. importing writes
+// gvImportingMarker before the record exists, so no crash leaves an unmarked, empty import.
+func (e *Engine) gvNewRecord(spec Spec, diskSet, suid, importing bool) (Record, error) {
 	rt := gvRuntimePlain
 	if suid {
 		rt = gvRuntimeSUID
@@ -735,6 +742,12 @@ func (e *Engine) gvNewRecord(spec Spec, diskSet, suid bool) (Record, error) {
 	if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
 		_ = e.removeFiles(rec.ID)
 		return Record{}, errf("store_error", "%v", err)
+	}
+	if importing {
+		if err := os.WriteFile(e.file(rec.ID, gvImportingMarker), nil, 0o600); err != nil {
+			_ = e.removeFiles(rec.ID)
+			return Record{}, errf("store_error", "%v", err)
+		}
 	}
 	if err := e.addRecord(rec); err != nil {
 		_ = e.removeFiles(rec.ID)

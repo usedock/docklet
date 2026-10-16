@@ -485,3 +485,93 @@ func TestImportWorkReadsDockerRootFreeSpace(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestImportWorkNoRecordWithoutTheMarker(t *testing.T) {
+	e, d, _ := newImportEngine(t)
+	// The free-space probe runs before the record exists, and the record is born with the marker.
+	recsAtInfo := -1
+	e.GVisor.Run = func(ctx context.Context, in io.Reader, args ...string) (string, string, error) {
+		if args[0] == "info" && slices.Contains(args, "{{.DockerRootDir}}") {
+			recs, _ := e.store().List()
+			recsAtInfo = len(recs)
+			return "", "", errors.New("no info")
+		}
+		return d.run(ctx, in, args...)
+	}
+	if _, err := e.ImportWork(context.Background(), ImportWork{Name: "m2", RawPath: rawDisk(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if recsAtInfo != 0 {
+		t.Fatalf("records during the free-space probe: %d", recsAtInfo)
+	}
+	spec, err := Spec{Name: "m3", Runtime: RuntimeGVisor}.withDefaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := e.gvNewRecord(spec, false, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.importIncomplete(rec) == nil {
+		t.Fatal("an importing record is registered with its marker")
+	}
+	plain, err := e.gvNewRecord(Spec{Name: "m4", Runtime: RuntimeGVisor, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB, Network: spec.Network}, false, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.importIncomplete(plain) != nil {
+		t.Fatal("a dock new record has no importing marker")
+	}
+}
+
+func TestRemoveIncompleteImportStopsTheHelper(t *testing.T) {
+	ctx := context.Background()
+	e, d, _ := newImportEngine(t)
+	dock, err := e.ImportWork(ctx, ImportWork{Name: "killed", RawPath: rawDisk(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A CLI killed mid-copy leaves the marker and its helper still running on the volume.
+	if err := os.WriteFile(e.file(dock.ID, gvImportingMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.fakeDocker.calls = nil
+	if err := e.Remove(ctx, "killed"); err != nil {
+		t.Fatal(err)
+	}
+	helperRm, volRm := -1, -1
+	for i, c := range d.fakeDocker.calls {
+		if c[0] == "rm" && c[len(c)-1] == gvImporter(dock.ID) && helperRm < 0 {
+			helperRm = i
+		}
+		if c[0] == "volume" && c[1] == "rm" {
+			volRm = i
+		}
+	}
+	if helperRm < 0 || volRm < 0 || helperRm > volRm {
+		t.Fatalf("the import helper must be removed before the volume: %v", d.fakeDocker.calls)
+	}
+	// A finished dock never touches the helper name.
+	done, err := e.ImportWork(ctx, ImportWork{Name: "fine", RawPath: rawDisk(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.fakeDocker.calls = nil
+	if err := e.Remove(ctx, "fine"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range d.fakeDocker.calls {
+		if c[len(c)-1] == gvImporter(done.ID) {
+			t.Fatalf("unexpected helper call: %v", c)
+		}
+	}
+}
+
+func TestImportScriptCountsTheErrorFile(t *testing.T) {
+	// debugfs writes one error line, with the full path, per failed entry: a directory loop on a
+	// crafted disk makes errors far faster than files, so the watchdog must count them too.
+	// The error file sits beside the stage, so the watchdog measures the whole fresh volume.
+	if !strings.Contains(gvImportScript, "du -sk "+gvWorkSrc+" ") || !strings.Contains(gvImportScript, "e=$s.err") {
+		t.Fatalf("the watchdog must measure the whole volume:\n%s", gvImportScript)
+	}
+}
