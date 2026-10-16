@@ -215,6 +215,9 @@ func (e *Engine) FlattenWith(ctx context.Context, ref, dir string, stop bool, op
 	if rec.runtime() == RuntimeGVisor {
 		return e.flattenGVisor(ctx, rec, ref, dir, stop, opt)
 	}
+	if err := e.importIncomplete(rec); err != nil {
+		return nil, err
+	}
 	if e.alive(rec.ID) {
 		if !stop {
 			return nil, errf("dock_running", "dock %s is running; stop it first or pass --stop", ref)
@@ -321,7 +324,12 @@ func FileSHA256(ctx context.Context, path string) (string, error) {
 
 // DecompressFile expands a zstd file to dst, refusing output larger than max bytes.
 func DecompressFile(ctx context.Context, src, dst string, max int64) error {
-	return decompress(ctx, src, dst, max)
+	return decompress(ctx, src, dst, max, "disk")
+}
+
+// DecompressWorkFile is DecompressFile for a work archive, named as such in its errors.
+func DecompressWorkFile(ctx context.Context, src, dst string, max int64) error {
+	return decompress(ctx, src, dst, max, "work archive")
 }
 
 // EnsureImage resolves a Dockyard image by name and makes sure its kernel, initrd and base are cached.

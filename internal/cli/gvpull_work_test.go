@@ -126,28 +126,6 @@ func TestPullGVisorRemoteGotADisk(t *testing.T) {
 	}
 }
 
-func TestPullGVisorRemoteIntoQEMUFailsBeforeTheExport(t *testing.T) {
-	for _, tc := range []struct {
-		args []string
-		env  string
-	}{
-		{[]string{"pull", remoteID, "--from", "lab"}, ""},
-		{[]string{"pull", remoteID, "--from", "lab", "--runtime", "qemu"}, ""},
-		{[]string{"pull", remoteID, "--from", "lab"}, "qemu"},
-	} {
-		te, p, _ := gvisorPullEnv(t)
-		gvisorRemote(t, p, workTarOf(t))
-		if tc.env != "" {
-			te.env["DOCK_LOCAL_RUNTIME"] = tc.env
-		}
-		mustExit(t, te, 1, tc.args...)
-		got := te.errb.String()
-		if !strings.Contains(got, "#128") || !strings.Contains(got, "--runtime gvisor") || p.exportPosts != 0 {
-			t.Fatalf("%v: stderr %q exports %d", tc.args, got, p.exportPosts)
-		}
-	}
-}
-
 func TestPullGVisorRemoteRejectsAHostileTar(t *testing.T) {
 	for name, tarball := range map[string]string{
 		"dotdot":       workTarOf(t, tar.Header{Name: "../evil", Mode: 0o644}),

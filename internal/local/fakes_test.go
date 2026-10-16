@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +38,13 @@ type fakeDriver struct {
 	dieOnStart     bool // VM exits right after start
 	bindFailures   int  // the next N starts exit because the forwarded port could not be bound
 	ignorePoweroff bool
+	// importExit makes the import script fail with this exit code.
+	importExit int
+	// driveData and driveMarker record, per start with an import drive, the drive's bytes and whether
+	// the importing marker existed; scripts records every exec script.
+	driveData   [][]byte
+	driveMarker []bool
+	scripts     []string
 }
 
 func newFakeDriver() *fakeDriver {
@@ -84,6 +92,11 @@ func (f *fakeDriver) Start(_ context.Context, spec LaunchSpec) (int, error) {
 	f.nextPID++
 	pid := f.nextPID
 	f.starts = append(f.starts, spec)
+	if spec.ImportDrive != "" {
+		b, _ := os.ReadFile(spec.ImportDrive)
+		_, merr := os.Stat(filepath.Join(filepath.Dir(spec.Disk), gvImportingMarker))
+		f.driveData, f.driveMarker = append(f.driveData, b), append(f.driveMarker, merr == nil)
+	}
 	if f.bindFailures > 0 {
 		f.bindFailures--
 		_ = os.WriteFile(spec.StderrLog, []byte("qemu-system-x86_64: Could not set up host forwarding rule 'tcp:127.0.0.1:1-:2222'"), 0o600)
@@ -136,6 +149,13 @@ func (f *fakeDriver) serve(pid int, l net.Listener, token string) {
 					if !f.ignorePoweroff {
 						f.Kill(pid)
 					}
+					return
+				}
+				f.mu.Lock()
+				f.scripts = append(f.scripts, req.Script)
+				f.mu.Unlock()
+				if strings.Contains(req.Script, "DOCK_IMPORT") && f.importExit != 0 {
+					reply(guestagent.Response{OK: true, ExitCode: f.importExit, Stderr: "tar: boom"})
 					return
 				}
 				reply(guestagent.Response{OK: true, ExitCode: 0, Stdout: "ran:" + req.Script})

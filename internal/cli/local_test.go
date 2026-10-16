@@ -33,6 +33,8 @@ type fakeVM struct {
 	listeners map[int]net.Listener
 	preflight error
 	starts    []local.LaunchSpec
+	// failImport makes the guest's import script exit non-zero.
+	failImport bool
 }
 
 func newFakeVM() *fakeVM {
@@ -99,7 +101,7 @@ func (f *fakeVM) Start(_ context.Context, s local.LaunchSpec) (int, error) {
 					}
 					resp.Stdout = "out:" + req.Script
 					resp.ExitCode = 0
-					if strings.Contains(req.Script, "exit7") {
+					if strings.Contains(req.Script, "exit7") || (f.failImport && strings.Contains(req.Script, "DOCK_IMPORT")) {
 						resp.ExitCode = 7
 					}
 				}

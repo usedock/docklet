@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -52,6 +53,7 @@ type fakePlane struct {
 	completeCalls int
 	dockState     string
 	dockRuntime   string // the remote dock's runtime ("" for a microVM dock)
+	dockImage     string // the remote dock's image ("" is ubuntu-24.04, "-" is none)
 
 	// pull
 	exportState   map[string]any
@@ -141,7 +143,11 @@ func newFakePlane(t *testing.T, mode string) *fakePlane {
 		env(w, 202, map[string]any{"id": remoteID, "name": "web", "state": "creating"})
 	})
 	mux.HandleFunc("/v1/docks/"+remoteID, func(w http.ResponseWriter, r *http.Request) {
-		env(w, 200, map[string]any{"id": remoteID, "name": "web", "state": p.dockState, "image": "ubuntu-24.04", "runtime": p.dockRuntime})
+		image := cmp.Or(p.dockImage, "ubuntu-24.04")
+		if image == "-" {
+			image = ""
+		}
+		env(w, 200, map[string]any{"id": remoteID, "name": "web", "state": p.dockState, "image": image, "runtime": p.dockRuntime})
 	})
 	mux.HandleFunc("/v1/docks/"+remoteID+"/export", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -709,16 +710,6 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 		localName = rd.Name
 	}
 	gvRemote := rd.Runtime == local.RuntimeGVisor
-	if gvRemote {
-		// A qemu dock from a gVisor dock is a later change; fail before any export is made.
-		want := *runtimeFlag
-		if want == "" {
-			want = a.env("DOCK_LOCAL_RUNTIME")
-		}
-		if want == "" || want == local.RuntimeQEMU {
-			return newError("not_supported", "pulling a gVisor dock into a qemu dock is coming (issue #128); for now pass --runtime gvisor (or set DOCK_LOCAL_RUNTIME=gvisor)")
-		}
-	}
 	// The runtime's preflight runs before the export, so a host that cannot run it fails early.
 	rt, err := eng.PullRuntime(ctx, *runtimeFlag, a.env("DOCK_LOCAL_RUNTIME"))
 	if err != nil {
@@ -728,13 +719,13 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if err := eng.CheckName(localName); err != nil {
 		return localError(err)
 	}
-	if gvRemote {
+	if gvRemote && rt == local.RuntimeGVisor {
 		image := rd.Image
 		if image == "" {
 			image = "image"
 		}
 		fmt.Fprintf(a.Stderr, "note: the remote dock runs on gVisor; the new dock starts from a fresh %s with only /home/user/work copied.\n", image)
-	} else if rt == local.RuntimeGVisor {
+	} else if !gvRemote && rt == local.RuntimeGVisor {
 		fmt.Fprintln(a.Stderr, "note: only /home/user/work is copied into the gVisor dock; packages and files outside it on the remote dock are not.")
 	}
 
@@ -783,7 +774,23 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	}
 	gv := rt == local.RuntimeGVisor
 	var cached local.CachedImage
-	if workTar {
+	// A qemu dock made from a work tar starts from the base the export names, else the remote
+	// dock's own image, else the default; the note names the image that is used.
+	baseImage := cmp.Or(info.BaseImage, rd.Image, local.DefaultImage)
+	if workTar && !gv {
+		// The part file, the tar, its canonical copy and the guest's disk grow together; a base
+		// image that is not cached yet is downloaded first.
+		if err := eng.CheckFreeSpace(eng.PullSpaceNeed(ctx, info.SizeBytes, 3*info.DataBytes, 0, baseImage), "pull"); err != nil {
+			return localError(err)
+		}
+		fmt.Fprintf(a.Stderr, "note: the remote dock runs on gVisor; the new dock starts from a fresh %s with only /home/user/work copied.\n", baseImage)
+		if !*c.json {
+			fmt.Fprintf(a.Stderr, "preparing the %s image\n", baseImage)
+		}
+		if _, err = eng.EnsureImage(ctx, baseImage); err != nil {
+			return localError(err)
+		}
+	} else if workTar {
 		// The part file, the tar it expands to, and the unpacked files in Docker's data directory.
 		if err := eng.CheckFreeSpace(eng.PullSpaceNeedGVisor(info.SizeBytes, info.DataBytes, 0), "pull"); err != nil {
 			return localError(err)
@@ -830,10 +837,18 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 			limit = min(limit, info.DataBytes+info.DataBytes/8+64<<20)
 		}
 		tarPath := filepath.Join(dir, "work.tar")
-		if err := local.DecompressFile(ctx, part, tarPath, limit); err != nil {
+		if err := local.DecompressWorkFile(ctx, part, tarPath, limit); err != nil {
 			return localError(err)
 		}
 		_ = os.Remove(part)
+		if !gv {
+			d, err := eng.ImportWorkTarQEMU(ctx, local.WorkTarQEMU{Name: localName, Image: baseImage, TarPath: tarPath, CPUs: info.CPUs,
+				MemoryMiB: info.MemoryMiB, DiskGiB: info.DiskGiB, MaxBytes: limit})
+			if err != nil {
+				return localError(err)
+			}
+			return a.pulled(*c.json, d, source, pos[0], *from)
+		}
 		d, err := eng.ImportWorkTar(ctx, local.ImportWorkTar{Name: localName, TarPath: tarPath, CPUs: info.CPUs, MemoryMiB: info.MemoryMiB, MaxBytes: limit})
 		if err != nil {
 			return localError(err)

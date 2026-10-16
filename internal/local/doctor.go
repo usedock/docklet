@@ -88,7 +88,7 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	}
 	if recs, err := e.store().List(); err == nil {
 		for _, r := range recs {
-			if r.runtime() == RuntimeGVisor && e.importIncomplete(r) != nil {
+			if e.importIncomplete(r) != nil {
 				add(Check{Name: "dock " + r.Name, Detail: "the import of its work directory did not finish", Fix: "dock rm " + r.Name + ", then pull again"})
 			}
 		}

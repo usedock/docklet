@@ -81,7 +81,13 @@ type LaunchSpec struct {
 	CPUs, MemoryMiB int
 	// Network is "on" or "off"; off restricts the guest from the outside world.
 	Network string
+	// ImportDrive is a raw file attached as a read-only second virtio drive (serial
+	// ImportDriveSerial). Only the import boot of a pulled work archive sets it.
+	ImportDrive string
 }
+
+// ImportDriveSerial is the serial of the import drive; the guest finds it in /sys/block/vd*/serial.
+const ImportDriveSerial = "dockimport"
 
 // Driver is the hypervisor side of the engine. QEMU is the real one; tests use a fake.
 type Driver interface {
@@ -132,6 +138,7 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 	if l.Network == "off" {
 		netdev += ",restrict=on"
 	}
+	disk := strings.ReplaceAll(l.Disk, ",", ",,")
 	cmdline := "console=" + console + " root=/dev/vda rw rootfstype=ext4 rootwait"
 	args = append(args,
 		"-smp", strconv.Itoa(l.CPUs),
@@ -143,12 +150,23 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 		"-initrd", l.Initrd,
 		"-append", cmdline,
 		"-fw_cfg", "name="+FWCfgName+",file="+strings.ReplaceAll(l.ConfigFile, ",", ",,"),
-		"-drive", "file="+strings.ReplaceAll(l.Disk, ",", ",,")+",if=virtio,format=qcow2",
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
 	)
-	return args
+	if l.ImportDrive == "" {
+		args = append(args, "-drive", "file="+disk+",if=virtio,format=qcow2")
+		return args
+	}
+	// The import boot makes both disks explicit devices, root first: a "-drive if=virtio" device
+	// is created after every explicit -device, which would make the import drive vda and leave
+	// root=/dev/vda without its disk. -drive's serial= goes to the raw format driver, which
+	// refuses it, so the serial is a device property.
+	return append(args,
+		"-drive", "file="+disk+",if=none,id=dockroot,format=qcow2",
+		"-device", "virtio-blk-pci,drive=dockroot",
+		"-drive", "file="+strings.ReplaceAll(l.ImportDrive, ",", ",,")+",if=none,id=dockimport,format=raw,readonly=on",
+		"-device", "virtio-blk-pci,drive=dockimport,serial="+ImportDriveSerial)
 }
 
 // Accelerator picks the hardware accelerator for goos. It never falls back to software
