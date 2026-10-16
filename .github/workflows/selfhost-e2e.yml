@@ -33,6 +33,12 @@ on:
       - scripts/e2e-selfhost.sh
       - scripts/e2e-selfhost-gvisor.sh
       - scripts/lib-e2e-selfhost.sh
+      # The pull and export code the gVisor round trip exercises.
+      - internal/cli/transfer.go
+      - internal/local/gvimport*.go
+      - internal/local/qemuimport.go
+      - internal/snapmgr/snapmgr.go
+      - internal/host/host.go
 
 permissions:
   contents: read
