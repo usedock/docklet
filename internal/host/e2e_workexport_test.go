@@ -147,11 +147,16 @@ func TestE2EWorkExportOfARunningGVisorDock(t *testing.T) {
 		t.Fatalf("pause marker left behind: %v", err)
 	}
 	// The dock keeps working after the thaw.
-	before, _ := os.ReadFile(filepath.Join(work, "busy"))
-	time.Sleep(time.Second)
-	after, _ := os.ReadFile(filepath.Join(work, "busy"))
-	if bytes.Equal(before, after) {
-		t.Fatalf("the dock's writer stalled after the export: %q", after)
+	// The writer truncates before each write, so sample until two distinct counts show up.
+	seen := map[string]bool{}
+	for i := 0; i < 100 && len(seen) < 2; i++ {
+		if b, _ := os.ReadFile(filepath.Join(work, "busy")); len(bytes.TrimSpace(b)) > 0 {
+			seen[string(b)] = true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("the dock's writer stalled after the export: %v", seen)
 	}
 
 	manifest, err := store.GetManifest(context.Background(), h.cfg.Snaps.Store, res.id)
