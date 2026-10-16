@@ -224,6 +224,15 @@ jobs:
           sudo /usr/local/bin/runsc install --runtime=runsc-suid -- --allow-suid --overlay2=none
           sudo systemctl restart docker
           docker info --format '{{json .Runtimes}}'
+          # The restart took the control plane containers down with it; wait for the API and the host to be back.
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "$DOCK_URL/api/auth/ok" || true)"
+            ready="$(curl -s http://127.0.0.1:8081/v1/readiness | jq -r '.data.ready' 2>/dev/null || true)"
+            echo "control plane HTTP ${code}, host ready: ${ready}"
+            case "$code" in 000|502|503|504) sleep 5; continue ;; esac; [ "$ready" = true ] && exit 0
+            sleep 5
+          done
+          echo "::error::control plane or host did not come back after the docker restart"; exit 1
       - name: dock pull of a fleet gVisor dock
         env:
           DOCK: ${{ runner.temp }}/dock
