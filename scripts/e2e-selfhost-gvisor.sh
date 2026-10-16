@@ -3,7 +3,7 @@
 # this machine (runsc, no KVM needed for the host). Creates a dock on the control plane, writes a marker tree
 # in /home/user/work (a file, a 0700 directory, a symlink), then runs dock pull --runtime gvisor twice with
 # the CLI under test: once while the remote dock is running (the host pauses it for the export) and once
-# after it was stopped. Each local copy is resumed and its content, modes, symlink and owner are checked with
+# more after a stop and resume (the control plane exports only ready docks). Each local copy is resumed and its content, modes, symlink and owner are checked with
 # dock exec. A last leg pulls into a QEMU dock; it is skipped while the CLI still refuses with the issue #128
 # text. Needs DOCK (binary), DOCK_URL, LOGS (dir); jq and curl. Docker with the runsc and runsc-suid runtimes
 # must be set up, as the workflow does.
@@ -78,12 +78,15 @@ retry 6 $DOCK exec "$SRC" -- true || die "the fleet dock did not recover after t
 [ "$($DOCK exec "$SRC" -- cat /home/user/work/tree/file.txt)" = marker-content ] || die "the fleet dock lost data across the export"
 log "running-dock pull ok"
 
-# 2. Stop it (the host saves the work directory on stop) and pull again, with a file written after the first pull.
+# 2. Stop and resume the fleet dock (the host saves the work directory on stop and restores it), then pull again
+# with a file written after the first pull. The control plane exports only ready docks, so a stopped one is not pulled.
 $DOCK exec "$SRC" -- 'printf late-content > /home/user/work/tree/late.txt && sync'
 t=$(date +%s); $DOCK stop "$SRC"; timing "dock stop (fleet gvisor)" "$t"
-pull_gvisor gv-stopped
-assert_tree gv-stopped late-content
-log "stopped-dock pull ok"
+t=$(date +%s); $DOCK resume "$SRC"; timing "dock resume (fleet gvisor)" "$t"
+retry 6 $DOCK exec "$SRC" -- true || die "the fleet dock did not come back after resume"
+pull_gvisor gv-second
+assert_tree gv-second late-content
+log "second pull after stop and resume ok"
 
 # 3. A QEMU dock from the same remote dock. The CLI refuses with the issue #128 text until that lands; skip then.
 $DOCK context use selfhost
@@ -111,7 +114,7 @@ fi
 
 $DOCK context use local
 $DOCK rm gv-running
-$DOCK rm gv-stopped
+$DOCK rm gv-second
 $DOCK context use selfhost
 $DOCK rm "$SRC"
 log "gvisor pull round trip ok"
