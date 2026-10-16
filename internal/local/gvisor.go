@@ -45,7 +45,7 @@ COPY dock-entrypoint /usr/local/bin/dock-entrypoint
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3; \
+    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3 iptables; \
     chmod 0755 /usr/local/bin/dock-entrypoint /usr/local/libexec/dock-fast-agent.py; \
     useradd -u 1001 -m -s /bin/bash -G sudo user; \
     echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user; \
@@ -104,10 +104,14 @@ type GVisor struct {
 	LookPath func(string) (string, error)
 	// Stream starts a docker command whose stdin and stdout are used as a byte stream; nil uses os/exec.
 	Stream DockerStream
+	// AllowHost skips the host block, so network-on docks can reach this machine's services.
+	AllowHost bool
 }
 
 // NewGVisor returns a driver for this machine.
-func NewGVisor() *GVisor { return &GVisor{GOOS: runtime.GOOS} }
+func NewGVisor() *GVisor {
+	return &GVisor{GOOS: runtime.GOOS, AllowHost: os.Getenv(gvHostBlockEnv) == "1"}
+}
 
 // GVisorPreflight checks that this machine can run gVisor docks (for dock doctor).
 func GVisorPreflight(ctx context.Context) error { return NewGVisor().Preflight(ctx) }
@@ -294,10 +298,35 @@ func (g *GVisor) hasDocker() bool {
 	return err == nil
 }
 
-// ensureNetwork creates the dock's own bridge network; one that already exists is fine.
+// ensureNetwork creates the dock's own bridge network; an existing one is kept only if its bridge is dkl<id>.
 // Each dock gets its own so it cannot reach the user's other containers or other docks.
 func (g *GVisor) ensureNetwork(ctx context.Context, id string) error {
-	if _, stderr, err := g.docker(ctx, nil, "network", "create", "--driver", "bridge", gvNetwork(id)); err != nil && !strings.Contains(strings.ToLower(stderr), "already exists") {
+	create := func() (string, error) {
+		_, stderr, err := g.docker(ctx, nil, "network", "create", "--driver", "bridge", "-o", "com.docker.network.bridge.name="+gvBridge(id), gvNetwork(id))
+		return stderr, err
+	}
+	stderr, err := create()
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(stderr), "already exists") {
+		return dockerFailure("boot_failed", "docker network create "+gvNetwork(id), err, stderr)
+	}
+	// The host block matches the bridge by name; a network left by an older dock (br-<id>) would escape it.
+	out, stderr, err := g.docker(ctx, nil, "network", "inspect", "--format", `{{index .Options "com.docker.network.bridge.name"}}`, gvNetwork(id))
+	if err != nil {
+		return dockerFailure("boot_failed", "docker network inspect "+gvNetwork(id), err, stderr)
+	}
+	if strings.TrimSpace(out) == gvBridge(id) {
+		return nil
+	}
+	if err := g.disconnectNetwork(ctx, id); err != nil {
+		return err
+	}
+	if err := g.removeNetwork(ctx, id); err != nil {
+		return err
+	}
+	if stderr, err := create(); err != nil {
 		return dockerFailure("boot_failed", "docker network create "+gvNetwork(id), err, stderr)
 	}
 	return nil
@@ -341,14 +370,18 @@ func (g *GVisor) halt(ctx context.Context, rec Record, grace string) error {
 	if err := g.disconnectNetwork(ctx, id); err != nil {
 		return err
 	}
-	return g.removeNetwork(ctx, id)
+	if err := g.removeNetwork(ctx, id); err != nil {
+		return err
+	}
+	return g.removeHostBlock(ctx, id)
 }
 
-// cleanup removes the container and the network, best effort, after a failed first start.
+// cleanup removes the container, the network and the host block, best effort, after a failed first start.
 func (g *GVisor) cleanup(ctx context.Context, rec Record) {
 	_ = g.removeContainer(ctx, rec.ID)
 	if !rec.gvNoNet() {
 		_ = g.removeNetwork(ctx, rec.ID)
+		_ = g.removeHostBlock(ctx, rec.ID)
 	}
 }
 
@@ -504,6 +537,11 @@ func (e *Engine) bootGVisor(ctx context.Context, rec Record, image string) error
 			if err := g.ensureNetwork(ctx, rec.ID); err != nil {
 				return err
 			}
+			// Before the container exists, so the dock never runs unblocked.
+			if err := e.gvHostBlock(ctx, rec); err != nil {
+				g.cleanup(context.WithoutCancel(ctx), rec)
+				return err
+			}
 		}
 		_, stderr, err := g.docker(ctx, nil, gvRunArgs(rec, port, cfg, resolv, image)...)
 		if err != nil {
@@ -561,6 +599,9 @@ func (e *Engine) resumeGVisor(ctx context.Context, rec Record, image string, sui
 		_ = l.Close()
 		if err := g.ensureNetwork(ctx, rec.ID); err != nil {
 			return err
+		}
+		if err := e.gvHostBlock(ctx, rec); err != nil {
+			return fail(err)
 		}
 		if err := g.connectNetwork(ctx, rec.ID); err != nil {
 			return fail(err)
@@ -634,6 +675,9 @@ func (e *Engine) removeGVisor(ctx context.Context, rec Record) error {
 	}
 	if !rec.gvNoNet() {
 		if err := g.removeNetwork(ctx, id); err != nil {
+			return err
+		}
+		if err := g.removeHostBlock(ctx, id); err != nil {
 			return err
 		}
 	}
