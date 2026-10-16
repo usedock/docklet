@@ -95,7 +95,7 @@ func TestImportWorkHelperArgs(t *testing.T) {
 		t.Errorf("only CHOWN, DAC_OVERRIDE and FOWNER are added: %v", a)
 	}
 	script := a[slices.Index(a, "-c")+1]
-	for _, want := range []string{`rdump /home/user/work`, "chown -hR --from=1000 1001 /work", "chown -hR --from=:1000 :1001 /work", "-mindepth 1 -maxdepth 1"} {
+	for _, want := range []string{`rdump /home/user/work`, "chown -hR --from=1000 1001 /work", "chown -hR --from=:1000 :1001 /work", "-type l -user 0 -exec chown -h 1001:1001", "-mindepth 1 -maxdepth 1"} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q:\n%s", want, script)
 		}

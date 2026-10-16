@@ -30,6 +30,7 @@ const (
 // debugfs exits 0 even when rdump fails, so its stderr is relayed with gvDebugfsPrefix and
 // checked by the caller. After the move /work itself is made the dock user's (a fresh volume
 // root is root-owned), then ids 1000 (the cloud user) are mapped to 1001 (the gVisor user).
+// debugfs rdump leaves symlinks owned by root, so those get the dock user too.
 const gvImportScript = `set -e
 d=` + gvDiskPath + `
 out=$(debugfs -R "stat ` + gvWorkDest + `" "$d" 2>&1 >/dev/null || true)
@@ -48,6 +49,7 @@ esac
 chown 1001:1001 ` + gvWorkSrc + `
 chown -hR --from=1000 1001 ` + gvWorkSrc + `
 chown -hR --from=:1000 :1001 ` + gvWorkSrc + `
+find ` + gvWorkSrc + ` -type l -user 0 -exec chown -h 1001:1001 {} +
 `
 
 // gvImportCaps are the capabilities of the import helper: rdump sets owners, and the helper
