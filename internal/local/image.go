@@ -258,6 +258,32 @@ func (c *Cache) Ensure(ctx context.Context, im dockyard.Image) (CachedImage, err
 	return p, nil
 }
 
+// EnsureRootfs makes the verified compressed rootfs (rootfs.ext4.zst) of im available and returns
+// its path. It never converts the disk, so it needs no qemu-img, and it keeps the file for later
+// calls. Ensure removes the file after it builds the qcow2 base, so a converted image downloads
+// the rootfs again here.
+func (c *Cache) EnsureRootfs(ctx context.Context, im dockyard.Image) (string, error) {
+	p := c.paths(im)
+	dest := filepath.Join(p.Dir, dockyard.FileRootfs)
+	want := im.Files[dockyard.FileRootfs]
+	if st, err := os.Stat(dest); err == nil && st.Size() == want.Size && verifyFile(dest, want) == nil {
+		return dest, nil
+	}
+	c.cleanStale()
+	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
+		return "", errf("cache_error", "%v", err)
+	}
+	c.logf("downloading %s (%s)", dockyard.FileRootfs, humanBytes(want.Size))
+	if err := c.download(ctx, want, dest); err != nil {
+		// Another dock command may have finished the same file.
+		if verifyFile(dest, want) == nil {
+			return dest, nil
+		}
+		return "", err
+	}
+	return dest, nil
+}
+
 // verifyFile checks a file against its index entry (size, then sha256).
 func verifyFile(path string, want dockyard.File) error {
 	if err := dockyard.VerifyFile(path, want); err != nil {

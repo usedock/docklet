@@ -46,6 +46,52 @@ func TestCacheEnsureVerifiesConvertsAndCaches(t *testing.T) {
 	}
 }
 
+func TestEnsureRootfsVerifiesWithoutConvertingAndReuses(t *testing.T) {
+	im, _, hits := imageServer(t, "amd64")
+	c := &Cache{Dir: t.TempDir()} // no Driver: any ConvertRaw call would panic
+	p1, err := c.EnsureRootfs(context.Background(), im)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFile(p1, im.Files[dockyard.FileRootfs]); err != nil {
+		t.Fatal(err)
+	}
+	if c.Cached(im) {
+		t.Fatal("EnsureRootfs must not mark the image as converted")
+	}
+	if _, err := os.Stat(c.paths(im).Base); err == nil {
+		t.Fatal("EnsureRootfs must not build a qcow2 base")
+	}
+	p2, err := c.EnsureRootfs(context.Background(), im)
+	if err != nil || p2 != p1 {
+		t.Fatalf("second call %q %v", p2, err)
+	}
+	if hits[dockyard.FileRootfs] != 1 || hits[dockyard.FileKernel] != 0 {
+		t.Fatalf("only the rootfs is fetched, once: %v", hits)
+	}
+	// Ensure afterwards reuses the kept file instead of downloading it again.
+	if _, err := (&Cache{Dir: c.Dir, Driver: newFakeDriver()}).Ensure(context.Background(), im); err != nil {
+		t.Fatal(err)
+	}
+	if hits[dockyard.FileRootfs] != 1 {
+		t.Fatalf("Ensure must reuse the cached rootfs: %v", hits)
+	}
+}
+
+func TestEnsureRootfsRejectsACorruptedDownload(t *testing.T) {
+	im, _, _ := imageServer(t, "amd64")
+	f := im.Files[dockyard.FileRootfs]
+	f.SHA256 = strings.Repeat("0", 64)
+	im.Files[dockyard.FileRootfs] = f
+	c := &Cache{Dir: t.TempDir()}
+	if _, err := c.EnsureRootfs(context.Background(), im); ErrCode(err) != "verify_failed" {
+		t.Fatalf("want verify_failed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(c.paths(im).Dir, dockyard.FileRootfs)); err == nil {
+		t.Fatal("a bad download must not be kept")
+	}
+}
+
 func TestCacheRejectsACorruptedDownload(t *testing.T) {
 	im, _, _ := imageServer(t, "amd64")
 	f := im.Files[dockyard.FileKernel]

@@ -45,7 +45,7 @@ COPY dock-entrypoint /usr/local/bin/dock-entrypoint
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3 iptables; \
+    apt-get install -y --no-install-recommends ca-certificates curl git sudo python3 iptables e2fsprogs; \
     chmod 0755 /usr/local/bin/dock-entrypoint /usr/local/libexec/dock-fast-agent.py; \
     useradd -u 1001 -m -s /bin/bash -G sudo user; \
     echo "user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/user; \
