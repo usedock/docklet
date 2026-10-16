@@ -435,7 +435,7 @@ func TestFreezeContainerStateFullRecordsTheExportFields(t *testing.T) {
 	if err := os.WriteFile(state, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := c.FreezeContainerStateFull(ctx, "d1", state, "s9", "full", "fam", "ubuntu-24.04", nil)
+	manifest, err := c.FreezeContainerStateFull(ctx, "d1", state, "s9", "full", "GenuineIntel:142:10", "ubuntu-24.04", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
