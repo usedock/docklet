@@ -37,6 +37,7 @@ type fakeVethDriver struct {
 	pauseErr   error
 	saveErr    error
 	saveFn     func()
+	resumeErrs []error
 }
 
 // writeTestImage writes size bytes of a deterministic pattern.
@@ -111,7 +112,15 @@ func (f *fakeVethDriver) Pause(_ context.Context, _ *fc.Handle) error {
 	f.paused++
 	return nil
 }
-func (f *fakeVethDriver) Resume(_ context.Context, _ *fc.Handle) error { f.resumed++; return nil }
+func (f *fakeVethDriver) Resume(_ context.Context, _ *fc.Handle) error {
+	if len(f.resumeErrs) > 0 {
+		err := f.resumeErrs[0]
+		f.resumeErrs = f.resumeErrs[1:]
+		return err
+	}
+	f.resumed++
+	return nil
+}
 func (f *fakeVethDriver) CreateSnapshot(_ context.Context, _ *fc.Handle, _ string) error {
 	return nil
 }

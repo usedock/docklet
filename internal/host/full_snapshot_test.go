@@ -232,3 +232,51 @@ func TestOrdinaryContainerCaptureDoesNotPause(t *testing.T) {
 		t.Fatalf("an ordinary container capture must not claim a checksum: %+v", manifest)
 	}
 }
+
+func TestSnapshotCreateFullRetriesAFailedThaw(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	writeJailSidecar(t, h, "dock-1", resSmall)
+	marker := filepath.Join(h.jailRoot("dock-1"), exportPausedMarker)
+	var markedDuringSave bool
+	driver.saveFn = func() { _, err := os.Stat(marker); markedDuringSave = err == nil }
+	driver.resumeErrs = []error{errors.New("docker unpause: transient")}
+	if _, _, _, err := h.SnapshotCreateFull(context.Background(), "dock-1", nil, apiv1.SnapshotFull, true, false); err != nil {
+		t.Fatalf("a thaw that succeeds on retry fails the capture: %v", err)
+	}
+	if driver.resumed != 1 || !markedDuringSave {
+		t.Fatalf("resumed=%d markedDuringSave=%v, want the retried thaw and a marker while paused", driver.resumed, markedDuringSave)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker left after a thaw: %v", err)
+	}
+	// Every thaw failing: the capture fails and the marker stays for Rescan.
+	driver.resumeErrs = []error{errors.New("a"), errors.New("b"), errors.New("c")}
+	if _, _, _, err := h.SnapshotCreateFull(context.Background(), "dock-1", nil, apiv1.SnapshotFull, true, false); err == nil {
+		t.Fatal("want the thaw failure surfaced")
+	}
+	if len(driver.resumeErrs) != 0 {
+		t.Fatalf("thaw attempts left %d errors unused, want three attempts", len(driver.resumeErrs))
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker gone although the dock is still frozen: %v", err)
+	}
+}
+
+func TestRescanThawsAContainerAnInterruptedExportFroze(t *testing.T) {
+	h, driver, _, _ := testContainerHost(t)
+	writeJailSidecar(t, h, "dock-1", resSmall)
+	writeJailSidecar(t, h, "dock-2", resSmall)
+	marker := filepath.Join(h.jailRoot("dock-1"), exportPausedMarker)
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if adopted := h.Rescan(); len(adopted) != 2 {
+		t.Fatalf("adopted = %v", adopted)
+	}
+	if driver.resumed != 1 {
+		t.Fatalf("resumed = %d, want only the dock the export left paused thawed", driver.resumed)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker left after the thaw: %v", err)
+	}
+}

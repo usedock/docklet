@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	stdnet "net"
 	"os"
 	"path/filepath"
@@ -245,6 +246,9 @@ func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
 	if err != nil {
 		return ""
 	}
+	if h.diskOnly() {
+		thawInterruptedExport(h, dockID, jail)
+	}
 	token, workspace, allow := readExecAgent(jail)
 	live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
 	if len(allow) > 0 {
@@ -258,6 +262,23 @@ func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
 	h.vms[owner] = live
 	h.mu.Unlock()
 	return owner
+}
+
+// exportPausedMarker sits in a container dock's jail while a whole capture has it paused.
+const exportPausedMarker = "export-paused"
+
+// thawInterruptedExport resumes a container a work export froze before its docklet died, so an
+// adopted dock is never tracked as running while frozen. The marker stays until a thaw succeeds.
+func thawInterruptedExport(h *Host, dockID, jail string) {
+	marker := filepath.Join(jail, exportPausedMarker)
+	if _, err := os.Stat(marker); err != nil {
+		return
+	}
+	if err := h.cfg.Driver.Resume(context.Background(), h.handle(dockID)); err != nil {
+		log.Printf("dock %s: thaw after an interrupted export: %v", dockID, err)
+		return
+	}
+	_ = os.Remove(marker)
 }
 
 // claimSidecar names the runtime id a claimed pool slot serves, so a restart re-tracks it under that id.
@@ -884,21 +905,32 @@ func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *s
 	stateTar := filepath.Join(tmp, "state.tar")
 	// A whole capture freezes the container for the tar and thaws it on every path (success,
 	// error, panic, cancelled ctx); the upload does not need the freeze, so it thaws right after.
+	// A failed thaw stays pending so the deferred one retries it; the marker lets Rescan thaw a
+	// container whose docklet died mid-tar.
 	paused := false
+	marker := filepath.Join(h.jailRoot(dockID), exportPausedMarker)
 	thaw := func() error {
 		if !paused {
 			return nil
 		}
+		if err := h.cfg.Driver.Resume(context.WithoutCancel(ctx), h.handle(dockID)); err != nil {
+			return err
+		}
 		paused = false
-		return h.cfg.Driver.Resume(context.WithoutCancel(ctx), h.handle(dockID))
+		_ = os.Remove(marker)
+		return nil
 	}
 	if whole {
+		// Written before the pause so a crash right after it still leaves the marker.
+		_ = os.WriteFile(marker, nil, 0o644)
 		switch perr := h.cfg.Driver.Pause(ctx, h.handle(dockID)); {
 		case perr == nil:
 			paused = true
 		case errors.Is(perr, fc.ErrNoMicroVM):
 			// Stopped dock: nothing runs, the work disk is quiescent.
+			_ = os.Remove(marker)
 		default:
+			_ = os.Remove(marker)
 			return "", 0, "", perr
 		}
 		defer func() { _ = thaw() }()
@@ -906,8 +938,12 @@ func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *s
 	if err := state.SaveState(dir, stateTar); err != nil {
 		return "", 0, "", err
 	}
-	if err := thaw(); err != nil && resumeAfter {
-		return "", 0, "", err
+	// One retry here, another in the defer on the way out: a transient docker error must not
+	// leave the dock frozen.
+	if err := thaw(); err != nil {
+		if err := thaw(); err != nil && resumeAfter {
+			return "", 0, "", err
+		}
 	}
 	var manifest store.Manifest
 	if whole {
