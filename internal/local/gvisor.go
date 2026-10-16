@@ -574,6 +574,15 @@ func (e *Engine) resumeGVisor(ctx context.Context, rec Record, image string, sui
 		if rec.gvRuntime() == gvRuntimeSUID && !suid {
 			return errf("runtime_missing", "dock %s was created with the %s runtime, which is no longer registered with Docker; register it again (%s) or remove the dock", rec.ID, gvRuntimeSUID, GVisorSUIDFix)
 		}
+		// An imported dock has never had a container: its first resume is a normal first boot.
+		if _, serr := os.Stat(e.file(rec.ID, gvFreshMarker)); serr == nil {
+			e.logf("starting %s from its imported work directory", rec.ID)
+			if err := e.bootGVisor(ctx, rec, image); err != nil {
+				return err
+			}
+			_ = os.Remove(e.file(rec.ID, gvFreshMarker))
+			return nil
+		}
 		e.logf("the container of %s is gone; recreating it (only /home/user/work survives)", rec.ID)
 		return e.bootGVisor(ctx, rec, image)
 	}
@@ -694,6 +703,21 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 	if err != nil {
 		return Dock{}, err
 	}
+	rec, err := e.gvNewRecord(spec, diskSet, suid)
+	if err != nil {
+		return Dock{}, err
+	}
+	e.logf("starting %s", rec.ID)
+	if err := e.bootGVisor(ctx, rec, image); err != nil {
+		_ = e.Remove(context.WithoutCancel(ctx), rec.ID)
+		return Dock{}, err
+	}
+	return e.view(ctx, rec), nil
+}
+
+// gvNewRecord registers a new gVisor dock (record, directory, token) without starting it. suid
+// says whether runsc-suid is registered; spec must already have its defaults.
+func (e *Engine) gvNewRecord(spec Spec, diskSet, suid bool) (Record, error) {
 	rt := gvRuntimePlain
 	if suid {
 		rt = gvRuntimeSUID
@@ -706,22 +730,17 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 	rec := Record{ID: NewID(), Name: spec.Name, Image: "dock-local-gvisor", Runtime: RuntimeGVisor, GVisorRuntime: rt, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB,
 		DiskGiB: spec.DiskGiB, Network: spec.Network, CreatedAt: e.now()}
 	if err := e.mkDockDir(rec.ID); err != nil {
-		return Dock{}, errf("store_error", "%v", err)
+		return Record{}, errf("store_error", "%v", err)
 	}
 	if err := os.WriteFile(e.file(rec.ID, "token"), []byte(NewToken()), 0o600); err != nil {
 		_ = e.removeFiles(rec.ID)
-		return Dock{}, errf("store_error", "%v", err)
+		return Record{}, errf("store_error", "%v", err)
 	}
 	if err := e.addRecord(rec); err != nil {
 		_ = e.removeFiles(rec.ID)
-		return Dock{}, err
+		return Record{}, err
 	}
-	e.logf("starting %s", rec.ID)
-	if err := e.bootGVisor(ctx, rec, image); err != nil {
-		_ = e.Remove(context.WithoutCancel(ctx), rec.ID)
-		return Dock{}, err
-	}
-	return e.view(ctx, rec), nil
+	return rec, nil
 }
 
 // gvBranchRepo is the repository of the per-branch images made by docker commit.
