@@ -3,6 +3,7 @@
 package local
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"os"
@@ -60,6 +61,10 @@ func TestE2ELocalGVisorPullWorkTar(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(src, "lost+found"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// GNU tar archives a named pipe; the import leaves it out instead of refusing the dock.
+	if out, err := exec.Command("mkfifo", filepath.Join(src, "pipe")).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v %s", err, out)
+	}
 	tarPath := filepath.Join(t.TempDir(), "state.tar")
 	// Owners 1000 as on the cloud hosts' work disks; the import maps everything to 1001.
 	if out, err := exec.Command("tar", "-C", src, "--exclude=./lost+found", "--owner=1000", "--group=1000", "-cf", tarPath, ".").CombinedOutput(); err != nil {
@@ -97,7 +102,7 @@ func TestE2ELocalGVisorPullWorkTar(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	for _, bad := range []string{".stage-", "lost+found"} {
+	for _, bad := range []string{".stage-", "lost+found", "pipe"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("%q must not be in the work directory:\n%s", bad, got)
 		}
@@ -126,8 +131,8 @@ func TestE2ELocalGVisorPullWorkTarCraftedArchives(t *testing.T) {
 		"symlink dir":    {tdir("./"), tsym("./a", "/tmp"), tdir("./a/sub")},
 		"hard link out":  {tdir("./"), thard("./h", "/etc/passwd")},
 		"hard link dots": {tdir("./"), thard("./h", "../../etc/passwd")},
-		"device":         {tdir("./"), tspecial("./null", 'c')},
-		"fifo":           {tdir("./"), tspecial("./pipe", 'p')},
+		"char device":    {tdir("./"), tspecial("./null", tar.TypeChar)},
+		"block device":   {tdir("./"), tspecial("./sda", tar.TypeBlock)},
 		"implied dir":    {tdir("./"), tfile("./a/b", "x"), tsym("./a", "/etc"), thard("./c", "./a/b")},
 	}
 	for name, ents := range cases {

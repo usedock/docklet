@@ -188,7 +188,6 @@ func TestSanitizeWorkTarRefusesWhatEscapesOrIsNotAFile(t *testing.T) {
 		"hard link through a symlink": {tdir("./"), tfile("./f", "x"), tsym("./s", "/tmp"), thard("./s/h", "./f")},
 		"character device":            {tdir("./"), tspecial("./null", tar.TypeChar)},
 		"block device":                {tdir("./"), tspecial("./sda", tar.TypeBlock)},
-		"fifo":                        {tdir("./"), tspecial("./pipe", tar.TypeFifo)},
 		"file named dot":              {tfile(".", "x")},
 		"empty symlink target":        {tsym("./s", "")},
 	}
@@ -407,5 +406,18 @@ func TestPathTreeHashesKeepNamesApart(t *testing.T) {
 		if got := pt.kind(p); got != want {
 			t.Errorf("%s: %q, want %q", p, got, want)
 		}
+	}
+}
+
+func TestSanitizeWorkTarSkipsFifos(t *testing.T) {
+	// GNU tar on the fleet host archives a named pipe in the work directory; it is left out.
+	src := writeTar(t, tdir("./"), tspecial("./pipe", tar.TypeFifo), tfile("./f", "x"), tspecial("./d/pipe", tar.TypeFifo), tfile("./pipe", "y"))
+	dst := filepath.Join(t.TempDir(), "c.tar")
+	st, err := sanitizeWorkTar(src, dst, 1<<20)
+	if err != nil || st.Fifos != 2 {
+		t.Fatalf("stats %+v err %v", st, err)
+	}
+	if names, _, _ := readTar(t, dst); !slices.Equal(names, []string{"./", "f", "pipe"}) {
+		t.Fatalf("names %v", names)
 	}
 }

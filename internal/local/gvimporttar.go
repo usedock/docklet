@@ -34,6 +34,8 @@ const (
 // workTarStats describes a checked work tar.
 type workTarStats struct {
 	Entries int
+	// Fifos counts the named pipes left out (GNU tar archives them; they hold no data).
+	Fifos int
 	// Declared is the sum of the sizes of all regular files.
 	Declared int64
 	// Usage estimates what the tree takes on disk (blocks, directories).
@@ -138,7 +140,7 @@ func cleanTarName(name string) (string, error) {
 // sanitizeWorkTar reads the tar at src and writes a canonical copy to dst holding only what is
 // safe to unpack: directories, regular files, symlinks and hard links, with names that stay
 // inside the work directory, nothing written through a symlink and every owner set to the dock
-// user. Anything else (device nodes, fifos, an absolute path, "..", a hard link to something
+// user. Named pipes are left out. Anything else (device nodes, an absolute path, "..", a hard link to something
 // that is not an earlier regular file, a path below a symlink or file) refuses the whole
 // archive. A tar whose regular files declare more than maxDeclared bytes is refused too.
 // Rewriting the headers means the unpacking tar never sees the original, so a parser
@@ -209,6 +211,9 @@ func sanitizeWorkTar(src, dst string, maxDeclared int64) (st workTarStats, err e
 			}
 			kind, nh.Typeflag, nh.Name, nh.Linkname = 'l', tar.TypeSymlink, p, hdr.Linkname
 			st.Usage += 512
+		case tar.TypeFifo:
+			st.Fifos++
+			continue
 		case tar.TypeLink:
 			target, err := cleanTarName(hdr.Linkname)
 			if err != nil {
@@ -322,6 +327,9 @@ func (e *Engine) ImportWorkTar(ctx context.Context, in ImportWorkTar) (Dock, err
 	st, err := sanitizeWorkTar(src, clean, cmp.Or(in.MaxBytes, DefaultMaxRawBytes))
 	if err != nil {
 		return Dock{}, err
+	}
+	if st.Fifos > 0 {
+		e.logf("note: skipped %d named pipe(s) in the work directory", st.Fifos)
 	}
 	limit, byFree := e.gvImportLimit(ctx, st.Usage)
 	if byFree && limit < st.Usage {
