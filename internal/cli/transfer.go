@@ -275,7 +275,9 @@ type donePart struct {
 }
 
 func (a *App) cmdPush(ctx context.Context, args []string) error {
-	c := a.flags("push", "push <dock> --to <context> [--name N] [--workspace ID] [--stop] [--rm]")
+	c := a.flags("push", "push <dock> --to <context> [--name N] [--workspace ID] [--stop] [--rm] [--image X --disk 10gb (gVisor docks)]")
+	image := c.fs.String("image", "", "gVisor docks: Dockyard image the remote dock starts from (default "+local.DefaultImage+")")
+	disk := c.fs.String("disk", "", "gVisor docks: disk of the remote dock, e.g. 20gb (default: the dock's, else "+strconv.Itoa(local.DefaultDiskGiB)+" GiB)")
 	to := c.fs.String("to", "", "context to push to (a control plane, not local)")
 	name := c.fs.String("name", "", "name of the new remote dock (default: the local name)")
 	ws := c.fs.String("workspace", "", "workspace id (default: the context's, else your only workspace)")
@@ -308,6 +310,28 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 	if err != nil {
 		return localError(err)
 	}
+	var opt local.PushOpts
+	gv := rec.Runtime == local.RuntimeGVisor
+	switch {
+	case gv:
+		opt.Image = *image
+		if opt.Image == "" {
+			opt.Image = local.DefaultImage
+		}
+		if c.isSet("disk") {
+			if opt.DiskGiB, err = ParseDiskGiB(*disk); err != nil {
+				return usagef("--disk: %v", err)
+			}
+		}
+		// A gVisor dock has no disk image, so the remote dock starts from a Dockyard image;
+		// fail on an unknown one before anything is stopped or built.
+		if _, err := eng.ResolveImage(ctx, opt.Image); err != nil {
+			return localError(err)
+		}
+		fmt.Fprintf(a.Stderr, "note: only /home/user/work is pushed; packages and files outside it in this gVisor dock are not. The remote dock starts from %s with your work dir.\n", opt.Image)
+	case c.isSet("image") || c.isSet("disk"):
+		return usagef("--image and --disk apply to gVisor docks only; this dock's own disk is pushed")
+	}
 	tgt := &target{doer: cl, Workspace: defWS}
 	wsID, err := a.resolveWorkspace(ctx, tgt, *ws, *c.json)
 	if err != nil {
@@ -323,7 +347,7 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 		return localError(err)
 	}
 
-	flat, err := eng.Flatten(ctx, pos[0], dir, *stop)
+	flat, err := eng.FlattenWith(ctx, pos[0], dir, *stop, opt)
 	if err != nil {
 		return localError(err)
 	}
@@ -341,8 +365,8 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 	if remoteName == "" {
 		remoteName = rec.Name
 	}
-	body := map[string]any{"workspaceId": wsID, "image": rec.Image, "cpus": rec.CPUs, "memoryMiB": rec.MemoryMiB,
-		"diskGiB": rec.DiskGiB, "sizeBytes": size, "sha256": sum}
+	body := map[string]any{"workspaceId": wsID, "image": flat.Image, "cpus": rec.CPUs, "memoryMiB": rec.MemoryMiB,
+		"diskGiB": flat.DiskGiB, "sizeBytes": size, "sha256": sum}
 	if remoteName != "" {
 		body["name"] = remoteName
 	}

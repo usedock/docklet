@@ -105,6 +105,7 @@ jobs:
       - name: gvisor engine e2e
         env:
           DOCK_E2E_REQUIRE_GVISOR: "1"
+          DOCK_REQUIRE_E2FSPROGS: "1"
         run: go test -tags e2e -run TestE2ELocalGVisor -v -timeout 35m ./internal/local/
 
   # Boots real local docks with KVM from the pinned Dockyard release, through the dock CLI and the engine.

@@ -724,11 +724,6 @@ func (e *Engine) newGVisor(ctx context.Context, spec Spec, diskSet bool) (Dock, 
 	return e.view(ctx, rec), nil
 }
 
-// gvUnsupported is the error for verbs a gVisor dock cannot do.
-func gvUnsupported(verb string) error {
-	return errf("not_supported", "%s is not supported for gvisor docks (only /home/user/work persists; there is no disk image to copy)", verb)
-}
-
 // gvBranchRepo is the repository of the per-branch images made by docker commit.
 const gvBranchRepo = "dock-local-gvisor-branch"
 

@@ -43,13 +43,14 @@ type fakeDocker struct {
 	copyFailAt   int   // with copyErr, only the nth copy (1-based) fails; 0 means every copy
 	copies       int
 	drv          *fakeDriver
-	noNet        map[string]bool     // containers run with --network none
-	streams      [][]string          // docker exec stream calls
-	hostRules    map[string][]string // host block per chain: bridge, then DNS servers
-	hostErr      error               // the host-block install helper fails
-	hostWarn     string              // stderr of a successful host-block install
-	hostCheckErr error               // the host-block check helper cannot run
-	hostRmErr    error               // the host-block remove helper fails
+	noNet        map[string]bool                             // containers run with --network none
+	streams      [][]string                                  // docker exec stream calls
+	hostRules    map[string][]string                         // host block per chain: bridge, then DNS servers
+	hostErr      error                                       // the host-block install helper fails
+	hostWarn     string                                      // stderr of a successful host-block install
+	hostCheckErr error                                       // the host-block check helper cannot run
+	hostRmErr    error                                       // the host-block remove helper fails
+	pushHelper   func(args []string) (string, string, error) // answers the push disk helpers (see gvtransfer_push_test.go)
 }
 
 func newFakeDocker() *fakeDocker {
@@ -106,6 +107,10 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 	case "run":
 		if i := slices.Index(args, "--network"); i >= 0 && args[i+1] == "host" {
 			return f.hostHelper(args)
+		}
+		if slices.Contains(args, "--rm") && f.pushHelper != nil && slices.Contains(args, "--cap-drop") {
+			// The push helpers (list the work volume, build the disk).
+			return f.pushHelper(args)
 		}
 		if slices.Contains(args, "--rm") {
 			// The work-volume copy helper.
@@ -274,6 +279,12 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 		delete(f.bridges, last)
 		return "", "", nil
 	case "volume":
+		if args[1] == "inspect" {
+			if !f.volumes[last] {
+				return "", "Error response from daemon: get " + last + ": no such volume", gone
+			}
+			return "[]", "", nil
+		}
 		delete(f.volumes, last)
 		return "", "", nil
 	case "logs":
@@ -546,13 +557,6 @@ func TestGVisorUnsupportedVerbsAndOptions(t *testing.T) {
 	}
 	if _, err := e.New(ctx, Spec{Name: "gv", Runtime: RuntimeGVisor}); err != nil {
 		t.Fatal(err)
-	}
-	rec, _ := e.Lookup("gv")
-	if err := e.CheckPushSpace(rec); codeOf(err) != "not_supported" {
-		t.Fatalf("push space: %v", err)
-	}
-	if _, err := e.Flatten(ctx, "gv", t.TempDir(), true); codeOf(err) != "not_supported" {
-		t.Fatalf("push: %v", err)
 	}
 }
 
