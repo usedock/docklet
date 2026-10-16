@@ -82,6 +82,8 @@ func TestImportWorkHelperArgs(t *testing.T) {
 		" --runtime=" + rec.gvRuntime() + " ", " --network none ", " --user 0:0 ", " --cap-drop ALL ",
 		" --cap-add CHOWN ", " --cap-add DAC_OVERRIDE ", " --cap-add FOWNER ", " no-new-privileges ",
 		" " + gvVolume(rec.ID) + ":/work ", " --entrypoint sh ",
+		// The untrusted disk can only write to the work volume, and a failed import can remove the helper.
+		" --read-only ", " --name " + gvImporter(rec.ID) + " ",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("helper args lack %q: %v", want, a)
@@ -194,6 +196,7 @@ func TestImportWorkFailureLeavesNothing(t *testing.T) {
 		"debugfs bad magic": func(d *importDocker) {
 			d.stderr = gvDebugfsPrefix + "debugfs: Bad magic number in super-block while trying to open /x/disk.raw\n"
 		},
+		"cancelled": func(d *importDocker) { d.err = context.Canceled },
 	}
 	for name, setup := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -218,14 +221,21 @@ func TestImportWorkFailureLeavesNothing(t *testing.T) {
 					t.Fatalf("the dock directory must be removed: %s", en.Name())
 				}
 			}
-			var rm bool
-			for _, c := range d.fakeDocker.calls {
+			// The helper container goes first: a cancelled docker run leaves it running on the volume.
+			helperRm, volRm := -1, -1
+			for i, c := range d.fakeDocker.calls {
+				if c[0] == "rm" && slices.Contains(c, "-f") && strings.HasSuffix(c[len(c)-1], "-import") && helperRm < 0 {
+					helperRm = i
+				}
 				if c[0] == "volume" && c[1] == "rm" && strings.HasSuffix(c[len(c)-1], "-work") {
-					rm = true
+					volRm = i
 				}
 			}
-			if !rm {
+			if volRm < 0 {
 				t.Fatal("docker volume rm was not called")
+			}
+			if helperRm < 0 || helperRm > volRm {
+				t.Fatalf("docker rm -f of the import helper must come before the volume rm: %v", d.fakeDocker.calls)
 			}
 		})
 	}
@@ -295,7 +305,8 @@ func TestPullRuntime(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			e, drv, _ := newTestEngine(t)
+			e, _ := newGVisorEngine(t)
+			drv := e.Driver.(*fakeDriver)
 			drv.preflightErr = c.pre
 			got, err := e.PullRuntime(ctx, c.flag, c.env)
 			if c.code == "" {
@@ -311,5 +322,23 @@ func TestPullRuntime(t *testing.T) {
 				t.Fatalf("hint=%v: %v", has, err)
 			}
 		})
+	}
+}
+
+func TestPullRuntimeGVisorPreflight(t *testing.T) {
+	ctx := context.Background()
+	e, _ := newGVisorEngine(t)
+	if got, err := e.PullRuntime(ctx, RuntimeGVisor, ""); err != nil || got != RuntimeGVisor {
+		t.Fatalf("got %q %v", got, err)
+	}
+	// gVisor that cannot run here fails before the export, not after it.
+	e.GVisor.GOOS = "darwin"
+	if _, err := e.PullRuntime(ctx, "", RuntimeGVisor); ErrCode(err) != "unsupported_os" {
+		t.Fatalf("want unsupported_os, got %v", err)
+	}
+	e.GVisor.GOOS = "linux"
+	e.GVisor.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	if _, err := e.PullRuntime(ctx, RuntimeGVisor, ""); ErrCode(err) != "docker_not_found" {
+		t.Fatalf("want docker_not_found, got %v", err)
 	}
 }

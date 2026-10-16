@@ -56,12 +56,17 @@ find ` + gvWorkSrc + ` -type l -user 0 -exec chown -h 1001:1001 {} +
 // moves and chowns files it does not own.
 var gvImportCaps = []string{"CHOWN", "DAC_OVERRIDE", "FOWNER"}
 
-// gvImportArgs is the docker run of the import helper for a dock on volume vol.
-func gvImportArgs(runtime, image, vol, disk, stage string) []string {
-	return diskHelperArgs(runtime, image, gvImportCaps, []diskMount{
+// gvImporter is the container name of the import helper of dock id, so a failed import can remove it.
+func gvImporter(id string) string { return "dock-local-" + id + "-import" }
+
+// gvImportArgs is the docker run of the import helper for dock id. Its rootfs is read-only, so
+// the only thing an untrusted disk can write to is the new dock's own work volume.
+func gvImportArgs(runtime, image, id, disk, stage string) []string {
+	a := diskHelperArgs(runtime, image, gvImportCaps, []diskMount{
 		{Source: disk, Target: gvDiskPath, ReadOnly: true},
-		{Source: vol, Target: gvWorkSrc},
+		{Source: gvVolume(id), Target: gvWorkSrc},
 	}, gvImportScript, stage)
+	return append([]string{a[0], "--name", gvImporter(id), "--read-only"}, a[1:]...)
 }
 
 // debugfsRdumpErrors returns the debugfs error lines the import helper relayed on stderr. Unlike
@@ -114,13 +119,15 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 	g := e.gvisor()
 	fail := func(err error) (Dock, error) {
 		bg := context.WithoutCancel(ctx)
+		// A cancelled docker run leaves its container running, and it would hold the volume.
+		_, _, _ = g.docker(bg, nil, "rm", "-f", gvImporter(rec.ID))
 		_ = g.removeVolume(bg, rec.ID)
 		_ = e.dropRecord(rec.ID)
 		_ = e.removeFiles(rec.ID)
 		return Dock{}, err
 	}
 	e.logf("importing the work directory into %s", rec.ID)
-	stdout, stderr, err := g.docker(ctx, nil, gvImportArgs(rec.gvRuntime(), image, gvVolume(rec.ID), disk, NewID())...)
+	stdout, stderr, err := g.docker(ctx, nil, gvImportArgs(rec.gvRuntime(), image, rec.ID, disk, NewID())...)
 	if err != nil {
 		return fail(dockerFailure("import_failed", "copy the work directory out of the disk", err, lastLines(stderr, 20)))
 	}
@@ -137,8 +144,8 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 }
 
 // PullRuntime picks the runtime a pull imports into: the flag, else the env value
-// (DOCK_LOCAL_RUNTIME), else qemu. A qemu pull whose hypervisor is unusable fails before the
-// export with a hint to use gVisor.
+// (DOCK_LOCAL_RUNTIME), else qemu, and runs that runtime's preflight so the pull fails before
+// the export. A qemu pull whose hypervisor is unusable gets a hint to use gVisor.
 func (e *Engine) PullRuntime(ctx context.Context, flag, env string) (string, error) {
 	rt := flag
 	if rt == "" {
@@ -149,6 +156,9 @@ func (e *Engine) PullRuntime(ctx context.Context, flag, env string) (string, err
 	}
 	switch rt {
 	case RuntimeGVisor:
+		if err := e.gvisor().Preflight(ctx); err != nil {
+			return "", err
+		}
 		return rt, nil
 	case RuntimeQEMU:
 		if err := e.Driver.Preflight(ctx); err != nil {
