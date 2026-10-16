@@ -155,7 +155,10 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 		"-device", "virtio-rng-pci",
 	)
 	if l.ImportDrive != "" {
-		args = append(args, "-drive", "file="+strings.ReplaceAll(l.ImportDrive, ",", ",,")+",if=virtio,format=raw,readonly=on,serial="+ImportDriveSerial)
+		// An explicit device: -drive's serial= goes to the raw format driver, which refuses it. The
+		// device is created after the root disk's, so the root disk stays vda.
+		args = append(args, "-drive", "file="+strings.ReplaceAll(l.ImportDrive, ",", ",,")+",if=none,id=dockimport,format=raw,readonly=on",
+			"-device", "virtio-blk-pci,drive=dockimport,serial="+ImportDriveSerial)
 	}
 	return args
 }
