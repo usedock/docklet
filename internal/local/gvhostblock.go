@@ -136,7 +136,7 @@ func (g *GVisor) installHostBlock(ctx context.Context, id string, nameservers []
 // checkHostBlock reports whether the dock's IPv4 jump and chain are still on the host. A helper
 // that cannot run (Docker down, image missing) is an error, not a missing rule.
 func (g *GVisor) checkHostBlock(ctx context.Context, id string) (bool, error) {
-	image, err := g.EnsureImage(ctx, nil)
+	image, err := g.checkImage(ctx, id)
 	if err != nil {
 		return false, err
 	}
@@ -148,6 +148,21 @@ func (g *GVisor) checkHostBlock(ctx context.Context, id string) (bool, error) {
 		return false, nil
 	}
 	return false, dockerFailure("doctor_failed", "check the host block "+gvChain(id), err, stderr)
+}
+
+// checkImage is the helper image for the check, never built (doctor must not run a docker build):
+// the current dock image when present, else the image the dock's container runs.
+func (g *GVisor) checkImage(ctx context.Context, id string) (string, error) {
+	if _, tag, err := gvBuildContext(); err == nil {
+		if _, _, err := g.docker(ctx, nil, "image", "inspect", tag); err == nil {
+			return tag, nil
+		}
+	}
+	out, stderr, err := g.docker(ctx, nil, "inspect", "--format", "{{.Image}}", gvContainer(id))
+	if img := strings.TrimSpace(out); err == nil && img != "" {
+		return img, nil
+	}
+	return "", dockerFailure("doctor_failed", "find an image for the host block check of "+gvContainer(id), err, stderr)
 }
 
 // removeHostBlock deletes the dock's rules; rules that are already gone are fine.

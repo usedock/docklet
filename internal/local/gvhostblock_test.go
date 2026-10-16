@@ -508,6 +508,31 @@ func TestCheckHostBlock(t *testing.T) {
 	if ok, err := g.checkHostBlock(ctx, d.ID); ok || err != nil {
 		t.Fatalf("missing must be (false, nil): %v %v", ok, err)
 	}
+	// The current image is gone (a newer dock has a new image tag): the check never builds and
+	// runs the helper with the image the dock's container runs.
+	_, tag, err := gvBuildContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd.mu.Lock()
+	delete(fd.images, tag)
+	builds := fd.builds
+	fd.mu.Unlock()
+	if ok, err := g.checkHostBlock(ctx, d.ID); ok || err != nil {
+		t.Fatalf("missing without the current image: %v %v", ok, err)
+	}
+	fd.mu.Lock()
+	rebuilt := fd.builds != builds
+	fd.mu.Unlock()
+	if rebuilt {
+		t.Fatal("the check must not build the image")
+	}
+	fd.mu.Lock()
+	last := fd.calls[len(fd.calls)-1]
+	fd.mu.Unlock()
+	if !slices.Contains(last, "sha256:fakecontainerimage") || !slices.Contains(last, "check") {
+		t.Fatalf("the check must run with the container's image: %v", last)
+	}
 	fd.mu.Lock()
 	fd.hostCheckErr = errors.New("exit status 125")
 	fd.mu.Unlock()

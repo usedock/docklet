@@ -146,7 +146,7 @@ func (e *Engine) gvHostBlockChecks(ctx context.Context) []Check {
 			c.Optional = true
 			c.Detail = "cannot verify the host firewall rule: " + err.Error()
 		case !ok:
-			c.Detail = "the firewall rule that blocks this dock from the machine's services is gone (a firewall reload or flush removed it)"
+			c.Detail = "the firewall rule that blocks this dock from the machine's services is not installed (a firewall reload or flush removed it, or the dock was started with " + gvHostBlockEnv + "=1 or by an older dock)"
 			c.Fix = "dock stop " + r.Name + " && dock resume " + r.Name
 		default:
 			c.OK = true

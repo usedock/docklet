@@ -170,6 +170,9 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			return "false\n", "Error: No such container", gone
 		}
 		running := !f.stopped[last] && !f.exitOnRun
+		if strings.Contains(strings.Join(args, " "), "{{.Image}}") {
+			return "sha256:fakecontainerimage\n", "", nil
+		}
 		if strings.Contains(strings.Join(args, " "), "State.Status") {
 			if running {
 				return "running\n", "", nil
