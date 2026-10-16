@@ -138,6 +138,7 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 	if l.Network == "off" {
 		netdev += ",restrict=on"
 	}
+	disk := strings.ReplaceAll(l.Disk, ",", ",,")
 	cmdline := "console=" + console + " root=/dev/vda rw rootfstype=ext4 rootwait"
 	args = append(args,
 		"-smp", strconv.Itoa(l.CPUs),
@@ -149,18 +150,23 @@ func BuildArgv(l LaunchSpec, goarch, accel string) []string {
 		"-initrd", l.Initrd,
 		"-append", cmdline,
 		"-fw_cfg", "name="+FWCfgName+",file="+strings.ReplaceAll(l.ConfigFile, ",", ",,"),
-		"-drive", "file="+strings.ReplaceAll(l.Disk, ",", ",,")+",if=virtio,format=qcow2",
 		"-netdev", netdev,
 		"-device", "virtio-net-pci,netdev=n0",
 		"-device", "virtio-rng-pci",
 	)
-	if l.ImportDrive != "" {
-		// An explicit device: -drive's serial= goes to the raw format driver, which refuses it. The
-		// device is created after the root disk's, so the root disk stays vda.
-		args = append(args, "-drive", "file="+strings.ReplaceAll(l.ImportDrive, ",", ",,")+",if=none,id=dockimport,format=raw,readonly=on",
-			"-device", "virtio-blk-pci,drive=dockimport,serial="+ImportDriveSerial)
+	if l.ImportDrive == "" {
+		args = append(args, "-drive", "file="+disk+",if=virtio,format=qcow2")
+		return args
 	}
-	return args
+	// The import boot makes both disks explicit devices, root first: a "-drive if=virtio" device
+	// is created after every explicit -device, which would make the import drive vda and leave
+	// root=/dev/vda without its disk. -drive's serial= goes to the raw format driver, which
+	// refuses it, so the serial is a device property.
+	return append(args,
+		"-drive", "file="+disk+",if=none,id=dockroot,format=qcow2",
+		"-device", "virtio-blk-pci,drive=dockroot",
+		"-drive", "file="+strings.ReplaceAll(l.ImportDrive, ",", ",,")+",if=none,id=dockimport,format=raw,readonly=on",
+		"-device", "virtio-blk-pci,drive=dockimport,serial="+ImportDriveSerial)
 }
 
 // Accelerator picks the hardware accelerator for goos. It never falls back to software
