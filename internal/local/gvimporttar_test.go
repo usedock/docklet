@@ -186,10 +186,17 @@ func TestSanitizeWorkTarRefusesWhatEscapesOrIsNotAFile(t *testing.T) {
 		"hard link to a symlink":      {tdir("./"), tsym("./s", "/etc/passwd"), thard("./h", "./s")},
 		"hard link to a directory":    {tdir("./"), tdir("./d"), thard("./h", "./d")},
 		"hard link through a symlink": {tdir("./"), tfile("./f", "x"), tsym("./s", "/tmp"), thard("./s/h", "./f")},
-		"character device":            {tdir("./"), tspecial("./null", tar.TypeChar)},
-		"block device":                {tdir("./"), tspecial("./sda", tar.TypeBlock)},
-		"file named dot":              {tfile(".", "x")},
-		"empty symlink target":        {tsym("./s", "")},
+		// Skipped special files still own their path.
+		"below a skipped fifo":          {tdir("./"), tspecial("./p", tar.TypeFifo), tfile("./p/x", "x")},
+		"dir below a skipped device":    {tdir("./"), tspecial("./n", tar.TypeChar), tdir("./n/sub")},
+		"skipped fifo replaced by file": {tdir("./"), tspecial("./p", tar.TypeFifo), tfile("./p", "x")},
+		"hard link to a skipped fifo":   {tdir("./"), tspecial("./p", tar.TypeFifo), thard("./h", "./p")},
+		"fifo below a symlink":          {tdir("./"), tsym("./a", "/etc"), tspecial("./a/p", tar.TypeFifo)},
+		"fifo with a dotdot":            {tdir("./"), tspecial("../p", tar.TypeFifo)},
+		"fifo named dot":                {tspecial(".", tar.TypeFifo)},
+		"unknown type":                  {tdir("./"), tspecial("./x", 'p')},
+		"file named dot":                {tfile(".", "x")},
+		"empty symlink target":          {tsym("./s", "")},
 	}
 	for name, ents := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -409,15 +416,27 @@ func TestPathTreeHashesKeepNamesApart(t *testing.T) {
 	}
 }
 
-func TestSanitizeWorkTarSkipsFifos(t *testing.T) {
-	// GNU tar on the fleet host archives a named pipe in the work directory; it is left out.
-	src := writeTar(t, tdir("./"), tspecial("./pipe", tar.TypeFifo), tfile("./f", "x"), tspecial("./d/pipe", tar.TypeFifo), tfile("./pipe", "y"))
+func TestSanitizeWorkTarSkipsSpecialFiles(t *testing.T) {
+	// GNU tar on the fleet host archives named pipes and device nodes; they are left out.
+	ents := []tent{tdir("./"), tspecial("./pipe", tar.TypeFifo), tfile("./f", "x"), tspecial("./d/pipe", tar.TypeFifo),
+		tspecial("./null", tar.TypeChar), tspecial("./sda", tar.TypeBlock), tspecial("./pipe", tar.TypeFifo)}
+	for i := 0; i < 4; i++ {
+		ents = append(ents, tspecial("./d/p"+string(rune('0'+i)), tar.TypeFifo))
+	}
+	src := writeTar(t, ents...)
 	dst := filepath.Join(t.TempDir(), "c.tar")
 	st, err := sanitizeWorkTar(src, dst, 1<<20)
-	if err != nil || st.Fifos != 2 {
+	if err != nil || st.Skipped != 9 || !slices.Equal(st.SkippedNames, []string{"pipe", "d/pipe", "null", "sda", "pipe"}) {
 		t.Fatalf("stats %+v err %v", st, err)
 	}
-	if names, _, _ := readTar(t, dst); !slices.Equal(names, []string{"./", "f", "pipe"}) {
+	if names, _, _ := readTar(t, dst); !slices.Equal(names, []string{"./", "f"}) {
 		t.Fatalf("names %v", names)
+	}
+	want := `skipped 9 special files (named pipes and device nodes are not copied): "/home/user/work/pipe", "/home/user/work/d/pipe", "/home/user/work/null", "/home/user/work/sda", "/home/user/work/pipe" and 4 more`
+	if w := skippedWarning(st); w != want {
+		t.Fatalf("warning %q", w)
+	}
+	if w := skippedWarning(workTarStats{}); w != "" {
+		t.Fatalf("no skips, no warning: %q", w)
 	}
 }

@@ -61,7 +61,7 @@ func TestE2ELocalGVisorPullWorkTar(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(src, "lost+found"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// GNU tar archives a named pipe; the import leaves it out instead of refusing the dock.
+	// GNU tar archives a named pipe; the import leaves it out with a warning instead of refusing.
 	if out, err := exec.Command("mkfifo", filepath.Join(src, "pipe")).CombinedOutput(); err != nil {
 		t.Fatalf("mkfifo: %v %s", err, out)
 	}
@@ -71,9 +71,15 @@ func TestE2ELocalGVisorPullWorkTar(t *testing.T) {
 		t.Fatalf("tar: %v\n%s", err, out)
 	}
 
+	var progress bytes.Buffer
+	e.Progress = &progress
 	d, err := e.ImportWorkTar(ctx, ImportWorkTar{Name: "e2eworktar", TarPath: tarPath, CPUs: 1, MemoryMiB: 512})
+	e.Progress = nil
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(progress.String(), `warning: skipped 1 special files (named pipes and device nodes are not copied): "/home/user/work/pipe"`) {
+		t.Fatalf("progress %q", progress.String())
 	}
 	t.Cleanup(func() { _ = e.Remove(context.Background(), d.ID) })
 	if d.State != "archived" || d.Runtime != RuntimeGVisor {
@@ -118,7 +124,8 @@ func TestE2ELocalGVisorPullWorkTar(t *testing.T) {
 }
 
 // TestE2ELocalGVisorPullWorkTarCraftedArchives refuses archives that try to leave the work
-// directory, write through a symlink, link to an outside file or carry device nodes, and
+// directory, write through a symlink or below a skipped fifo, link to an outside file or carry
+// an unknown entry type, and
 // leaves no dock and no volume behind.
 func TestE2ELocalGVisorPullWorkTarCraftedArchives(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
@@ -131,8 +138,8 @@ func TestE2ELocalGVisorPullWorkTarCraftedArchives(t *testing.T) {
 		"symlink dir":    {tdir("./"), tsym("./a", "/tmp"), tdir("./a/sub")},
 		"hard link out":  {tdir("./"), thard("./h", "/etc/passwd")},
 		"hard link dots": {tdir("./"), thard("./h", "../../etc/passwd")},
-		"char device":    {tdir("./"), tspecial("./null", tar.TypeChar)},
-		"block device":   {tdir("./"), tspecial("./sda", tar.TypeBlock)},
+		"below a fifo":   {tdir("./"), tspecial("./p", tar.TypeFifo), tfile("./p/x", "x")},
+		"unknown type":   {tdir("./"), tspecial("./x", 'p')},
 		"implied dir":    {tdir("./"), tfile("./a/b", "x"), tsym("./a", "/etc"), thard("./c", "./a/b")},
 	}
 	for name, ents := range cases {
@@ -201,5 +208,31 @@ func TestE2ELocalGVisorPullWorkTarHelperContainsAHostileTar(t *testing.T) {
 		if _, err := os.Stat(p); err == nil {
 			t.Fatalf("%s was written on the host", p)
 		}
+	}
+}
+
+// TestE2ELocalGVisorPullWorkTarSkipsDevices imports a tar with device nodes, which the host's
+// GNU tar would archive: they are left out of the dock and named in a warning.
+func TestE2ELocalGVisorPullWorkTarSkipsDevices(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	e := gvPullEngine(t, ctx)
+	var progress bytes.Buffer
+	e.Progress = &progress
+	src := writeTar(t, tdir("./"), tspecial("./null", tar.TypeChar), tspecial("./sda", tar.TypeBlock), tspecial("./pipe", tar.TypeFifo), tfile("./keep.txt", "kept\n"))
+	d, err := e.ImportWorkTar(ctx, ImportWorkTar{Name: "e2edevices", TarPath: src})
+	e.Progress = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = e.Remove(context.Background(), d.ID) })
+	if !strings.Contains(progress.String(), "skipped 3 special files") {
+		t.Fatalf("progress %q", progress.String())
+	}
+	if _, err := e.Resume(ctx, "e2edevices"); err != nil {
+		t.Fatal(err)
+	}
+	if got := gvExec(t, ctx, e, "e2edevices", `cd /home/user/work && ls -A && cat keep.txt`); strings.TrimSpace(got) != "keep.txt\nkept" {
+		t.Fatalf("work directory %q", got)
 	}
 }

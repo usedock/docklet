@@ -150,9 +150,9 @@ func TestPullGVisorRemoteIntoQEMUFailsBeforeTheExport(t *testing.T) {
 
 func TestPullGVisorRemoteRejectsAHostileTar(t *testing.T) {
 	for name, tarball := range map[string]string{
-		"dotdot":   workTarOf(t, tar.Header{Name: "../evil", Mode: 0o644}),
-		"absolute": workTarOf(t, tar.Header{Name: "/etc/passwd", Mode: 0o644}),
-		"device":   workTarOf(t, tar.Header{Name: "./null", Typeflag: tar.TypeChar, Mode: 0o666}),
+		"dotdot":       workTarOf(t, tar.Header{Name: "../evil", Mode: 0o644}),
+		"absolute":     workTarOf(t, tar.Header{Name: "/etc/passwd", Mode: 0o644}),
+		"below a fifo": workTarOf(t, tar.Header{Name: "./p", Typeflag: tar.TypeFifo, Mode: 0o644}, tar.Header{Name: "./p/x", Mode: 0o644}),
 	} {
 		te, p, g := gvisorPullEnv(t)
 		gvisorRemote(t, p, tarball)
@@ -195,5 +195,17 @@ func TestPullGVisorRemoteWorkTarWithoutDataBytes(t *testing.T) {
 		if len(g.helpers) != 1 {
 			t.Fatalf("dataBytes %v: helpers %v stderr %q", v, g.helpers, te.errb)
 		}
+	}
+}
+
+func TestPullGVisorRemoteSkipsSpecialFilesWithAWarning(t *testing.T) {
+	te, p, g := gvisorPullEnv(t)
+	gvisorRemote(t, p, workTarOf(t, tar.Header{Name: "./pipe", Typeflag: tar.TypeFifo, Mode: 0o644},
+		tar.Header{Name: "./null", Typeflag: tar.TypeChar, Mode: 0o666}, tar.Header{Name: "./a.txt", Mode: 0o644}))
+	te.app.Engine.Progress = te.errb // as app.engine wires it to stderr
+	mustExit(t, te, 0, "pull", remoteID, "--from", "lab", "--name", "withpipe", "--runtime", "gvisor")
+	want := `warning: skipped 2 special files (named pipes and device nodes are not copied): "/home/user/work/pipe", "/home/user/work/null"`
+	if !strings.Contains(te.errb.String(), want) || len(g.helpers) != 1 {
+		t.Fatalf("stderr %q helpers %v", te.errb, g.helpers)
 	}
 }

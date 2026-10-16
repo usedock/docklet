@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"cmp"
 	"context"
+	"fmt"
 	"hash/maphash"
 	"io"
 	"os"
@@ -27,6 +28,8 @@ const (
 	gvTarOwner = 1001
 	// workTarMaxEntries bounds the entries of a work tar (and the memory used to check them).
 	workTarMaxEntries = 5_000_000
+	// workTarSkippedNames is how many skipped special files a warning names.
+	workTarSkippedNames = 5
 	// workTarBlock is the disk block size an entry is assumed to take.
 	workTarBlock = 4096
 )
@@ -34,8 +37,9 @@ const (
 // workTarStats describes a checked work tar.
 type workTarStats struct {
 	Entries int
-	// Fifos counts the named pipes left out (GNU tar archives them; they hold no data).
-	Fifos int
+	// Skipped counts the named pipes and device nodes left out; SkippedNames holds the first few.
+	Skipped      int
+	SkippedNames []string
 	// Declared is the sum of the sizes of all regular files.
 	Declared int64
 	// Usage estimates what the tree takes on disk (blocks, directories).
@@ -52,7 +56,8 @@ type pathTree struct {
 
 type pathKey struct{ parent, h1, h2 uint64 }
 
-// pathNode is a path's id (the root is 0) and kind: d directory, f file or hard link, l symlink.
+// pathNode is a path's id (the root is 0) and kind: d directory, f file or hard link, l symlink,
+// s a skipped special file (nothing may go below it either).
 type pathNode struct {
 	id   uint64
 	kind byte
@@ -140,7 +145,7 @@ func cleanTarName(name string) (string, error) {
 // sanitizeWorkTar reads the tar at src and writes a canonical copy to dst holding only what is
 // safe to unpack: directories, regular files, symlinks and hard links, with names that stay
 // inside the work directory, nothing written through a symlink and every owner set to the dock
-// user. Named pipes are left out. Anything else (device nodes, an absolute path, "..", a hard link to something
+// user. Named pipes and device nodes are left out (counted in st.Skipped). Anything else (an absolute path, "..", a hard link to something
 // that is not an earlier regular file, a path below a symlink or file) refuses the whole
 // archive. A tar whose regular files declare more than maxDeclared bytes is refused too.
 // Rewriting the headers means the unpacking tar never sees the original, so a parser
@@ -211,8 +216,17 @@ func sanitizeWorkTar(src, dst string, maxDeclared int64) (st workTarStats, err e
 			}
 			kind, nh.Typeflag, nh.Name, nh.Linkname = 'l', tar.TypeSymlink, p, hdr.Linkname
 			st.Usage += 512
-		case tar.TypeFifo:
-			st.Fifos++
+		case tar.TypeFifo, tar.TypeChar, tar.TypeBlock:
+			// GNU tar on the fleet host archives these; they hold no data and are not copied.
+			if p == "" {
+				return st, errf("invalid_archive", "the work archive has a special file named %q", hdr.Name)
+			}
+			if err := paths.add(p, 's'); err != nil {
+				return st, err
+			}
+			if st.Skipped++; len(st.SkippedNames) < workTarSkippedNames {
+				st.SkippedNames = append(st.SkippedNames, p)
+			}
 			continue
 		case tar.TypeLink:
 			target, err := cleanTarName(hdr.Linkname)
@@ -328,8 +342,8 @@ func (e *Engine) ImportWorkTar(ctx context.Context, in ImportWorkTar) (Dock, err
 	if err != nil {
 		return Dock{}, err
 	}
-	if st.Fifos > 0 {
-		e.logf("note: skipped %d named pipe(s) in the work directory", st.Fifos)
+	if w := skippedWarning(st); w != "" {
+		e.logf("warning: %s", w)
 	}
 	limit, byFree := e.gvImportLimit(ctx, st.Usage)
 	if byFree && limit < st.Usage {
@@ -366,4 +380,20 @@ func (e *Engine) ImportWorkTar(ctx context.Context, in ImportWorkTar) (Dock, err
 		return fail(errf("store_error", "%v", err))
 	}
 	return e.view(ctx, rec), nil
+}
+
+// skippedWarning describes the special files a work tar left out, or is "" when there were none.
+func skippedWarning(st workTarStats) string {
+	if st.Skipped == 0 {
+		return ""
+	}
+	names := make([]string, len(st.SkippedNames))
+	for i, n := range st.SkippedNames {
+		names[i] = strconv.Quote("/home/user/work/" + n)
+	}
+	w := fmt.Sprintf("skipped %d special files (named pipes and device nodes are not copied): %s", st.Skipped, strings.Join(names, ", "))
+	if more := st.Skipped - len(names); more > 0 {
+		w += fmt.Sprintf(" and %d more", more)
+	}
+	return w
 }
