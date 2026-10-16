@@ -8,7 +8,25 @@ permissions:
   contents: read
 
 jobs:
+  # Fails before anything is built or published when bootstrap's pinned default is not this tag.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: bootstrap pins this tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          pinned="$(sed -n 's/^DOCKLET_VERSION="${DOCKLET_VERSION:-\(v[^}]*\)}"$/\1/p' scripts/bootstrap-host.sh)"
+          if [ "$pinned" != "$TAG" ]; then
+            echo "::error file=scripts/bootstrap-host.sh::bump DOCKLET_VERSION in scripts/bootstrap-host.sh to ${TAG} before tagging (it is '${pinned:-unset}')"
+            exit 1
+          fi
+          echo "bootstrap-host.sh pins ${pinned}"
+
   build:
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

@@ -15,6 +15,59 @@ valid_version() {
   [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]
 }
 
+# semver_cmp <a> <b>: prints -1, 0 or 1 (a<b, a=b, a>b) by semver precedence; returns 2 if either is not a valid v<semver>.
+semver_cmp() {
+  valid_version "$1" && valid_version "$2" || return 2
+  local a="${1#v}" b="${2#v}" ca cb pa pb i x y
+  ca="${a%%-*}"; cb="${b%%-*}"
+  pa=""; pb=""
+  [ "$a" != "$ca" ] && pa="${a#*-}"
+  [ "$b" != "$cb" ] && pb="${b#*-}"
+  local -a na nb ia ib
+  IFS=. read -r -a na <<< "$ca"
+  IFS=. read -r -a nb <<< "$cb"
+  for i in 0 1 2; do
+    x=$((10#${na[i]})); y=$((10#${nb[i]}))
+    if [ "$x" -lt "$y" ]; then echo -1; return 0; fi
+    if [ "$x" -gt "$y" ]; then echo 1; return 0; fi
+  done
+  # Equal cores: a release outranks any pre-release of it.
+  if [ -z "$pa" ] && [ -z "$pb" ]; then echo 0; return 0; fi
+  if [ -z "$pa" ]; then echo 1; return 0; fi
+  if [ -z "$pb" ]; then echo -1; return 0; fi
+  IFS=. read -r -a ia <<< "$pa"
+  IFS=. read -r -a ib <<< "$pb"
+  for ((i = 0; i < ${#ia[@]} && i < ${#ib[@]}; i++)); do
+    x="${ia[i]}"; y="${ib[i]}"
+    [ "$x" = "$y" ] && continue
+    if [[ "$x" =~ ^[0-9]+$ ]] && [[ "$y" =~ ^[0-9]+$ ]]; then
+      if [ $((10#$x)) -lt $((10#$y)) ]; then echo -1; else echo 1; fi
+    elif [[ "$x" =~ ^[0-9]+$ ]]; then echo -1
+    elif [[ "$y" =~ ^[0-9]+$ ]]; then echo 1
+    elif [[ "$x" < "$y" ]]; then echo -1
+    else echo 1
+    fi
+    return 0
+  done
+  # A longer pre-release set outranks its prefix.
+  if [ "${#ia[@]}" -lt "${#ib[@]}" ]; then echo -1
+  elif [ "${#ia[@]}" -gt "${#ib[@]}" ]; then echo 1
+  else echo 0
+  fi
+}
+
+# release_install_decision <installed> <wanted> <allow_downgrade>: prints install, same or newer.
+# An empty or unparsable installed version (dev build, no binary) always installs, as does allow_downgrade=1.
+release_install_decision() {
+  local installed="$1" wanted="$2" allow="$3" c
+  if [ "$allow" = "1" ] || ! c="$(semver_cmp "$installed" "$wanted")"; then echo install; return 0; fi
+  case "$c" in
+    0) echo same ;;
+    1) echo newer ;;
+    *) echo install ;;
+  esac
+}
+
 # Prints the sha256 of a file.
 file_sha256() {
   sha256sum "$1" | awk '{print $1}'

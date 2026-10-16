@@ -412,8 +412,13 @@ sudo bash scripts/bootstrap-host.sh --fleet-url … --fleet-token …
 
 An old untracked `versions.env` in the docklet directory is unused and can be deleted.
 
-Bootstrap installs the release named by `DOCKLET_VERSION` (pinned in the script;
-override it to move a host to another release). To ship your own binary, set
+Bootstrap installs the release named by `DOCKLET_VERSION` (pinned in the script and
+bumped with every release; override it to move a host to another release). It never
+downgrades: if the installed docklet (`docklet --version`) is newer than
+`DOCKLET_VERSION`, bootstrap keeps it and logs why, and if it is the same version
+the download is skipped. Set `DOCKLET_ALLOW_DOWNGRADE=1` to install `DOCKLET_VERSION`
+anyway (downgrade or reinstall). An unreadable installed version (a dev build)
+is replaced. To ship your own binary, set
 `DOCKLET_BIN=/tmp/docklet`; that path is **not** verified and bootstrap warns. To
 build from the checkout for development, pass `--build-from-source`; that is also
 unverified.
