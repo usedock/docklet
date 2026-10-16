@@ -68,6 +68,36 @@ release_install_decision() {
   esac
 }
 
+# installed_release_version <bin>: prints its --version line, or nothing when absent or unreadable; never fails.
+installed_release_version() {
+  [ -x "$1" ] || return 0
+  timeout 10 "$1" --version 2>/dev/null | head -n1 || true
+}
+
+# install_release_docklet <dest> <version> <allow_downgrade> <workdir>: installs the verified release unless dest is the same or newer.
+install_release_docklet() {
+  local dest="$1" version="$2" allow="$3" dir="$4" arch asset installed
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) die "unsupported architecture: $(uname -m)" ;;
+  esac
+  installed="$(installed_release_version "$dest")"
+  case "$(release_install_decision "$installed" "$version" "$allow")" in
+    same)
+      log "docklet ${installed} is already installed; skipping the download (DOCKLET_ALLOW_DOWNGRADE=1 to reinstall)"
+      return 0 ;;
+    newer)
+      log "installed docklet ${installed} is newer than DOCKLET_VERSION ${version}; keeping it (DOCKLET_ALLOW_DOWNGRADE=1 to downgrade)"
+      return 0 ;;
+  esac
+  asset="docklet-linux-${arch}"
+  log "downloading and verifying docklet ${version} (${asset})"
+  fetch_release "$version" "$dir" "$asset"
+  install -D -m 0755 "${dir}/${asset}" "$dest"
+  log "installed ${dest} (${version}, signature verified)"
+}
+
 # Prints the sha256 of a file.
 file_sha256() {
   sha256sum "$1" | awk '{print $1}'

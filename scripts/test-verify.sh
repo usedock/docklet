@@ -185,6 +185,33 @@ expect_ok expect_decision garbage v0.3.8 0 install
 expect_ok expect_decision v0.4.0 v0.3.8 1 install
 expect_ok expect_decision v0.3.8 v0.3.8 1 install
 
+# installed_release_version: never fails under set -e, whatever the installed binary does.
+printf '#!/bin/sh\necho v0.4.0\n' > "$tmp/dl-newer"; chmod +x "$tmp/dl-newer"
+printf '#!/bin/sh\necho v0.3.8\n' > "$tmp/dl-same"; chmod +x "$tmp/dl-same"
+printf '#!/bin/sh\nexit 7\n' > "$tmp/dl-broken"; chmod +x "$tmp/dl-broken"
+printf '#!/bin/sh\necho dev\n' > "$tmp/dl-dev"; chmod +x "$tmp/dl-dev"
+reads_version() { [ "$(set -euo pipefail; installed_release_version "$1")" = "$2" ]; }
+expect_ok reads_version "$tmp/dl-newer" v0.4.0
+expect_ok reads_version "$tmp/dl-broken" ""
+expect_ok reads_version "$tmp/no-such-docklet" ""
+survives_broken() { bash -c 'set -euo pipefail; log() { :; }; die() { exit 1; }; . "$1"; v="$(installed_release_version "$2")"; [ -z "$v" ]' _ "${here}/lib-verify.sh" "$tmp/dl-broken"; }
+expect_ok survives_broken
+# install_release_docklet: same or newer returns before any download; older, unknown or forced fetches.
+fetches() {
+  local dest="$1" want="$2" allow="$3"
+  fetch_release() { echo fetched > "$tmp/fetched"; return 1; }
+  rm -f "$tmp/fetched"
+  install_release_docklet "$dest" "$want" "$allow" "$tmp" 2>/dev/null || true
+  [ -e "$tmp/fetched" ]
+}
+expect_refuse fetches "$tmp/dl-newer" v0.3.8 0
+expect_refuse fetches "$tmp/dl-same" v0.3.8 0
+expect_ok fetches "$tmp/dl-same" v0.3.9 0
+expect_ok fetches "$tmp/dl-dev" v0.3.8 0
+expect_ok fetches "$tmp/dl-broken" v0.3.8 0
+expect_ok fetches "$tmp/dl-newer" v0.3.8 1
+expect_ok fetches "$tmp/dl-same" v0.3.8 1
+
 # The pinned default must be a valid release tag.
 bootstrap_sh=${here}/bootstrap-host.sh
 default="$(sed -n 's/^DOCKLET_VERSION="\${DOCKLET_VERSION:-\(v[^}]*\)}"$/\1/p' "$bootstrap_sh")"

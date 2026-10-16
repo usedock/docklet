@@ -598,14 +598,8 @@ write_env_file() {
   log "wrote ${ENV_FILE} (0600)"
 }
 
-# Prints the installed docklet version, or nothing when absent or unreadable.
-installed_docklet_version() {
-  [ -x "$DOCKLET_DEST" ] || return 0
-  timeout 10 "$DOCKLET_DEST" --version 2>/dev/null | head -n1 || true
-}
-
 install_docklet_binary() {
-  local out asset arch installed
+  local out
   if [ -n "$PREBUILT_BIN" ]; then
     [ -f "$PREBUILT_BIN" ] || die "DOCKLET_BIN=${PREBUILT_BIN} not found"
     warn "installing DOCKLET_BIN without signature verification"
@@ -636,27 +630,9 @@ install_docklet_binary() {
     log "installed ${DOCKLET_DEST} (built from checkout)"
     return 0
   fi
-  case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) die "unsupported architecture: $(uname -m)" ;;
-  esac
-  installed="$(installed_docklet_version)"
-  case "$(release_install_decision "$installed" "$DOCKLET_VERSION" "$ALLOW_DOWNGRADE")" in
-    same)
-      log "docklet ${installed} is already installed; skipping the download (DOCKLET_ALLOW_DOWNGRADE=1 to reinstall)"
-      return 0 ;;
-    newer)
-      log "installed docklet ${installed} is newer than DOCKLET_VERSION ${DOCKLET_VERSION}; keeping it (DOCKLET_ALLOW_DOWNGRADE=1 to downgrade)"
-      return 0 ;;
-  esac
-  asset="docklet-linux-${arch}"
   out="$(mktemp -d)"
   TMP_FILES+=("$out")
-  log "downloading and verifying docklet ${DOCKLET_VERSION} (${asset})"
-  fetch_release "$DOCKLET_VERSION" "$out" "$asset"
-  install -D -m 0755 "${out}/${asset}" "$DOCKLET_DEST"
-  log "installed ${DOCKLET_DEST} (${DOCKLET_VERSION}, signature verified)"
+  install_release_docklet "$DOCKLET_DEST" "$DOCKLET_VERSION" "$ALLOW_DOWNGRADE" "$out"
 }
 
 install_unit() {

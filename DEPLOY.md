@@ -125,7 +125,8 @@ time to install an update, change a setting, or repair a host.
    secrets. A re-run on an enrolled host keeps its identity and credential.
 4. Writes `/etc/docklet/docklet.env` (mode `0600`) without the shared fleet token.
 5. Downloads the `DOCKLET_VERSION` release, verifies its checksum and cosign
-   signature, and installs it to `/usr/local/bin/docklet` (see Release verification).
+   signature, and installs it to `/usr/local/bin/docklet` (see Release verification),
+   unless the installed docklet is already that version or newer (see Upgrade a host).
 6. Builds the image its docks boot from, if absent:
    - `gvisor` → the OCI image `dock-gvisor:latest` from
      `scripts/Dockerfile.gvisor`, rebuilt when its guest agent, entrypoint, or
