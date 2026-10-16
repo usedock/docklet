@@ -182,7 +182,7 @@ func TestDebugfsScriptAgainstRealE2fsprogs(t *testing.T) {
 	}
 	mk("run.sh", "#!/bin/sh\necho hi\n", 0o755)
 	mk("suid", "x", 0o644)
-	if err := os.Chmod(filepath.Join(src, "suid"), 0o4755); err != nil {
+	if err := os.Chmod(filepath.Join(src, "suid"), os.ModeSetuid|0o755); err != nil {
 		t.Fatal(err)
 	}
 	mk("private", "secret\n", 0o600)
@@ -227,17 +227,14 @@ func TestDebugfsScriptAgainstRealE2fsprogs(t *testing.T) {
 	img := e.newBaseImage(t)
 	stderr := e.applyScript(t, img, src, script)
 
-	// The only error is the mkdir of the work dir that the Dockyard base already has.
-	var errLines []string
-	for _, l := range strings.Split(strings.TrimSpace(stderr), "\n") {
-		if l != "" && !strings.HasPrefix(l, "debugfs ") {
-			errLines = append(errLines, l)
-		}
+	// The only stderr is the banner and the mkdir of the work dir the base already has.
+	t.Logf("debugfs stderr:\n%s", stderr)
+	if errs := debugfsErrors(stderr); len(errs) != 0 {
+		t.Fatalf("debugfs errors %q\nscript:\n%s", errs, script)
 	}
-	if len(errLines) != 1 || !strings.Contains(errLines[0], "already exists") {
-		t.Fatalf("debugfs stderr: want only the work dir 'already exists', got %q\nscript:\n%s", errLines, script)
+	if !strings.Contains(stderr, "already exists") {
+		t.Fatalf("expected the existing work dir to be reported:\n%s", stderr)
 	}
-	t.Logf("debugfs stderr for the existing work dir: %q", errLines[0])
 
 	// Compare every listed entry with what the image now holds.
 	recs := bytes.Split(bytes.TrimSuffix(listing, []byte{0}), []byte{0})
@@ -305,27 +302,20 @@ func TestDebugfsScriptAgainstRealE2fsprogs(t *testing.T) {
 	}
 }
 
-// TestDebugfsCarriageReturnName checks what happens to a name with a carriage return:
-// debugfs -f cuts each script line at the first \r, so such names must be refused.
+// TestDebugfsCarriageReturnName shows why names with \r are refused: debugfs -f cuts each script
+// line at the first \r, so the command fails and the file is silently not copied.
 func TestDebugfsCarriageReturnName(t *testing.T) {
 	e := needE2fs(t)
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "cr\rname"), []byte("cr\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	listing := listTree(t, src, nil)
-	script, _, err := buildDebugfsScript(listing)
-	if err != nil {
-		t.Logf("refused: %v", err)
-		if ErrCode(err) != "push_unsupported_name" {
-			t.Fatalf("want push_unsupported_name, got %v", err)
-		}
-		return
+	if _, _, err := buildDebugfsScript(listTree(t, src, nil)); ErrCode(err) != "push_unsupported_name" {
+		t.Fatalf("want push_unsupported_name, got %v", err)
 	}
 	img := e.newBaseImage(t)
-	stderr := e.applyScript(t, img, src, script)
-	out, _ := runTool(t, e.debugfs, "-R", "ls -l "+debugfsQuote(gvWorkDest), img)
-	if !strings.Contains(out, "cr\rname") {
-		t.Fatalf("a name with \\r was accepted but not copied\nls:\n%q\nstderr:\n%s", out, stderr)
+	stderr := e.applyScript(t, img, src, "write "+debugfsQuote(src+"/cr\rname")+" "+debugfsQuote(gvWorkDest+"/cr\rname")+"\n")
+	if errs := debugfsErrors(stderr); len(errs) != 1 || !strings.Contains(errs[0], "Unbalanced quotes") {
+		t.Fatalf("debugfs errors %q", errs)
 	}
 }

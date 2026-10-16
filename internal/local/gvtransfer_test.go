@@ -92,6 +92,8 @@ func TestBuildDebugfsScriptRefusals(t *testing.T) {
 	for name, listing := range map[string]string{
 		"newline in name": rec("f", "644", "1001", "1001", "1.0", "1", "", "1:2", "1", "bad\nname"),
 		"newline in link": rec("l", "777", "1001", "1001", "1.0", "1", "x\ny", "1:2", "1", "l"),
+		"CR in name":      rec("f", "644", "1001", "1001", "1.0", "1", "", "1:2", "1", "bad\rname"),
+		"CR in link":      rec("l", "777", "1001", "1001", "1.0", "1", "x\ry", "1:2", "1", "l"),
 		"long name":       rec("f", "644", "1001", "1001", "1.0", "1", "", "1:2", "1", strings.Repeat("a", 9000)),
 	} {
 		_, _, err := buildDebugfsScript([]byte(listing))
@@ -156,5 +158,25 @@ func TestDiskHelperArgsShape(t *testing.T) {
 func TestGVDockerfileHasE2fsprogs(t *testing.T) {
 	if !strings.Contains(gvDockerfile, "e2fsprogs") {
 		t.Fatal("the gVisor image needs e2fsprogs for push and pull")
+	}
+}
+
+// The stderr below is what debugfs 1.47.0 printed in CI for a script on a base with /home/user/work.
+func TestDebugfsErrors(t *testing.T) {
+	ok := "debugfs 1.47.0 (5-Feb-2023)\n" +
+		"ext2fs_mkdir: Ext2 directory already exists while creating directory \"work\"\n" +
+		"mkdir: Ext2 directory already exists\n"
+	if errs := debugfsErrors(ok); len(errs) != 0 {
+		t.Fatalf("the existing work dir is not an error: %q", errs)
+	}
+	if errs := debugfsErrors(""); len(errs) != 0 {
+		t.Fatalf("empty: %q", errs)
+	}
+	bad := ok + "ext2fs_mkdir: Ext2 directory already exists while creating directory \"work\"\n" +
+		"mkdir: Ext2 directory already exists\n" +
+		"debugfs: Unbalanced quotes in command line\n"
+	errs := debugfsErrors(bad)
+	if len(errs) != 3 || errs[2] != "debugfs: Unbalanced quotes in command line" {
+		t.Fatalf("only the first already-exists pair is allowed: %q", errs)
 	}
 }

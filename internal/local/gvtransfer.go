@@ -3,6 +3,7 @@ package local
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,9 +41,10 @@ type diskMount struct {
 
 // diskHelperArgs is the docker run of a one-shot e2fsprogs helper: it runs under the given gVisor
 // runtime (the one the dock uses) with no network, as root in the sandbox, with every capability
-// dropped except caps and no privilege gain. caps are plain names such as "CHOWN"; debugfs on a
-// file needs none, a tool that changes ownership of mounted files needs CHOWN, DAC_OVERRIDE and
-// FOWNER. Mount the work volume read-only when the helper only reads it.
+// dropped except caps and no privilege gain. caps are plain names such as "CHOWN". Root with no
+// capabilities cannot read the dock user's private files, so reading the work volume needs
+// DAC_READ_SEARCH; changing ownership of mounted files needs CHOWN, DAC_OVERRIDE and FOWNER.
+// Mount the work volume read-only when the helper only reads it.
 func diskHelperArgs(runtime, image string, caps []string, mounts []diskMount, script string, args ...string) []string {
 	a := []string{"run", "--rm", "--runtime=" + runtime, "--network", "none", "--user", "0:0", "--cap-drop", "ALL"}
 	for _, c := range caps {
@@ -83,9 +85,10 @@ type gvEntry struct {
 // buildDebugfsScript turns a listing made with gvListArgs into a debugfs -f script that recreates
 // the tree under gvWorkDest, plus warnings for entries it skipped (devices, fifos, sockets).
 // Everything is created first and metadata is set last, children before parents, because adding
-// a child changes its parent's mtime. The "mkdir" of gvWorkDest itself fails with "already
-// exists" on the Dockyard base; debugfs carries on, so the caller must not treat that as fatal.
-// Names debugfs cannot express (newline, over-long lines) are refused with push_unsupported_name.
+// a child changes its parent's mtime. debugfs exits 0 even when a command fails, so the caller
+// checks stderr with debugfsErrors, which allows the "already exists" of the first mkdir (the
+// Dockyard base has gvWorkDest). Names debugfs cannot express (newline, carriage return,
+// over-long lines) are refused with push_unsupported_name.
 func buildDebugfsScript(listing []byte) (string, []string, error) {
 	parts := bytes.Split(listing, []byte{0})
 	if n := len(parts); n > 0 && len(parts[n-1]) == 0 {
@@ -105,8 +108,9 @@ func buildDebugfsScript(listing []byte) (string, []string, error) {
 		}
 		typ, path := f[0], f[9]
 		for _, s := range []string{path, f[6]} {
-			if strings.ContainsAny(s, "\n") {
-				return "", nil, errf("push_unsupported_name", "%q has a newline in its name or link target, which cannot be copied into the disk image; rename it first", path)
+			// debugfs -f reads a line up to \n, then cuts it at the first \r.
+			if strings.ContainsAny(s, "\n\r") {
+				return "", nil, errf("push_unsupported_name", "%q has a newline or carriage return in its name or link target, which cannot be copied into the disk image; rename it first", path)
 			}
 		}
 		if typ != "f" && typ != "d" && typ != "l" {
@@ -235,3 +239,26 @@ func displayPath(p string) string {
 	}
 	return gvWorkSrc + "/" + p
 }
+
+// debugfsErrors returns the error lines of a debugfs -f run of a buildDebugfsScript script. It
+// skips the version banner and one "already exists" pair from the first mkdir, of gvWorkDest.
+func debugfsErrors(stderr string) []string {
+	rootExists := []string{
+		`ext2fs_mkdir: Ext2 directory already exists while creating directory "` + gvWorkDest[strings.LastIndex(gvWorkDest, "/")+1:] + `"`,
+		"mkdir: Ext2 directory already exists",
+	}
+	var errs []string
+	for _, l := range strings.Split(stderr, "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case l == "" || debugfsBanner.MatchString(l):
+		case len(rootExists) > 0 && l == rootExists[0]:
+			rootExists = rootExists[1:]
+		default:
+			errs = append(errs, l)
+		}
+	}
+	return errs
+}
+
+var debugfsBanner = regexp.MustCompile(`^debugfs [0-9]+\.[0-9.]+ \(`)
