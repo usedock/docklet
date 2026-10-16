@@ -230,6 +230,47 @@ func (c *Coordinator) FreezeContainerState(ctx context.Context, dockID, statePat
 	return c.freezeFiles(ctx, dockID, genPath, snapshotID, kind, cpuFamily, parentID)
 }
 
+// FreezeContainerStateFull is FreezeContainerState for an export: the manifest also carries the
+// uploaded object's sha256 and byte length (state.tar.zst, compressed, as for a rootfs export),
+// DataBytes as the raw tar size, and Image as the dock's image name, so the generation can leave
+// this host and be verified wherever it lands. The local copy is dropped after upload.
+func (c *Coordinator) FreezeContainerStateFull(ctx context.Context, dockID, statePath, snapshotID, kind, cpuFamily, image string, parentID *string) (store.Manifest, error) {
+	genPath := filepath.Join(c.GensDir, snapshotID, "state.tar")
+	defer func() { _ = os.RemoveAll(filepath.Dir(genPath)) }()
+	if err := os.MkdirAll(filepath.Dir(genPath), 0o755); err != nil {
+		return store.Manifest{}, err
+	}
+	if err := os.Rename(statePath, genPath); err != nil {
+		raw, err := os.ReadFile(statePath)
+		if err != nil {
+			return store.Manifest{}, err
+		}
+		if err := os.WriteFile(genPath, raw, 0o644); err != nil {
+			return store.Manifest{}, err
+		}
+	}
+	entry, err := store.PutFileCompressed(ctx, c.Store, snapshotID, "state.tar", genPath, c.GensDir)
+	if err != nil {
+		return store.Manifest{}, err
+	}
+	manifest := store.Manifest{
+		SnapshotID: snapshotID,
+		DockID:     dockID,
+		ParentID:   parentID,
+		Kind:       kind,
+		CPUFamily:  cpuFamily,
+		Files:      []store.FileEntry{entry},
+		SHA256:     entry.SHA256,
+		SizeBytes:  entry.Size,
+		DataBytes:  entry.RawSize,
+		Image:      image,
+	}
+	if err := c.putManifest(ctx, manifest); err != nil {
+		return store.Manifest{}, err
+	}
+	return manifest, nil
+}
+
 // GenerationPath locates one artifact inside a downloaded generation.
 func (c *Coordinator) GenerationPath(snapshotID, name string) string {
 	return filepath.Join(c.GensDir, snapshotID, name)

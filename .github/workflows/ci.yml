@@ -107,6 +107,12 @@ jobs:
           DOCK_E2E_REQUIRE_GVISOR: "1"
           DOCK_REQUIRE_E2FSPROGS: "1"
         run: go test -tags e2e -run TestE2ELocalGVisor -v -timeout 35m ./internal/local/
+      - name: fleet work export e2e (runsc dock, host tar as root)
+        env:
+          DOCK_E2E_REQUIRE_GVISOR: "1"
+        run: |
+          go test -tags e2e -c -o "$RUNNER_TEMP/host.test" ./internal/host/
+          cd internal/host && sudo -E "$RUNNER_TEMP/host.test" -test.run TestE2EWorkExport -test.v -test.timeout 10m
 
   # Boots real local docks with KVM from the pinned Dockyard release, through the dock CLI and the engine.
   e2e-local:

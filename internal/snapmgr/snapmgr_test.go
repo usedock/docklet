@@ -427,6 +427,41 @@ func TestFreezeContainerStateKeepsWorkspaceState(t *testing.T) {
 	}
 }
 
+func TestFreezeContainerStateFullRecordsTheExportFields(t *testing.T) {
+	ctx := context.Background()
+	c := coordinator(t)
+	state := filepath.Join(t.TempDir(), "state.tar")
+	raw := bytes.Repeat([]byte("workspace-bytes"), 1000)
+	if err := os.WriteFile(state, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := c.FreezeContainerStateFull(ctx, "d1", state, "s9", "full", "GenuineIntel:142:10", "ubuntu-24.04", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := c.Store.Get(ctx, "s9", "state.tar.zst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	sum := sha256.Sum256(stored)
+	if manifest.SHA256 != hex.EncodeToString(sum[:]) || manifest.SizeBytes != int64(len(stored)) || manifest.DataBytes != int64(len(raw)) || manifest.Image != "ubuntu-24.04" {
+		t.Fatalf("manifest = %+v, stored %d bytes", manifest, len(stored))
+	}
+	if _, err := os.Stat(c.GenerationPath("s9", "state.tar")); err == nil {
+		t.Fatal("an export keeps no local copy")
+	}
+	// A restore still verifies and reads it back.
+	if _, err := c.PrepareResume(ctx, "s9"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(c.GenerationPath("s9", "state.tar"))
+	if !bytes.Equal(got, raw) {
+		t.Fatal("restored tar differs")
+	}
+}
+
 func TestPrune(t *testing.T) {
 	ctx := context.Background()
 	c := coordinator(t)

@@ -512,6 +512,10 @@ func TestSnapshotAnswerFailsClosedOnAnUnreadableManifest(t *testing.T) {
 	if resp, err := snapshotAnswer(ctx, d, "g1", 7, "fam", false); err != nil || resp.SHA256 != "" || resp.BaseImage != "" || resp.DataBytes != 0 {
 		t.Fatalf("a delta capture answers no checksum or image: %+v %v", resp, err)
 	}
+	// A work-tar capture on a gVisor host names no base but carries checksum, size and image.
+	if resp, err := snapshotAnswer(ctx, describer{"w1": {"", "tarsum", "ubuntu-24.04"}}, "w1", 9, "fam", true); err != nil || resp.BaseFingerprint != "" || resp.SHA256 != "tarsum" || resp.BaseImage != "ubuntu-24.04" || resp.SizeBytes != 9 {
+		t.Fatalf("work-tar answer = %+v, err = %v", resp, err)
+	}
 	for _, full := range []bool{false, true} {
 		if _, err := snapshotAnswer(ctx, d, "gone", 7, "fam", full); err == nil {
 			t.Fatalf("full=%v: an unreadable manifest must fail the capture, not answer empty fields", full)

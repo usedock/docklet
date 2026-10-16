@@ -439,7 +439,8 @@ func serveEgress(l net.Listener, h http.Handler, fatal func(format string, args 
 }
 
 // registerFeatures is what the host advertises at registration: egress-on-resume needs the egress
-// proxy, verified-imports a microvm host (uploaded disks are whole ext4 images).
+// proxy, verified-imports a microvm host (uploaded disks are whole ext4 images), work-export a
+// gVisor host (a dock's work dir is exported as a tar).
 func registerFeatures(egressProxy, microVM bool) []string {
 	var features []string
 	if egressProxy {
@@ -447,6 +448,8 @@ func registerFeatures(egressProxy, microVM bool) []string {
 	}
 	if microVM {
 		features = append(features, apiv1.FeatureVerifiedImports)
+	} else {
+		features = append(features, apiv1.FeatureWorkExport)
 	}
 	return features
 }

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	stdnet "net"
 	"os"
 	"path/filepath"
@@ -245,6 +246,9 @@ func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
 	if err != nil {
 		return ""
 	}
+	if h.diskOnly() {
+		thawInterruptedExport(h, dockID, jail)
+	}
 	token, workspace, allow := readExecAgent(jail)
 	live := &vm{res: res, tap: iface, guestIP: assigned[owner], pid: handle.Pid, running: true, fastToken: token, fastWorkspace: workspace}
 	if len(allow) > 0 {
@@ -258,6 +262,23 @@ func (h *Host) rescanOne(dockID string, assigned map[string]string) string {
 	h.vms[owner] = live
 	h.mu.Unlock()
 	return owner
+}
+
+// exportPausedMarker sits in a container dock's jail while a whole capture has it paused.
+const exportPausedMarker = "export-paused"
+
+// thawInterruptedExport resumes a container a work export froze before its docklet died, so an
+// adopted dock is never tracked as running while frozen. The marker stays until a thaw succeeds.
+func thawInterruptedExport(h *Host, dockID, jail string) {
+	marker := filepath.Join(jail, exportPausedMarker)
+	if _, err := os.Stat(marker); err != nil {
+		return
+	}
+	if err := h.cfg.Driver.Resume(context.Background(), h.handle(dockID)); err != nil {
+		log.Printf("dock %s: thaw after an interrupted export: %v", dockID, err)
+		return
+	}
+	_ = os.Remove(marker)
 }
 
 // claimSidecar names the runtime id a claimed pool slot serves, so a restart re-tracks it under that id.
@@ -776,11 +797,9 @@ func (h *Host) SnapshotCreate(ctx context.Context, dockID string, parentID *stri
 
 // SnapshotCreateFull is SnapshotCreate writing the whole rootfs.ext4.zst (never a delta) with its
 // sha256 and size in the manifest, so the generation can leave this host (dock pull).
-// Container docks keep only their workspace and cannot be captured whole.
+// A disk-only (gVisor) host keeps only the workspace, so its full capture is the work-dir tar
+// (state.tar.zst, see snapshotContainer) with the same manifest checksum fields.
 func (h *Host) SnapshotCreateFull(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter, memory bool) (snapshotID string, sizeBytes int64, cpuFamily string, err error) {
-	if h.diskOnly() {
-		return "", 0, "", errors.New("full snapshots need a microvm host")
-	}
 	return h.snapshotCreate(ctx, dockID, parentID, kind, resumeAfter, memory, true)
 }
 
@@ -794,7 +813,7 @@ func (h *Host) snapshotCreate(ctx context.Context, dockID string, parentID *stri
 	}
 	snapshotID = newID()
 	if h.diskOnly() {
-		return h.snapshotContainer(ctx, dockID, parentID, kind, resumeAfter, snapshotID)
+		return h.snapshotContainer(ctx, dockID, parentID, kind, resumeAfter, snapshotID, whole)
 	}
 	if err := h.cfg.Driver.Pause(ctx, h.handle(dockID)); err != nil {
 		// The VM is gone (crash, restart race) but its disk may remain: a
@@ -850,7 +869,20 @@ func (h *Host) snapshotCreate(ctx context.Context, dockID string, parentID *stri
 // agent writes to, and it is a host directory, so a capture is a single
 // host-side tar instead of a copy of the whole container filesystem. That is
 // what keeps a capture in the seconds range rather than minutes.
-func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter bool, snapshotID string) (string, int64, string, error) {
+//
+// A whole capture (dock pull, work-export) is the same tar written as state.tar.zst, with the
+// manifest's SHA256 and SizeBytes describing the uploaded (zstd) object, DataBytes the raw tar
+// size and Image the dock's image name. The container is paused around the tar so it is
+// consistent and resumed on every path; a stopped dock (no container) needs no pause.
+//
+// Tar layout, relied on by the CLI side (dock pull): the work dir is /home/user/work, a
+// per-dock ext4 volume. SaveState runs `tar -C <workdir> --exclude=./lost+found -cf ... .` on the
+// host, so every member path is "./"-prefixed (the "." root entry, then "./<name>"), there is no
+// wrapping root directory, and lost+found is excluded. All regular files, directories, symlinks,
+// hardlinks, modes and mtimes of the work dir are included, with the numeric owner the dock
+// created them with (uid/gid 1001, the unprivileged dock user); nothing outside the work dir
+// (no rootfs, no /home/user dotfiles) is. Extract it into an empty /home/user/work.
+func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *string, kind apiv1.SnapshotKind, resumeAfter bool, snapshotID string, whole bool) (string, int64, string, error) {
 	state, ok := h.cfg.Driver.(interface {
 		WorkDir(dockID string) (string, error)
 		SaveState(dir, dest string) error
@@ -871,10 +903,54 @@ func (h *Host) snapshotContainer(ctx context.Context, dockID string, parentID *s
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	stateTar := filepath.Join(tmp, "state.tar")
+	// A whole capture freezes the container for the tar and thaws it on every path (success,
+	// error, panic, cancelled ctx); the upload does not need the freeze, so it thaws right after.
+	// A failed thaw stays pending so the deferred one retries it; the marker lets Rescan thaw a
+	// container whose docklet died mid-tar.
+	paused := false
+	marker := filepath.Join(h.jailRoot(dockID), exportPausedMarker)
+	thaw := func() error {
+		if !paused {
+			return nil
+		}
+		if err := h.cfg.Driver.Resume(context.WithoutCancel(ctx), h.handle(dockID)); err != nil {
+			return err
+		}
+		paused = false
+		_ = os.Remove(marker)
+		return nil
+	}
+	if whole {
+		// Written before the pause so a crash right after it still leaves the marker.
+		_ = os.WriteFile(marker, nil, 0o644)
+		switch perr := h.cfg.Driver.Pause(ctx, h.handle(dockID)); {
+		case perr == nil:
+			paused = true
+		case errors.Is(perr, fc.ErrNoMicroVM):
+			// Stopped dock: nothing runs, the work disk is quiescent.
+			_ = os.Remove(marker)
+		default:
+			_ = os.Remove(marker)
+			return "", 0, "", perr
+		}
+		defer func() { _ = thaw() }()
+	}
 	if err := state.SaveState(dir, stateTar); err != nil {
 		return "", 0, "", err
 	}
-	manifest, err := h.cfg.Snaps.FreezeContainerState(ctx, dockID, stateTar, snapshotID, string(kind), h.cfg.Family, parentID)
+	// One retry here, another in the defer on the way out: a transient docker error must not
+	// leave the dock frozen.
+	if err := thaw(); err != nil {
+		if err := thaw(); err != nil && resumeAfter {
+			return "", 0, "", err
+		}
+	}
+	var manifest store.Manifest
+	if whole {
+		manifest, err = h.cfg.Snaps.FreezeContainerStateFull(ctx, dockID, stateTar, snapshotID, string(kind), h.cfg.Family, apiv1.DefaultImage, parentID)
+	} else {
+		manifest, err = h.cfg.Snaps.FreezeContainerState(ctx, dockID, stateTar, snapshotID, string(kind), h.cfg.Family, parentID)
+	}
 	if err != nil {
 		return "", 0, "", err
 	}
@@ -1485,28 +1561,19 @@ func (h *Host) freezeRootfs(ctx context.Context, whole bool, dockID, rootfs, sna
 	return h.cfg.Snaps.FreezeRootfs(ctx, dockID, rootfs, snapshotID, kind, h.cfg.Family, parentID)
 }
 
-// GenerationImage names the Dockyard image a microvm generation's disk derives from, "" for a
+// GenerationImage names the Dockyard image a generation derives from (a work-tar capture: the dock image), "" for a
 // host-built base.
 func (h *Host) GenerationImage(ctx context.Context, snapshotID string) (string, error) {
-	if h.diskOnly() {
-		return "", nil
-	}
 	return h.cfg.Snaps.GenerationImage(ctx, snapshotID)
 }
 
 // GenerationDataBytes is the decompressed data size a whole-image generation recorded, 0 for
 // deltas and generations that recorded none.
 func (h *Host) GenerationDataBytes(ctx context.Context, snapshotID string) (int64, error) {
-	if h.diskOnly() {
-		return 0, nil
-	}
 	return h.cfg.Snaps.GenerationDataBytes(ctx, snapshotID)
 }
 
 // GenerationSHA256 is the sha256 of a whole-image generation's stored object, "" for deltas.
 func (h *Host) GenerationSHA256(ctx context.Context, snapshotID string) (string, error) {
-	if h.diskOnly() {
-		return "", nil
-	}
 	return h.cfg.Snaps.GenerationSHA256(ctx, snapshotID)
 }
