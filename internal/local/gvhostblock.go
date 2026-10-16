@@ -16,11 +16,16 @@ import (
 // gvHostBlockEnv turns the block off (the dock then reaches host services, as before).
 const gvHostBlockEnv = "DOCK_GVISOR_ALLOW_HOST"
 
-// gvHostBlockScript runs in the helper as: sh -c script sh <install|remove> <chain> <bridge> [dns...].
+// gvHostBlockMissing is printed on stdout by the check mode when the rule is gone, so a missing
+// rule is told apart from a helper that could not run at all.
+const gvHostBlockMissing = "DOCK_HOST_BLOCK_MISSING"
+
+// gvHostBlockScript runs in the helper as: sh -c script sh <install|check|remove> <chain> <bridge> [dns...].
 // Install is idempotent (it rewrites the chain and adds the jump once). IPv4 is required; IPv6 is
 // best effort. Replies to connections the host opened (the published agent port, via docker-proxy
 // or DNAT) are conntrack ESTABLISHED and pass; anything the dock starts is dropped, except DNS
-// to the resolvers in the dock's resolv.conf.
+// to the resolvers in the dock's resolv.conf. Check exits 0 when the IPv4 jump and chain exist,
+// and 3 with the missing marker when either is gone (IPv6 is not required).
 const gvHostBlockScript = `set -u
 mode=$1; chain=$2; br=$3; shift 3
 install() {
@@ -44,6 +49,15 @@ if [ "$mode" = install ]; then
     if "$t" -w -S >/dev/null 2>&1; then install "$t" || echo "warning: no IPv6 rule ($t)" >&2; break; fi
   done
   exit 0
+fi
+if [ "$mode" = check ]; then
+  for t in iptables iptables-legacy; do
+    if "$t" -w -S >/dev/null 2>&1; then
+      if "$t" -w -C INPUT -i "$br" -j "$chain" 2>/dev/null && "$t" -w -S "$chain" >/dev/null 2>&1; then exit 0; fi
+      echo ` + gvHostBlockMissing + `; exit 3
+    fi
+  done
+  echo "no usable iptables" >&2; exit 1
 fi
 for t in iptables iptables-legacy ip6tables ip6tables-legacy; do
   while "$t" -w -D INPUT -i "$br" -j "$chain" 2>/dev/null; do :; done
@@ -117,6 +131,23 @@ func (g *GVisor) installHostBlock(ctx context.Context, id string, nameservers []
 		}
 	}
 	return warns, nil
+}
+
+// checkHostBlock reports whether the dock's IPv4 jump and chain are still on the host. A helper
+// that cannot run (Docker down, image missing) is an error, not a missing rule.
+func (g *GVisor) checkHostBlock(ctx context.Context, id string) (bool, error) {
+	image, err := g.EnsureImage(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	stdout, stderr, err := g.docker(ctx, nil, hostHelperArgs(image, gvHostBlockScript, "check", gvChain(id), gvBridge(id))...)
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(stdout, gvHostBlockMissing) {
+		return false, nil
+	}
+	return false, dockerFailure("doctor_failed", "check the host block "+gvChain(id), err, stderr)
 }
 
 // removeHostBlock deletes the dock's rules; rules that are already gone are fine.

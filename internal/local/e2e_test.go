@@ -719,6 +719,50 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 	}
 	portHead("e2ehb", "3001")
 
+	// A host firewall flush removes the rule silently; doctor reports it with the fix, and stop and
+	// resume restore it.
+	hostBlockRow := func() Check {
+		t.Helper()
+		for _, c := range e.Doctor(ctx) {
+			if c.Name == "host block e2ehb" {
+				return c
+			}
+		}
+		t.Fatal("doctor has no host block row for e2ehb")
+		return Check{}
+	}
+	if c := hostBlockRow(); !c.OK {
+		t.Fatalf("doctor must pass while the rule exists: %+v", c)
+	}
+	image, err := g.EnsureImage(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flush := "for t in iptables iptables-legacy ip6tables ip6tables-legacy; do while $t -w -D INPUT -i " + gvBridge(d.ID) +
+		" -j " + gvChain(d.ID) + " 2>/dev/null; do :; done; $t -w -F " + gvChain(d.ID) + " 2>/dev/null; $t -w -X " + gvChain(d.ID) + " 2>/dev/null; done; true"
+	if _, stderr, err := g.docker(ctx, nil, hostHelperArgs(image, flush)...); err != nil {
+		t.Fatalf("flush the host rule: %v %s", err, stderr)
+	}
+	if hasRules(d.ID) {
+		t.Fatalf("the flush left rules:\n%s", ruleList())
+	}
+	if c := hostBlockRow(); c.OK || c.Optional || c.Fix != "dock stop e2ehb && dock resume e2ehb" {
+		t.Fatalf("doctor must report the missing rule with the fix: %+v", c)
+	}
+	if _, err := e.Stop(ctx, "e2ehb", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Resume(ctx, "e2ehb"); err != nil {
+		t.Fatal(err)
+	}
+	if !hasRules(d.ID) {
+		t.Fatalf("resume must reinstall the rules:\n%s", ruleList())
+	}
+	if c := hostBlockRow(); !c.OK {
+		t.Fatalf("doctor must pass after the fix: %+v", c)
+	}
+	prepare("e2ehb")
+
 	// A branch has its own bridge and rules, and cannot reach the host nor its source's network.
 	bs, err := e.Branch(ctx, "e2ehb", 1, "e2ehb-branch", Spec{})
 	if err != nil || len(bs) != 1 {
