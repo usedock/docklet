@@ -128,6 +128,7 @@ func TestE2ELocalGVisorPullWorkTarCraftedArchives(t *testing.T) {
 		"hard link dots": {tdir("./"), thard("./h", "../../etc/passwd")},
 		"device":         {tdir("./"), tspecial("./null", 'c')},
 		"fifo":           {tdir("./"), tspecial("./pipe", 'p')},
+		"implied dir":    {tdir("./"), tfile("./a/b", "x"), tsym("./a", "/etc"), thard("./c", "./a/b")},
 	}
 	for name, ents := range cases {
 		t.Run(name, func(t *testing.T) {
