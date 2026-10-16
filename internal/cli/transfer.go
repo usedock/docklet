@@ -843,7 +843,7 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 		_ = os.Remove(part)
 		if !gv {
 			d, err := eng.ImportWorkTarQEMU(ctx, local.WorkTarQEMU{Name: localName, Image: baseImage, TarPath: tarPath, CPUs: info.CPUs,
-				MemoryMiB: info.MemoryMiB, DiskGiB: max(info.DiskGiB, local.DefaultDiskGiB), MaxBytes: limit})
+				MemoryMiB: info.MemoryMiB, DiskGiB: info.DiskGiB, MaxBytes: limit})
 			if err != nil {
 				return localError(err)
 			}

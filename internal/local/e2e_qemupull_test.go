@@ -88,7 +88,18 @@ func TestE2ELocalDockImportWorkTar(t *testing.T) {
 	if d.State != "archived" {
 		t.Fatalf("an imported dock is stopped: %+v", d)
 	}
+	// The disk is sized from the real base qcow2 that qemu-img wrote.
+	cached, err := e.EnsureImage(ctx, DefaultImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := qcow2VirtualSize(cached.Base); err != nil || n < 1<<30 {
+		t.Fatalf("base virtual size %d %v", n, err)
+	}
 	rec := mustLookup(t, e, "e2eworktar")
+	if want := qemuImportDiskGiB(cached.Base, 6, 0); rec.DiskGiB != want {
+		t.Fatalf("disk %d GiB, want %d", rec.DiskGiB, want)
+	}
 	if _, err := os.Stat(e.file(rec.ID, gvImportingMarker)); err == nil {
 		t.Fatal("the importing marker must be gone")
 	}

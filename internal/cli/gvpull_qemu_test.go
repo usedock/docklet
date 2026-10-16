@@ -44,7 +44,7 @@ func TestPullGVisorRemoteIntoQEMU(t *testing.T) {
 			t.Fatalf("%s: export body %v", name, p.exportBody)
 		}
 		d := jsonOut(t, te).(map[string]any)
-		// The disk is the export's 4 GiB raised to the 10 GiB default, so the base always fits.
+		// The disk is the base (4 GiB fallback for the fake) plus the export's 4 GiB, raised to the 10 GiB default.
 		if d["name"] != "fromgv" || d["runtime"] != "qemu" || d["source"] != "work" || d["state"] != "archived" ||
 			d["cpus"] != 3.0 || d["memoryMiB"] != 768.0 || d["diskGiB"] != 10.0 || d["image"] != "ubuntu-24.04" {
 			t.Fatalf("%s: dock %v", name, d)

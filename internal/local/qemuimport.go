@@ -1,8 +1,11 @@
 package local
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -49,8 +52,11 @@ type WorkTarQEMU struct {
 	// Image is the Dockyard base the new dock starts from; empty means DefaultImage.
 	Image string
 	// TarPath is the decompressed tar.
-	TarPath                  string
-	CPUs, MemoryMiB, DiskGiB int
+	TarPath         string
+	CPUs, MemoryMiB int
+	// DiskGiB is the room the work directory had on the remote dock (its gVisor work disk); the
+	// new dock's disk is the base image plus that room, at least DefaultDiskGiB.
+	DiskGiB int
 	// Network is "on" (default) or "off".
 	Network string
 	// MaxBytes caps the bytes of files the tar may declare; 0 means DefaultMaxRawBytes.
@@ -81,6 +87,16 @@ func (e *Engine) ImportWorkTarQEMU(ctx context.Context, in WorkTarQEMU) (Dock, e
 	if w := skippedWarning(st); w != "" {
 		e.logf("warning: %s", w)
 	}
+	// The root disk holds the base system and the work directory, so it is the base's size plus
+	// the work room (never less than the unpacked files need).
+	if err := e.Driver.Preflight(ctx); err != nil {
+		return Dock{}, err
+	}
+	cached, err := e.EnsureImage(ctx, spec.Image)
+	if err != nil {
+		return Dock{}, err
+	}
+	spec.DiskGiB = qemuImportDiskGiB(cached.Base, in.DiskGiB, st.Usage)
 	rec, err := e.createQEMU(ctx, spec, true)
 	if err != nil {
 		return Dock{}, err
@@ -114,4 +130,39 @@ func (e *Engine) ImportWorkTarQEMU(ctx context.Context, in WorkTarQEMU) (Dock, e
 		return fail(errf("store_error", "%v", err))
 	}
 	return e.view(ctx, rec), nil
+}
+
+// qemuImportBaseFallbackGiB is assumed for a base whose size cannot be read; it covers every
+// Dockyard base (2 to 3.5 GiB).
+const qemuImportBaseFallbackGiB = 4
+
+// qemuImportDiskGiB sizes the root disk of a dock made from a work tar: the base image's virtual
+// size plus the larger of workGiB and the files' usage, and at least DefaultDiskGiB.
+func qemuImportDiskGiB(base string, workGiB int, usage int64) int {
+	baseGiB := qemuImportBaseFallbackGiB
+	if n, err := qcow2VirtualSize(base); err == nil && n > 0 {
+		baseGiB = int((n + 1<<30 - 1) >> 30)
+	}
+	need := int((usage + 1<<30 - 1) >> 30)
+	return max(DefaultDiskGiB, baseGiB+max(workGiB, need))
+}
+
+// qcow2Magic starts every qcow2 file.
+var qcow2Magic = []byte{'Q', 'F', 'I', 0xfb}
+
+// qcow2VirtualSize reads the virtual size from the header of the qcow2 file at path.
+func qcow2VirtualSize(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	var h [32]byte
+	if _, err := io.ReadFull(f, h[:]); err != nil {
+		return 0, err
+	}
+	if !bytes.Equal(h[:4], qcow2Magic) {
+		return 0, errf("cache_error", "%s is not a qcow2 file", path)
+	}
+	return int64(binary.BigEndian.Uint64(h[24:32])), nil
 }

@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,13 +22,14 @@ func TestImportWorkTarQEMU(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.State != "archived" || d.Runtime != RuntimeQEMU || d.Image != DefaultImage || d.CPUs != 3 || d.MemoryMiB != 768 || d.DiskGiB != 12 {
+	// The fake base is no qcow2, so its size is the 4 GiB fallback: 4 + 12.
+	if d.State != "archived" || d.Runtime != RuntimeQEMU || d.Image != DefaultImage || d.CPUs != 3 || d.MemoryMiB != 768 || d.DiskGiB != 16 {
 		t.Fatalf("dock %+v", d)
 	}
 	if len(drv.starts) != 1 || drv.starts[0].ImportDrive == "" || drv.starts[0].CPUs != 3 {
 		t.Fatalf("the import boot must attach the drive: %+v", drv.starts)
 	}
-	if !slices.Equal(drv.resizes, []int{12}) {
+	if !slices.Equal(drv.resizes, []int{16}) {
 		t.Fatalf("resizes %v", drv.resizes)
 	}
 	// The guest gets the canonical copy: every owner 1001, the special file left out.
@@ -185,5 +187,69 @@ func TestDecompressWorkFileNamesTheWorkArchive(t *testing.T) {
 	err = DecompressFile(context.Background(), zst, filepath.Join(dir, "out2"), 100)
 	if err == nil || !strings.Contains(err.Error(), "the decompressed disk is larger than") {
 		t.Fatalf("err %v", err)
+	}
+}
+
+func TestQEMUImportDiskHoldsTheBaseAndTheWork(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "base.qcow2")
+	h := make([]byte, 512)
+	copy(h, qcow2Magic)
+	binary.BigEndian.PutUint32(h[4:], 3)
+	binary.BigEndian.PutUint64(h[24:], 3584<<20)
+	if err := os.WriteFile(base, h, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := qcow2VirtualSize(base); err != nil || n != 3584<<20 {
+		t.Fatalf("virtual size %d %v", n, err)
+	}
+	for _, tc := range []struct {
+		name    string
+		base    string
+		workGiB int
+		usage   int64
+		want    int
+	}{
+		// A full 10 GiB gVisor work disk needs the 3.5 GiB base on top, not a 10 GiB disk.
+		{"full work disk", base, 10, 9 << 30, 14},
+		{"small dock keeps the default", base, 2, 1 << 20, DefaultDiskGiB},
+		{"files larger than the recorded disk", base, 4, 7<<30 + 1, 12},
+		{"no export size", base, 0, 0, DefaultDiskGiB},
+		{"unreadable base uses the fallback", filepath.Join(t.TempDir(), "missing"), 20, 0, 24},
+	} {
+		if got := qemuImportDiskGiB(tc.base, tc.workGiB, tc.usage); got != tc.want {
+			t.Fatalf("%s: disk %d GiB, want %d", tc.name, got, tc.want)
+		}
+	}
+	notQcow := filepath.Join(t.TempDir(), "raw")
+	if err := os.WriteFile(notQcow, make([]byte, 64), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qcow2VirtualSize(notQcow); err == nil {
+		t.Fatal("a file without the qcow2 magic must be refused")
+	}
+}
+
+func TestQEMUImportRunningIsImportIncomplete(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	ctx := context.Background()
+	// A pull killed during the import boot leaves the VM running with the marker in place.
+	if _, err := e.New(ctx, Spec{Name: "midimport"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := mustLookup(t, e, "midimport")
+	if err := os.WriteFile(e.file(rec.ID, gvImportingMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if docks, _ := e.List(ctx); len(docks) != 1 || docks[0].State != "import_incomplete" {
+		t.Fatalf("ls must show a running import as import_incomplete: %v", docks)
+	}
+	if _, err := e.Resume(ctx, "midimport"); ErrCode(err) != "import_incomplete" {
+		t.Fatalf("resume: %v", err)
+	}
+	if err := e.Remove(ctx, "midimport"); err != nil {
+		t.Fatal(err)
+	}
+	if docks, _ := e.List(ctx); len(docks) != 0 {
+		t.Fatalf("docks left: %v", docks)
 	}
 }
