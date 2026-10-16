@@ -186,7 +186,8 @@ expect_ok expect_decision v0.4.0 v0.3.8 1 install
 expect_ok expect_decision v0.3.8 v0.3.8 1 install
 
 # The pinned default must be a valid release tag.
-default="$(cat "${here}/bootstrap-host.sh" | sed -n 's/^DOCKLET_VERSION="\${DOCKLET_VERSION:-\(v[^}]*\)}"$/\1/p')"
+bootstrap_sh=${here}/bootstrap-host.sh
+default="$(sed -n 's/^DOCKLET_VERSION="\${DOCKLET_VERSION:-\(v[^}]*\)}"$/\1/p' "$bootstrap_sh")"
 expect_ok valid_version "$default"
 
 exit "$fail"
