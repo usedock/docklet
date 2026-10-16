@@ -83,6 +83,9 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 		}
 		add(c)
 	}
+	if showGVisor && gvErr == nil {
+		checks = append(checks, e.gvHostBlockChecks(ctx)...)
+	}
 	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
 		add(Check{Name: "data dir", Detail: err.Error()})
 	} else if free, err := freeBytes(e.Dir); err != nil {
@@ -117,4 +120,39 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 		add(c)
 	}
 	return checks
+}
+
+// gvHostBlockChecks verifies the host firewall rule of every running network-on gvisor dock. A
+// host firewall reload or flush removes it silently. No such dock, or the block turned off, adds no row.
+func (e *Engine) gvHostBlockChecks(ctx context.Context) []Check {
+	g := e.gvisor()
+	if g.AllowHost {
+		return nil
+	}
+	recs, err := e.store().List()
+	if err != nil {
+		return nil
+	}
+	var out []Check
+	for _, r := range recs {
+		if r.runtime() != RuntimeGVisor || r.gvNoNet() || !g.running(ctx, r.ID) {
+			continue
+		}
+		c := Check{Name: "host block " + r.Name}
+		ok, err := g.checkHostBlock(ctx, r.ID)
+		switch {
+		case err != nil:
+			// Unknown, not missing: informational so a Docker hiccup does not fail doctor.
+			c.Optional = true
+			c.Detail = "cannot verify the host firewall rule: " + err.Error()
+		case !ok:
+			c.Detail = "the firewall rule that blocks this dock from the machine's services is not installed (a firewall reload or flush removed it, or the dock was started with " + gvHostBlockEnv + "=1 or by an older dock)"
+			c.Fix = "dock stop " + r.Name + " && dock resume " + r.Name
+		default:
+			c.OK = true
+			c.Detail = "the dock cannot reach the machine's services"
+		}
+		out = append(out, c)
+	}
+	return out
 }

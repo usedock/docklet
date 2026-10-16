@@ -34,6 +34,13 @@ func (f *fakeDocker) hostHelper(args []string) (string, string, error) {
 		}
 		f.hostRules[chain] = append([]string{bridge}, rest...)
 		return "", f.hostWarn, nil
+	case "check":
+		if f.hostCheckErr != nil {
+			return "", "docker: cannot run the helper", f.hostCheckErr
+		}
+		if _, ok := f.hostRules[chain]; !ok {
+			return gvHostBlockMissing + "\n", "", errors.New("exit status 3")
+		}
 	case "remove":
 		if f.hostRmErr != nil {
 			return "", "remove failed", f.hostRmErr
@@ -372,7 +379,7 @@ n=$(basename "$0")
 f="$STATE/$n"; touch "$f"
 [ "$1" = -w ] && shift
 case "$1" in
- -S) exit 0;;
+ -S) [ -z "${2:-}" ] || grep -qxF "chain $2" "$f"; exit $?;;
  -N) grep -qxF "chain $2" "$f" && exit 1; echo "chain $2" >> "$f";;
  -F) grep -qxF "chain $2" "$f" || exit 1; grep -v "^rule $2 " "$f" > "$f.n"; mv "$f.n" "$f";;
  -X) grep -qxF "chain $2" "$f" || exit 1; grep -vxF "chain $2" "$f" > "$f.n"; mv "$f.n" "$f";;
@@ -433,6 +440,41 @@ esac
 	}
 	run("", "remove", "DOCK-b", "dklb") // idempotent
 
+	// Check: present, then jump missing, then chain missing, then chain emptied, then on the legacy backend.
+	checkOut := func(broken string) (string, error) {
+		out, err := command(broken, "check", "DOCK-b", "dklb").Output()
+		return string(out), err
+	}
+	run("", "install", "DOCK-b", "dklb", "192.168.1.1")
+	if out, err := checkOut(""); err != nil {
+		t.Fatalf("check with the block present: %v %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(state, "iptables"), []byte(strings.Replace(read("iptables"), jump, "", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := checkOut(""); err == nil || !strings.Contains(out, gvHostBlockMissing) {
+		t.Fatalf("check with the jump missing: %v %q", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(state, "iptables"), []byte(jump), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := checkOut(""); err == nil || !strings.Contains(out, gvHostBlockMissing) {
+		t.Fatalf("check with the chain missing: %v %q", err, out)
+	}
+	// The chain is emptied (iptables -F DOCK-b): the jump leads nowhere, so the dock is unblocked.
+	if err := os.WriteFile(filepath.Join(state, "iptables"), []byte(jump+"chain DOCK-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := checkOut(""); err == nil || !strings.Contains(out, gvHostBlockMissing) {
+		t.Fatalf("check with the chain emptied: %v %q", err, out)
+	}
+	run("", "remove", "DOCK-b", "dklb")
+	run("iptables", "install", "DOCK-b", "dklb")
+	if out, err := checkOut("iptables"); err != nil {
+		t.Fatalf("check on the legacy backend: %v %s", err, out)
+	}
+	run("iptables", "remove", "DOCK-b", "dklb")
+
 	// The nft backend is unusable here (a kernel without nf_tables): the legacy one is used.
 	run("iptables", "install", "DOCK-b", "dklb")
 	if !strings.Contains(read("iptables-legacy"), jump) {
@@ -453,5 +495,116 @@ esac
 	}
 	if err := command("", "install", "DOCK-b", "dklb").Run(); err == nil {
 		t.Fatal("install must fail when no iptables backend works")
+	}
+}
+
+func TestCheckHostBlock(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	d, err := e.New(ctx, Spec{Name: "cb", Runtime: RuntimeGVisor, CPUs: 1, MemoryMiB: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := e.gvisor()
+	if ok, err := g.checkHostBlock(ctx, d.ID); !ok || err != nil {
+		t.Fatalf("present: %v %v", ok, err)
+	}
+	fd.mu.Lock()
+	delete(fd.hostRules, gvChain(d.ID))
+	fd.mu.Unlock()
+	if ok, err := g.checkHostBlock(ctx, d.ID); ok || err != nil {
+		t.Fatalf("missing must be (false, nil): %v %v", ok, err)
+	}
+	// The current image is gone (a newer dock has a new image tag): the check never builds and
+	// runs the helper with the image the dock's container runs.
+	_, tag, err := gvBuildContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd.mu.Lock()
+	delete(fd.images, tag)
+	builds := fd.builds
+	fd.mu.Unlock()
+	if ok, err := g.checkHostBlock(ctx, d.ID); ok || err != nil {
+		t.Fatalf("missing without the current image: %v %v", ok, err)
+	}
+	fd.mu.Lock()
+	rebuilt := fd.builds != builds
+	fd.mu.Unlock()
+	if rebuilt {
+		t.Fatal("the check must not build the image")
+	}
+	fd.mu.Lock()
+	last := fd.calls[len(fd.calls)-1]
+	fd.mu.Unlock()
+	if !slices.Contains(last, "sha256:fakecontainerimage") || !slices.Contains(last, "check") {
+		t.Fatalf("the check must run with the container's image: %v", last)
+	}
+	fd.mu.Lock()
+	fd.hostCheckErr = errors.New("exit status 125")
+	fd.mu.Unlock()
+	if ok, err := g.checkHostBlock(ctx, d.ID); ok || err == nil {
+		t.Fatalf("a helper that cannot run is an error, not a missing rule: %v %v", ok, err)
+	}
+}
+
+func TestDoctorReportsMissingHostBlock(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	e.Driver = &QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img", KVM: func() error { return nil }}
+	fd.runtimes = `{"runsc":{}}`
+	rows := func() map[string]Check {
+		m := map[string]Check{}
+		for _, c := range e.Doctor(ctx) {
+			if strings.HasPrefix(c.Name, "host block") {
+				m[c.Name] = c
+			}
+		}
+		return m
+	}
+	if r := rows(); len(r) != 0 {
+		t.Fatalf("no gvisor docks, no rows: %v", r)
+	}
+	d, err := e.New(ctx, Spec{Name: "hbd", Runtime: RuntimeGVisor, CPUs: 1, MemoryMiB: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.New(ctx, Spec{Name: "hbo", Runtime: RuntimeGVisor, Network: "off", CPUs: 1, MemoryMiB: 512}); err != nil {
+		t.Fatal(err)
+	}
+	if r := rows(); len(r) != 1 || !r["host block hbd"].OK {
+		t.Fatalf("a healthy network-on dock passes, network off has no row: %v", r)
+	}
+	fd.mu.Lock()
+	delete(fd.hostRules, gvChain(d.ID))
+	fd.mu.Unlock()
+	if c := rows()["host block hbd"]; c.OK || c.Optional || c.Fix != "dock stop hbd && dock resume hbd" {
+		t.Fatalf("missing rule row %+v", c)
+	}
+	e.GVisor.AllowHost = true
+	if r := rows(); len(r) != 0 {
+		t.Fatalf("the block is off, no rows: %v", r)
+	}
+	e.GVisor.AllowHost = false
+	fd.mu.Lock()
+	fd.hostCheckErr = errors.New("exit status 125")
+	fd.mu.Unlock()
+	if c := rows()["host block hbd"]; c.OK || !c.Optional || c.Fix != "" {
+		t.Fatalf("an unverifiable rule is informational: %+v", c)
+	}
+	fd.mu.Lock()
+	fd.hostCheckErr = nil
+	fd.mu.Unlock()
+	if _, err := e.Stop(ctx, "hbd", false); err != nil {
+		t.Fatal(err)
+	}
+	if r := rows(); len(r) != 0 {
+		t.Fatalf("a stopped dock is not checked: %v", r)
+	}
+	if _, err := e.Resume(ctx, "hbd"); err != nil {
+		t.Fatal(err)
+	}
+	if c := rows()["host block hbd"]; !c.OK {
+		t.Fatalf("resume restores the rule: %+v", c)
 	}
 }

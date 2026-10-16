@@ -20,35 +20,36 @@ import (
 // fakeDocker simulates the docker CLI: run starts a container whose agent answers on the
 // published port, and it records every call.
 type fakeDocker struct {
-	mu         sync.Mutex
-	calls      [][]string
-	containers map[string]net.Listener
-	volumes    map[string]bool
-	networks   map[string]bool
-	bridges    map[string]string // bridge interface name a network was created with, if any
-	stopped    map[string]bool   // container exists but is not running
-	attached   map[string]bool   // container is connected to its network
-	ports      map[string]string // published host port per container
-	tokens     map[string]string
-	daemonDown bool
-	images     map[string]bool
-	builds     int
-	runtimes   string // docker info output
-	runErr     error
-	exitOnRun  bool // container is created but exits at once
-	agentDead  bool // container runs but the agent never answers
-	buildStdin []byte
-	commitErr  error // docker commit fails
-	copyErr    error // the work-volume copy helper fails
-	copyFailAt int   // with copyErr, only the nth copy (1-based) fails; 0 means every copy
-	copies     int
-	drv        *fakeDriver
-	noNet      map[string]bool     // containers run with --network none
-	streams    [][]string          // docker exec stream calls
-	hostRules  map[string][]string // host block per chain: bridge, then DNS servers
-	hostErr    error               // the host-block install helper fails
-	hostWarn   string              // stderr of a successful host-block install
-	hostRmErr  error               // the host-block remove helper fails
+	mu           sync.Mutex
+	calls        [][]string
+	containers   map[string]net.Listener
+	volumes      map[string]bool
+	networks     map[string]bool
+	bridges      map[string]string // bridge interface name a network was created with, if any
+	stopped      map[string]bool   // container exists but is not running
+	attached     map[string]bool   // container is connected to its network
+	ports        map[string]string // published host port per container
+	tokens       map[string]string
+	daemonDown   bool
+	images       map[string]bool
+	builds       int
+	runtimes     string // docker info output
+	runErr       error
+	exitOnRun    bool // container is created but exits at once
+	agentDead    bool // container runs but the agent never answers
+	buildStdin   []byte
+	commitErr    error // docker commit fails
+	copyErr      error // the work-volume copy helper fails
+	copyFailAt   int   // with copyErr, only the nth copy (1-based) fails; 0 means every copy
+	copies       int
+	drv          *fakeDriver
+	noNet        map[string]bool     // containers run with --network none
+	streams      [][]string          // docker exec stream calls
+	hostRules    map[string][]string // host block per chain: bridge, then DNS servers
+	hostErr      error               // the host-block install helper fails
+	hostWarn     string              // stderr of a successful host-block install
+	hostCheckErr error               // the host-block check helper cannot run
+	hostRmErr    error               // the host-block remove helper fails
 }
 
 func newFakeDocker() *fakeDocker {
@@ -169,6 +170,9 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			return "false\n", "Error: No such container", gone
 		}
 		running := !f.stopped[last] && !f.exitOnRun
+		if strings.Contains(strings.Join(args, " "), "{{.Image}}") {
+			return "sha256:fakecontainerimage\n", "", nil
+		}
 		if strings.Contains(strings.Join(args, " "), "State.Status") {
 			if running {
 				return "running\n", "", nil
