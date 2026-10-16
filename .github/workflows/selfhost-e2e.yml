@@ -211,8 +211,12 @@ jobs:
         run: |
           token="$(sed -n 's/^FLEET_TOKEN=//p' dock-src/deploy/self-host/.env)"
           echo "::add-mask::$token"
+          # The runner is single-use, so accept the CPU vulnerabilities it reports.
+          vulns="$(grep -l '^Vulnerable' /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null | xargs -r -n1 basename | paste -sd, -)"
+          echo "accepting CPU vulnerabilities: ${vulns:-none}"
           sudo env DOCKLET_FLEET_TOKEN="$token" DOCKLET_BIN="$RUNNER_TEMP/docklet" \
             bash scripts/bootstrap-host.sh --fleet-url "$DOCK_URL" --runtime gvisor \
+            ${vulns:+--allow-vulnerable "$vulns"} \
             2>&1 | tee "$LOGS/bootstrap.log"
       - name: runsc-suid runtime for the local gVisor engine
         run: |
