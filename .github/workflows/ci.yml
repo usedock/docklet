@@ -60,6 +60,15 @@ jobs:
       - name: gitleaks
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --no-banner --redact
 
+  # bootstrap's verified release install and its downgrade guard against real GitHub releases (no KVM, no root).
+  release-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: install, skip older, skip same, forced downgrade
+        run: bash scripts/e2e-release-install.sh
+
   # The dock CLI and its local engine are portable: build and unit-test them where users run them.
   cli-portable:
     strategy:

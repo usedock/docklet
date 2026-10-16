@@ -41,8 +41,10 @@ POOL_SIZE="${DOCKLET_POOL_SIZE:-}"
 EGRESS_ALLOW_PRIVATE="${DOCKLET_EGRESS_ALLOW_PRIVATE:-}"
 ALLOW_VULNERABLE="${DOCKLET_ALLOW_VULNERABLE:-}"
 PREBUILT_BIN="${DOCKLET_BIN:-}"
-# Release to install; bump with each docklet release. Verified by checksum and cosign.
-DOCKLET_VERSION="${DOCKLET_VERSION:-v0.1.0}"
+# Release to install; the release workflow fails unless this default equals the pushed tag. Verified by checksum and cosign.
+DOCKLET_VERSION="${DOCKLET_VERSION:-v0.3.8}"
+# 1 installs DOCKLET_VERSION even when the installed docklet is the same or newer (downgrade or reinstall).
+ALLOW_DOWNGRADE="${DOCKLET_ALLOW_DOWNGRADE:-0}"
 BUILD_FROM_SOURCE="${DOCKLET_BUILD_FROM_SOURCE:-0}"
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-60}"
 # Enrollment retries: a control-plane restart during install is transient.
@@ -122,7 +124,8 @@ Usage: bootstrap-host.sh --fleet-url <url> --fleet-token <token>
 Env equivalents: DOCKLET_FLEET_URL, DOCKLET_FLEET_TOKEN, DOCKLET_HOST_ID,
 DOCKLET_RUNTIME, DOCKLET_POOL_SIZE, DOCKLET_EGRESS_ALLOW_PRIVATE,
 DOCKLET_ALLOW_VULNERABLE, DOCKLET_BASE_IMAGE, DOCKLET_BASE_IMAGE_SHA256.
-Installer knobs: DOCKLET_VERSION (release to install), DOCKLET_BIN (prebuilt binary, NOT verified), DOCKLET_GVISOR_IMAGE,
+Installer knobs: DOCKLET_VERSION (release to install), DOCKLET_ALLOW_DOWNGRADE=1 (install it even when the installed
+docklet is the same or newer; by default a newer one is kept and the same one is not re-downloaded), DOCKLET_BIN (prebuilt binary, NOT verified), DOCKLET_GVISOR_IMAGE,
 DOCKLET_GO_IMAGE (toolchain container used when go is missing),
 DOCKLET_IMAGE_DIR, DOCKLET_JAIL_BASE, FC_VERSION, RUNSC_VERSION (overriding either requires the
 matching FC_SHA256_X86_64/FC_SHA256_AARCH64/RUNSC_SHA256_X86_64),
@@ -596,7 +599,7 @@ write_env_file() {
 }
 
 install_docklet_binary() {
-  local out asset arch
+  local out
   if [ -n "$PREBUILT_BIN" ]; then
     [ -f "$PREBUILT_BIN" ] || die "DOCKLET_BIN=${PREBUILT_BIN} not found"
     warn "installing DOCKLET_BIN without signature verification"
@@ -627,18 +630,9 @@ install_docklet_binary() {
     log "installed ${DOCKLET_DEST} (built from checkout)"
     return 0
   fi
-  case "$(uname -m)" in
-    x86_64|amd64) arch=amd64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) die "unsupported architecture: $(uname -m)" ;;
-  esac
-  asset="docklet-linux-${arch}"
   out="$(mktemp -d)"
   TMP_FILES+=("$out")
-  log "downloading and verifying docklet ${DOCKLET_VERSION} (${asset})"
-  fetch_release "$DOCKLET_VERSION" "$out" "$asset"
-  install -D -m 0755 "${out}/${asset}" "$DOCKLET_DEST"
-  log "installed ${DOCKLET_DEST} (${DOCKLET_VERSION}, signature verified)"
+  install_release_docklet "$DOCKLET_DEST" "$DOCKLET_VERSION" "$ALLOW_DOWNGRADE" "$out"
 }
 
 install_unit() {

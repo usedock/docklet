@@ -163,4 +163,62 @@ expect_refuse fetch_with "$tmp/cosign-ok"
 cp "$tmp/orig" "$rel/docklet-linux-amd64"; rm "$rel/docklet-linux-amd64.bundle"
 expect_refuse fetch_with "$tmp/cosign-ok"
 
+# semver_cmp: precedence, including multi-digit parts and pre-releases; invalid input returns 2.
+expect_cmp() { [ "$(semver_cmp "$1" "$2")" = "$3" ] || { echo "FAIL: semver_cmp $1 $2 != $3"; return 1; }; }
+for c in "v0.3.8 v0.3.8 0" "v0.1.0 v0.3.8 -1" "v0.3.8 v0.1.0 1" "v0.10.0 v0.9.0 1" "v1.0.0 v0.99.99 1" \
+  "v0.3.9 v0.3.10 -1" "v1.0.0-rc.1 v1.0.0 -1" "v1.0.0 v1.0.0-rc.1 1" "v1.0.0-rc.1 v1.0.0-rc.2 -1" \
+  "v1.0.0-rc.2 v1.0.0-rc.10 -1" "v1.0.0-alpha v1.0.0-alpha.1 -1" "v1.0.0-1 v1.0.0-alpha -1" "v1.0.0-rc.1 v1.0.0-rc.1 0"; do
+  # shellcheck disable=SC2086
+  expect_ok expect_cmp $c
+done
+# Path for child shells that source the library (unquoted assignment keeps the exec-bit lint quiet).
+verify_lib=${here}/lib-verify.sh
+# ASCII order whatever the caller's locale (en_US collation puts rc before RC).
+expect_ok env LC_ALL=en_US.UTF-8 bash -c '. "$1"; [ "$(semver_cmp v1.0.0-RC.1 v1.0.0-rc.1)" = -1 ]' _ "$verify_lib"
+expect_refuse semver_cmp dev v0.3.8
+expect_refuse semver_cmp v0.3.8 ""
+expect_refuse semver_cmp "docklet v0.3.8" v0.3.8
+# release_install_decision: skip same and newer, install older or unknown, and let the knob force it.
+expect_decision() { [ "$(release_install_decision "$1" "$2" "$3")" = "$4" ] || { echo "FAIL: decision $1 $2 '$3' != $4"; return 1; }; }
+expect_ok expect_decision v0.1.0 v0.3.8 0 install
+expect_ok expect_decision v0.3.8 v0.3.8 0 same
+expect_ok expect_decision v0.4.0 v0.3.8 0 newer
+expect_ok expect_decision "" v0.3.8 0 install
+expect_ok expect_decision dev v0.3.8 0 install
+expect_ok expect_decision garbage v0.3.8 0 install
+expect_ok expect_decision v0.4.0 v0.3.8 1 install
+expect_ok expect_decision v0.3.8 v0.3.8 1 install
+
+# installed_release_version: never fails under set -e, whatever the installed binary does.
+printf '#!/bin/sh\necho v0.4.0\n' > "$tmp/dl-newer"; chmod +x "$tmp/dl-newer"
+printf '#!/bin/sh\necho v0.3.8\n' > "$tmp/dl-same"; chmod +x "$tmp/dl-same"
+printf '#!/bin/sh\nexit 7\n' > "$tmp/dl-broken"; chmod +x "$tmp/dl-broken"
+printf '#!/bin/sh\necho dev\n' > "$tmp/dl-dev"; chmod +x "$tmp/dl-dev"
+reads_version() { [ "$(set -euo pipefail; installed_release_version "$1")" = "$2" ]; }
+expect_ok reads_version "$tmp/dl-newer" v0.4.0
+expect_ok reads_version "$tmp/dl-broken" ""
+expect_ok reads_version "$tmp/no-such-docklet" ""
+survives_broken() { bash -c 'set -euo pipefail; log() { :; }; die() { exit 1; }; . "$1"; v="$(installed_release_version "$2")"; [ -z "$v" ]' _ "$verify_lib" "$tmp/dl-broken"; }
+expect_ok survives_broken
+# install_release_docklet: same or newer returns before any download; older, unknown or forced fetches.
+fetches() {
+  local dest="$1" want="$2" allow="$3"
+  fetch_release() { echo fetched > "$tmp/fetched"; return 1; }
+  rm -f "$tmp/fetched"
+  install_release_docklet "$dest" "$want" "$allow" "$tmp" 2>/dev/null || true
+  [ -e "$tmp/fetched" ]
+}
+expect_refuse fetches "$tmp/dl-newer" v0.3.8 0
+expect_refuse fetches "$tmp/dl-same" v0.3.8 0
+expect_ok fetches "$tmp/dl-same" v0.3.9 0
+expect_ok fetches "$tmp/dl-dev" v0.3.8 0
+expect_ok fetches "$tmp/dl-broken" v0.3.8 0
+expect_ok fetches "$tmp/dl-newer" v0.3.8 1
+expect_ok fetches "$tmp/dl-same" v0.3.8 1
+
+# The pinned default must be a valid release tag.
+bootstrap_sh=${here}/bootstrap-host.sh
+default="$(sed -n 's/^DOCKLET_VERSION="\${DOCKLET_VERSION:-\(v[^}]*\)}"$/\1/p' "$bootstrap_sh")"
+expect_ok valid_version "$default"
+
 exit "$fail"
