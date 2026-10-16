@@ -25,6 +25,7 @@ type fakeDocker struct {
 	containers map[string]net.Listener
 	volumes    map[string]bool
 	networks   map[string]bool
+	bridges    map[string]string // bridge interface name a network was created with, if any
 	stopped    map[string]bool   // container exists but is not running
 	attached   map[string]bool   // container is connected to its network
 	ports      map[string]string // published host port per container
@@ -50,7 +51,7 @@ type fakeDocker struct {
 }
 
 func newFakeDocker() *fakeDocker {
-	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, stopped: map[string]bool{}, attached: map[string]bool{}, noNet: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{}, hostRules: map[string][]string{},
+	return &fakeDocker{containers: map[string]net.Listener{}, volumes: map[string]bool{}, networks: map[string]bool{}, bridges: map[string]string{}, stopped: map[string]bool{}, attached: map[string]bool{}, noNet: map[string]bool{}, ports: map[string]string{}, tokens: map[string]string{}, images: map[string]bool{}, hostRules: map[string][]string{},
 		runtimes: `{"runc":{"path":"runc"},"runsc":{"path":"/usr/local/bin/runsc"}}`, drv: newFakeDriver()}
 }
 
@@ -221,7 +222,21 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 				return "", "Error response from daemon: network with name " + last + " already exists", gone
 			}
 			f.networks[last] = true
+			f.bridges[last] = ""
+			for i, a := range args {
+				if a == "-o" && strings.HasPrefix(args[i+1], "com.docker.network.bridge.name=") {
+					f.bridges[last] = strings.TrimPrefix(args[i+1], "com.docker.network.bridge.name=")
+				}
+			}
 			return "nid", "", nil
+		case "inspect":
+			if !f.networks[last] {
+				return "", "Error response from daemon: network " + last + " not found", gone
+			}
+			if f.bridges[last] == "" {
+				return "<no value>\n", "", nil
+			}
+			return f.bridges[last] + "\n", "", nil
 		case "connect":
 			ctr := last
 			if !f.networks[args[len(args)-2]] {
@@ -238,6 +253,9 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			}
 			delete(f.attached, last)
 			return "", "", nil
+		case "rm":
+		default:
+			return "", "", errors.New("unexpected docker network " + args[1])
 		}
 		if !f.networks[last] {
 			return "", "Error response from daemon: network " + last + " not found", gone
@@ -248,6 +266,7 @@ func (f *fakeDocker) run(_ context.Context, stdin io.Reader, args ...string) (st
 			}
 		}
 		delete(f.networks, last)
+		delete(f.bridges, last)
 		return "", "", nil
 	case "volume":
 		delete(f.volumes, last)
@@ -669,6 +688,7 @@ func TestGVisorNetworkIsPerDockAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	fd.networks["dock-local-"+a.ID+"-net"] = true
+	fd.bridges["dock-local-"+a.ID+"-net"] = gvBridge(a.ID)
 	if _, err := e.Resume(ctx, "a"); err != nil {
 		t.Fatalf("resume with an existing network: %v", err)
 	}

@@ -298,10 +298,35 @@ func (g *GVisor) hasDocker() bool {
 	return err == nil
 }
 
-// ensureNetwork creates the dock's own bridge network; one that already exists is fine.
+// ensureNetwork creates the dock's own bridge network; an existing one is kept only if its bridge is dkl<id>.
 // Each dock gets its own so it cannot reach the user's other containers or other docks.
 func (g *GVisor) ensureNetwork(ctx context.Context, id string) error {
-	if _, stderr, err := g.docker(ctx, nil, "network", "create", "--driver", "bridge", "-o", "com.docker.network.bridge.name="+gvBridge(id), gvNetwork(id)); err != nil && !strings.Contains(strings.ToLower(stderr), "already exists") {
+	create := func() (string, error) {
+		_, stderr, err := g.docker(ctx, nil, "network", "create", "--driver", "bridge", "-o", "com.docker.network.bridge.name="+gvBridge(id), gvNetwork(id))
+		return stderr, err
+	}
+	stderr, err := create()
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(stderr), "already exists") {
+		return dockerFailure("boot_failed", "docker network create "+gvNetwork(id), err, stderr)
+	}
+	// The host block matches the bridge by name; a network left by an older dock (br-<id>) would escape it.
+	out, stderr, err := g.docker(ctx, nil, "network", "inspect", "--format", `{{index .Options "com.docker.network.bridge.name"}}`, gvNetwork(id))
+	if err != nil {
+		return dockerFailure("boot_failed", "docker network inspect "+gvNetwork(id), err, stderr)
+	}
+	if strings.TrimSpace(out) == gvBridge(id) {
+		return nil
+	}
+	if err := g.disconnectNetwork(ctx, id); err != nil {
+		return err
+	}
+	if err := g.removeNetwork(ctx, id); err != nil {
+		return err
+	}
+	if stderr, err := create(); err != nil {
 		return dockerFailure("boot_failed", "docker network create "+gvNetwork(id), err, stderr)
 	}
 	return nil

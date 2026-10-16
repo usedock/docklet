@@ -276,6 +276,53 @@ func TestGVisorHostBlockPerBranch(t *testing.T) {
 	}
 }
 
+// A network an older dock left (Docker's br-<id> bridge, the stopped container still attached)
+// is replaced on resume, so the rule's -i dkl<id> matches the bridge the dock really uses.
+func TestGVisorResumeReplacesAnOldStyleNetwork(t *testing.T) {
+	ctx := context.Background()
+	e, fd := newGVisorEngine(t)
+	d, err := e.New(ctx, Spec{Name: "old", Runtime: RuntimeGVisor, CPUs: 1, MemoryMiB: 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Stop(ctx, "old", false); err != nil {
+		t.Fatal(err)
+	}
+	netName, ctr := gvNetwork(d.ID), gvContainer(d.ID)
+	fd.mu.Lock()
+	fd.networks[netName], fd.bridges[netName], fd.attached[ctr] = true, "", true
+	fd.mu.Unlock()
+	if _, err := e.Resume(ctx, "old"); err != nil {
+		t.Fatal(err)
+	}
+	fd.mu.Lock()
+	bridge, attached := fd.bridges[netName], fd.attached[ctr]
+	fd.mu.Unlock()
+	if bridge != gvBridge(d.ID) || !attached {
+		t.Fatalf("resume kept the old network: bridge %q attached %v", bridge, attached)
+	}
+	if r := fd.rules(); len(r[gvChain(d.ID)]) == 0 || r[gvChain(d.ID)][0] != bridge {
+		t.Fatalf("the rule does not match the dock's bridge %q: %v", bridge, r)
+	}
+
+	// A network that already has the right bridge is kept as it is.
+	if _, err := e.Stop(ctx, "old", false); err != nil {
+		t.Fatal(err)
+	}
+	fd.mu.Lock()
+	fd.networks[netName], fd.bridges[netName], fd.attached[ctr] = true, gvBridge(d.ID), true
+	before := len(fd.calls)
+	fd.mu.Unlock()
+	if _, err := e.Resume(ctx, "old"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range fd.calls[before:] {
+		if c[0] == "network" && (c[1] == "rm" || c[1] == "disconnect") {
+			t.Fatalf("a current network must not be replaced: %v", c)
+		}
+	}
+}
+
 func TestGvNameservers(t *testing.T) {
 	got := gvNameservers([]byte("# c\nnameserver 192.168.1.1\nnameserver 8.8.8.8\nsearch x\n"))
 	if !slices.Equal(got, []string{"192.168.1.1", "8.8.8.8"}) {

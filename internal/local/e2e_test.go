@@ -548,7 +548,7 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 			}
 		}
 	}
-	// Set below: a runc container publishing on every host address (Docker DNATs that to FORWARD).
+	// Set below: a runc container publishing on every host address.
 	pubPort, pubIP := "", ""
 	targetsFor := func(id string) []string {
 		gw := netGateway(gvNetwork(id))
@@ -632,8 +632,9 @@ func TestE2ELocalGVisorHostBlocked(t *testing.T) {
 	run("e2ehb", "sudo sh -c 'iptables -F; iptables -P OUTPUT ACCEPT; iptables-legacy -F; ip route flush cache' >/dev/null 2>&1; true")
 	blocked("e2ehb", d.ID, "as root after flushing iptables", "sudo ")
 
-	// Another container (runc, default bridge) publishes on 0.0.0.0, like a user's database: a
-	// connection to a host address on that port is DNATed and forwarded, it never hits INPUT.
+	// Another container (runc, default bridge) publishes on 0.0.0.0, like a user's database. From
+	// another bridge Docker's userland proxy takes it on INPUT; without the proxy, Docker's own
+	// network isolation drops the DNATed connection in FORWARD.
 	pubImage, err := g.EnsureImage(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
