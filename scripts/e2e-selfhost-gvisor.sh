@@ -3,10 +3,10 @@
 # this machine (runsc, no KVM needed for the host). Creates a dock on the control plane, writes a marker tree
 # in /home/user/work (a file, a 0700 directory, a symlink), then runs dock pull --runtime gvisor twice with
 # the CLI under test: once while the remote dock is running (the host pauses it for the export) and once
-# more after a stop and resume (the control plane exports only ready docks). Each local copy is resumed and its content, modes, symlink and owner are checked with
-# dock exec. A last leg pulls into a QEMU dock; it is skipped while the CLI still refuses with the issue #128
-# text. Needs DOCK (binary), DOCK_URL, LOGS (dir); jq and curl. Docker with the runsc and runsc-suid runtimes
-# must be set up, as the workflow does.
+# more after a stop and resume (the control plane exports only ready docks). Each local copy is resumed and its
+# content, modes, symlink and owner are checked with dock exec. A last leg pulls into a QEMU dock (needs KVM) and
+# checks the same tree owned by user (uid 1000). Needs DOCK (binary), DOCK_URL, LOGS (dir); jq and curl. Docker
+# with the runsc and runsc-suid runtimes must be set up, as the workflow does.
 # Under Actions, fd 3 is the step's own stdout: the key mask goes there, never into the tee'd log.
 set -euo pipefail
 : "${DOCK:?path of the dock binary}" "${DOCK_URL:?control plane URL}" "${LOGS:?log dir}"
@@ -88,29 +88,20 @@ pull_gvisor gv-second
 assert_tree gv-second late-content
 log "second pull after stop and resume ok"
 
-# 3. A QEMU dock from the same remote dock. The CLI refuses with the issue #128 text until that lands; skip then.
+# 3. A QEMU dock from the same remote dock (needs KVM): a fresh Dockyard base with the work directory unpacked as
+# the dock user, uid 1000 on the base.
+[ -w /dev/kvm ] || die "/dev/kvm is not usable here; the qemu leg needs KVM"
 $DOCK context use selfhost
-set +e
-qemu_out="$($DOCK pull "$SRC" --from selfhost --runtime qemu --name gv-qemu 2>&1)"
-qemu_rc=$?
-set -e
-echo "$qemu_out" | tee "$LOGS/pull-gv-qemu.log"
-if [ "$qemu_rc" -ne 0 ] && printf '%s' "$qemu_out" | grep -q 'issue #128'; then
-  echo "::notice::pull into a qemu dock skipped: the CLI does not support it yet (issue #128); this leg activates once it lands"
-  echo "pull -> qemu: skipped (issue #128)" >> "$TIMINGS"
-elif [ "$qemu_rc" -ne 0 ]; then
-  die "dock pull --runtime qemu failed (exit ${qemu_rc}) with something other than the #128 refusal"
-else
-  $DOCK context use local
-  t=$(date +%s); $DOCK resume gv-qemu; timing "local: dock resume (qemu)" "$t"
-  [ "$($DOCK exec gv-qemu -- cat /home/user/work/tree/file.txt)" = marker-content ] || die "gv-qemu: marker missing"
-  [ "$($DOCK exec gv-qemu -- readlink /home/user/work/tree/link)" = file.txt ] || die "gv-qemu: symlink missing"
-  [ "$($DOCK exec gv-qemu -- stat -c %a /home/user/work/tree/private)" = 700 ] || die "gv-qemu: private mode lost"
-  [ "$($DOCK exec gv-qemu -- cat /home/user/work/tree/late.txt)" = late-content ] || die "gv-qemu: late.txt missing"
-  log "pull into a qemu dock ok"
-  echo "pull -> qemu: ok" >> "$TIMINGS"
-  $DOCK rm gv-qemu
-fi
+t=$(date +%s)
+$DOCK pull "$SRC" --from selfhost --runtime qemu --name gv-qemu 2>&1 | tee "$LOGS/pull-gv-qemu.log"
+timing "dock pull -> gv-qemu" "$t"
+$DOCK context use local
+t=$(date +%s); $DOCK resume gv-qemu; timing "local: dock resume (qemu)" "$t"
+[ "$($DOCK exec gv-qemu -- id -un)" = user ] || die "gv-qemu: exec does not run as user"
+[ "$($DOCK exec gv-qemu -- id -u)" = 1000 ] || die "gv-qemu: the dock user is not uid 1000"
+assert_tree gv-qemu late-content
+log "pull into a qemu dock ok"
+$DOCK rm gv-qemu
 
 $DOCK context use local
 $DOCK rm gv-running
