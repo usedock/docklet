@@ -171,6 +171,8 @@ for c in "v0.3.8 v0.3.8 0" "v0.1.0 v0.3.8 -1" "v0.3.8 v0.1.0 1" "v0.10.0 v0.9.0 
   # shellcheck disable=SC2086
   expect_ok expect_cmp $c
 done
+# ASCII order whatever the caller's locale (en_US collation puts rc before RC).
+expect_ok env LC_ALL=en_US.UTF-8 bash -c '. "$1"; [ "$(semver_cmp v1.0.0-RC.1 v1.0.0-rc.1)" = -1 ]' _ "${here}/lib-verify.sh"
 expect_refuse semver_cmp dev v0.3.8
 expect_refuse semver_cmp v0.3.8 ""
 expect_refuse semver_cmp "docklet v0.3.8" v0.3.8

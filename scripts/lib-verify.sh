@@ -18,7 +18,8 @@ valid_version() {
 # semver_cmp <a> <b>: prints -1, 0 or 1 (a<b, a=b, a>b) by semver precedence; returns 2 if either is not a valid v<semver>.
 semver_cmp() {
   valid_version "$1" && valid_version "$2" || return 2
-  local a="${1#v}" b="${2#v}" ca cb pa pb i x y
+  # SemVer orders alphanumeric identifiers in ASCII, not by the host locale's collation.
+  local LC_ALL=C a="${1#v}" b="${2#v}" ca cb pa pb i x y
   ca="${a%%-*}"; cb="${b%%-*}"
   pa=""; pb=""
   [ "$a" != "$ca" ] && pa="${a#*-}"
