@@ -614,6 +614,55 @@ type exportInfo struct {
 	SHA256    string `json:"sha256"`
 	BaseImage string `json:"baseImage"`
 	URL       string `json:"url"`
+	// Format is "disk" (the default when absent) or "work-tar", the work directory of a gVisor dock.
+	Format string `json:"format"`
+}
+
+const formatWorkTar = "work-tar"
+
+// gvExportUnsupported is the error for a control plane or host that cannot export gVisor docks.
+func gvExportUnsupported() error {
+	return newError("gvisor_export_unsupported", "this control plane (or the dock's host) cannot export gVisor docks yet; update the control plane and the dock's host, then pull again")
+}
+
+// gvExportRefused maps a refusal of a gVisor export (an older control plane, or a host without
+// work-export) to gvExportUnsupported and passes other errors through.
+func gvExportRefused(err error) error {
+	var ae *Error
+	if errors.As(err, &ae) {
+		switch ae.Code {
+		case "runtime_unsupported", "not_supported", "export_base_unsupported":
+			return gvExportUnsupported()
+		}
+	}
+	return err
+}
+
+// withSource adds the source of the new dock ("disk" or "work") to its JSON.
+func withSource(v any, source string) (map[string]any, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]any{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	m["source"] = source
+	return m, nil
+}
+
+// pulled reports a finished pull; --json adds where the new dock's files came from.
+func (a *App) pulled(asJSON bool, d local.Dock, source, remote, from string) error {
+	if asJSON {
+		m, err := withSource(d, source)
+		if err != nil {
+			return err
+		}
+		return a.printValue(m)
+	}
+	fmt.Fprintf(a.Stdout, "pulled %s from %s as %s (%s) state=%s\n", remote, from, dock(d).label(), d.ID, d.State)
+	return nil
 }
 
 func (a *App) cmdPull(ctx context.Context, args []string) error {
@@ -659,8 +708,16 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if localName == "" {
 		localName = rd.Name
 	}
-	if rd.Runtime == local.RuntimeGVisor {
-		return newError("not_supported", "the remote dock is a gvisor dock, which has no disk image to export, so it cannot be pulled")
+	gvRemote := rd.Runtime == local.RuntimeGVisor
+	if gvRemote {
+		// A qemu dock from a gVisor dock is a later change; fail before any export is made.
+		want := *runtimeFlag
+		if want == "" {
+			want = a.env("DOCK_LOCAL_RUNTIME")
+		}
+		if want == "" || want == local.RuntimeQEMU {
+			return newError("not_supported", "pulling a gVisor dock into a qemu dock is coming (issue #128); for now pass --runtime gvisor (or set DOCK_LOCAL_RUNTIME=gvisor)")
+		}
 	}
 	// The runtime's preflight runs before the export, so a host that cannot run it fails early.
 	rt, err := eng.PullRuntime(ctx, *runtimeFlag, a.env("DOCK_LOCAL_RUNTIME"))
@@ -671,16 +728,30 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if err := eng.CheckName(localName); err != nil {
 		return localError(err)
 	}
-	if rt == local.RuntimeGVisor {
+	if gvRemote {
+		image := rd.Image
+		if image == "" {
+			image = "image"
+		}
+		fmt.Fprintf(a.Stderr, "note: the remote dock runs on gVisor; the new dock starts from a fresh %s with only /home/user/work copied.\n", image)
+	} else if rt == local.RuntimeGVisor {
 		fmt.Fprintln(a.Stderr, "note: only /home/user/work is copied into the gVisor dock; packages and files outside it on the remote dock are not.")
 	}
 
-	raw, err = cl.Do(ctx, "POST", "/docks/"+url.PathEscape(id)+"/export", nil, map[string]any{})
+	body := map[string]any{}
+	if gvRemote {
+		body["formats"] = []string{formatWorkTar}
+	}
+	raw, err = cl.Do(ctx, "POST", "/docks/"+url.PathEscape(id)+"/export", nil, body)
 	if err != nil {
+		if gvRemote {
+			err = gvExportRefused(err)
+		}
 		return contractError(err)
 	}
 	var started struct {
 		ExportID string `json:"exportId"`
+		Format   string `json:"format"`
 	}
 	if err := json.Unmarshal(raw, &started); err != nil || started.ExportID == "" {
 		return newError("bad_response", "unexpected export response")
@@ -690,11 +761,34 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	}
 	info, err := a.waitExport(ctx, cl, started.ExportID)
 	if err != nil {
+		if gvRemote {
+			err = gvExportRefused(err)
+		}
 		return err
+	}
+	if info.Format == "" {
+		info.Format = started.Format
+	}
+	workTar := info.Format == formatWorkTar
+	if gvRemote != workTar {
+		if gvRemote {
+			// An older control plane that ignored the request and sent a disk.
+			return gvExportUnsupported()
+		}
+		return newError("bad_response", "the export is a work archive, but the remote dock is not a gVisor dock")
+	}
+	source := "disk"
+	if workTar {
+		source = "work"
 	}
 	gv := rt == local.RuntimeGVisor
 	var cached local.CachedImage
-	if gv {
+	if workTar {
+		// The part file, the tar it expands to, and the unpacked files in Docker's data directory.
+		if err := eng.CheckFreeSpace(eng.PullSpaceNeedGVisor(info.SizeBytes, info.DataBytes, 0), "pull"); err != nil {
+			return localError(err)
+		}
+	} else if gv {
 		// No base image and no qcow2: the part file beside the sparse raw disk, then the raw
 		// disk alone while its work directory is copied out (into Docker's data directory).
 		if err := eng.CheckFreeSpace(eng.PullSpaceNeedGVisor(info.SizeBytes, info.DataBytes, gibBytes(info.DiskGiB)), "pull"); err != nil {
@@ -726,6 +820,26 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if err := a.download(ctx, cl, started.ExportID, info, part, *c.json); err != nil {
 		return err
 	}
+	if workTar {
+		// The tar is about the recorded data size (plus headers); without one, the disk size bounds it.
+		limit := int64(info.DiskGiB) << 30
+		if limit <= 0 {
+			limit = local.DefaultMaxRawBytes
+		}
+		if info.DataBytes > 0 {
+			limit = min(limit, info.DataBytes+info.DataBytes/8+64<<20)
+		}
+		tarPath := filepath.Join(dir, "work.tar")
+		if err := local.DecompressFile(ctx, part, tarPath, limit); err != nil {
+			return localError(err)
+		}
+		_ = os.Remove(part)
+		d, err := eng.ImportWorkTar(ctx, local.ImportWorkTar{Name: localName, TarPath: tarPath, CPUs: info.CPUs, MemoryMiB: info.MemoryMiB, MaxBytes: limit})
+		if err != nil {
+			return localError(err)
+		}
+		return a.pulled(*c.json, d, source, pos[0], *from)
+	}
 	max := int64(info.DiskGiB) << 30
 	if max <= 0 {
 		max = local.DefaultMaxRawBytes
@@ -740,22 +854,14 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 		if err != nil {
 			return localError(err)
 		}
-		if *c.json {
-			return a.printValue(d)
-		}
-		fmt.Fprintf(a.Stdout, "pulled %s from %s as %s (%s) state=%s\n", pos[0], *from, dock(d).label(), d.ID, d.State)
-		return nil
+		return a.pulled(*c.json, d, source, pos[0], *from)
 	}
 	d, err := eng.Import(ctx, local.Import{Name: localName, Image: info.BaseImage, Cached: cached, RawPath: rawDisk,
 		CPUs: info.CPUs, MemoryMiB: info.MemoryMiB, DiskGiB: info.DiskGiB})
 	if err != nil {
 		return localError(err)
 	}
-	if *c.json {
-		return a.printValue(d)
-	}
-	fmt.Fprintf(a.Stdout, "pulled %s from %s as %s (%s) state=%s\n", pos[0], *from, dock(d).label(), d.ID, d.State)
-	return nil
+	return a.pulled(*c.json, d, source, pos[0], *from)
 }
 
 func (a *App) waitExport(ctx context.Context, cl *Client, exportID string) (exportInfo, error) {
