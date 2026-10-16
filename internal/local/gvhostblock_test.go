@@ -440,7 +440,7 @@ esac
 	}
 	run("", "remove", "DOCK-b", "dklb") // idempotent
 
-	// Check: present, then jump missing, then chain missing, then on the legacy backend.
+	// Check: present, then jump missing, then chain missing, then chain emptied, then on the legacy backend.
 	checkOut := func(broken string) (string, error) {
 		out, err := command(broken, "check", "DOCK-b", "dklb").Output()
 		return string(out), err
@@ -460,6 +460,13 @@ esac
 	}
 	if out, err := checkOut(""); err == nil || !strings.Contains(out, gvHostBlockMissing) {
 		t.Fatalf("check with the chain missing: %v %q", err, out)
+	}
+	// The chain is emptied (iptables -F DOCK-b): the jump leads nowhere, so the dock is unblocked.
+	if err := os.WriteFile(filepath.Join(state, "iptables"), []byte(jump+"chain DOCK-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := checkOut(""); err == nil || !strings.Contains(out, gvHostBlockMissing) {
+		t.Fatalf("check with the chain emptied: %v %q", err, out)
 	}
 	run("", "remove", "DOCK-b", "dklb")
 	run("iptables", "install", "DOCK-b", "dklb")

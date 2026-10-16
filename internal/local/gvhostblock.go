@@ -24,8 +24,8 @@ const gvHostBlockMissing = "DOCK_HOST_BLOCK_MISSING"
 // Install is idempotent (it rewrites the chain and adds the jump once). IPv4 is required; IPv6 is
 // best effort. Replies to connections the host opened (the published agent port, via docker-proxy
 // or DNAT) are conntrack ESTABLISHED and pass; anything the dock starts is dropped, except DNS
-// to the resolvers in the dock's resolv.conf. Check exits 0 when the IPv4 jump and chain exist,
-// and 3 with the missing marker when either is gone (IPv6 is not required).
+// to the resolvers in the dock's resolv.conf. Check exits 0 when the IPv4 jump and the chain with
+// its final DROP exist, and 3 with the missing marker when any is gone (IPv6 is not required).
 const gvHostBlockScript = `set -u
 mode=$1; chain=$2; br=$3; shift 3
 install() {
@@ -53,7 +53,8 @@ fi
 if [ "$mode" = check ]; then
   for t in iptables iptables-legacy; do
     if "$t" -w -S >/dev/null 2>&1; then
-      if "$t" -w -C INPUT -i "$br" -j "$chain" 2>/dev/null && "$t" -w -S "$chain" >/dev/null 2>&1; then exit 0; fi
+      if "$t" -w -C INPUT -i "$br" -j "$chain" 2>/dev/null && "$t" -w -S "$chain" >/dev/null 2>&1 &&
+        "$t" -w -C "$chain" -j DROP 2>/dev/null; then exit 0; fi
       echo ` + gvHostBlockMissing + `; exit 3
     fi
   done
@@ -133,7 +134,7 @@ func (g *GVisor) installHostBlock(ctx context.Context, id string, nameservers []
 	return warns, nil
 }
 
-// checkHostBlock reports whether the dock's IPv4 jump and chain are still on the host. A helper
+// checkHostBlock reports whether the dock's IPv4 jump and chain (with its DROP) are still on the host. A helper
 // that cannot run (Docker down, image missing) is an error, not a missing rule.
 func (g *GVisor) checkHostBlock(ctx context.Context, id string) (bool, error) {
 	image, err := g.checkImage(ctx, id)
