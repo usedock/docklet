@@ -217,11 +217,12 @@ func (e *Engine) ping(ctx context.Context, rec Record) bool {
 }
 
 // State of a dock: ready (agent answers), starting (vm up, agent not yet), archived (stopped).
+// A dock whose import never finished is import_incomplete even while its import boot still runs.
 func (e *Engine) state(ctx context.Context, r Record) string {
+	if e.importIncomplete(r) != nil {
+		return "import_incomplete"
+	}
 	if !e.aliveRec(ctx, r) {
-		if e.importIncomplete(r) != nil {
-			return "import_incomplete"
-		}
 		return "archived"
 	}
 	if e.ping(ctx, r) {
