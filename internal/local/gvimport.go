@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,19 @@ import (
 // the first resume boots it as a first start and removes the marker.
 const gvFreshMarker = "imported"
 
+// gvImportingMarker is a file in the dock directory that exists from before the import helper
+// starts until its copy has succeeded. A dock that has it (the process died mid-copy) holds a
+// partial work directory, so it cannot be resumed, pushed or branched; it can only be removed.
+const gvImportingMarker = "importing"
+
+// importIncomplete refuses to use a dock whose import never finished.
+func (e *Engine) importIncomplete(rec Record) error {
+	if _, err := os.Stat(e.file(rec.ID, gvImportingMarker)); err != nil {
+		return nil
+	}
+	return errf("import_incomplete", "the import of dock %s did not finish, so its work directory is partial. Remove it with: dock rm %s, then pull again", rec.Name, rec.Name)
+}
+
 const (
 	// gvDiskPath is where the helper sees the exported disk.
 	gvDiskPath = "/x/disk.raw"
@@ -24,13 +38,21 @@ const (
 	// gvDebugfsPrefix tags the helper's debugfs stderr lines so Docker's own warnings are not
 	// mistaken for debugfs errors.
 	gvDebugfsPrefix = "DEBUGFS: "
+	// gvImportTooBigMarker is printed by the helper when the copy outgrew its size limit.
+	gvImportTooBigMarker = "DOCK_IMPORT_TOO_BIG"
+	// gvImportMargin is the free space of Docker's data root an import leaves untouched.
+	gvImportMargin = 1 << 30
 )
 
-// gvImportScript copies gvWorkDest out of the disk into /work. $1 is a random stage name.
-// debugfs exits 0 even when rdump fails, so its stderr is relayed with gvDebugfsPrefix and
-// checked by the caller. After the move /work itself is made the dock user's (a fresh volume
-// root is root-owned), then ids 1000 (the cloud user) are mapped to 1001 (the gVisor user).
-// debugfs rdump leaves symlinks owned by root, so those get the dock user too.
+// gvImportScript copies gvWorkDest out of the disk into /work. $1 is a random stage name and $2
+// the most KiB the copy may take. debugfs rdump turns every hard link into a full copy, so a
+// small crafted disk can expand without bound; the copy runs in the background and is killed
+// once the whole (fresh) volume is over the limit: that counts the error file, which a
+// directory loop grows far faster than files, and anything a crafted name writes past the stage. debugfs exits 0 even when rdump fails, so its
+// stderr is kept in a file, relayed with gvDebugfsPrefix and checked by the caller. After the
+// move /work itself is made the dock user's (a fresh volume root is root-owned), then ids 1000
+// (the cloud user) are mapped to 1001 (the gVisor user). debugfs rdump leaves symlinks owned
+// by root, so those get the dock user too.
 const gvImportScript = `set -e
 d=` + gvDiskPath + `
 out=$(debugfs -R "stat ` + gvWorkDest + `" "$d" 2>&1 >/dev/null || true)
@@ -38,8 +60,25 @@ case "$out" in
 *"File not found"*) echo ` + gvNoWorkdirMarker + ` ;;
 *)
   s=` + gvWorkSrc + `/.stage-$1
+  e=$s.err
   mkdir "$s"
-  debugfs -R "rdump ` + gvWorkDest + ` $s" "$d" 2>&1 >/dev/null | sed 's/^/` + gvDebugfsPrefix + `/' >&2
+  debugfs -R "rdump ` + gvWorkDest + ` $s" "$d" >/dev/null 2>"$e" &
+  p=$!
+  while :; do
+    alive=0
+    kill -0 $p 2>/dev/null && alive=1
+    u=$(du -sk ` + gvWorkSrc + ` 2>/dev/null | cut -f1 || true)
+    if [ "${u:-0}" -gt "$2" ]; then
+      kill -9 $p 2>/dev/null || true
+      echo ` + gvImportTooBigMarker + `
+      exit 3
+    fi
+    [ $alive = 1 ] || break
+    sleep 1
+  done
+  wait $p || true
+  sed 's/^/` + gvDebugfsPrefix + `/' "$e" >&2
+  rm -f "$e"
   [ -d "$s/work" ] || { echo "` + gvDebugfsPrefix + `rdump produced no work directory" >&2; exit 1; }
   chmod --reference="$s/work" ` + gvWorkSrc + `
   find "$s/work" -mindepth 1 -maxdepth 1 -exec mv -t ` + gvWorkSrc + ` {} +
@@ -61,12 +100,40 @@ func gvImporter(id string) string { return "dock-local-" + id + "-import" }
 
 // gvImportArgs is the docker run of the import helper for dock id. Its rootfs is read-only, so
 // the only thing an untrusted disk can write to is the new dock's own work volume.
-func gvImportArgs(runtime, image, id, disk, stage string) []string {
+func gvImportArgs(runtime, image, id, disk, stage string, limitKiB int64) []string {
 	a := diskHelperArgs(runtime, image, gvImportCaps, []diskMount{
 		{Source: disk, Target: gvDiskPath, ReadOnly: true},
 		{Source: gvVolume(id), Target: gvWorkSrc},
-	}, gvImportScript, stage)
+	}, gvImportScript, stage, strconv.FormatInt(limitKiB, 10))
 	return append([]string{a[0], "--name", gvImporter(id), "--read-only"}, a[1:]...)
+}
+
+// gvImportLimit is the most the import may write into the work volume, in bytes, and whether
+// the free space of Docker's data root (rather than the disk's own size) is what bounds it. The
+// unique data of a disk fits in its size, so that plus a little slack is the cap; hard links
+// that rdump expands into copies go beyond it. Where Docker's data root cannot be read from here
+// (a remote daemon) only the disk-size cap applies.
+func (e *Engine) gvImportLimit(ctx context.Context, diskSize int64) (limit int64, byFree bool) {
+	root, _, err := e.gvisor().docker(ctx, nil, "info", "--format", "{{.DockerRootDir}}")
+	root = strings.TrimSpace(root)
+	if err != nil || !filepath.IsAbs(root) {
+		return importLimit(diskSize, 0, false)
+	}
+	free, err := freeBytes(root)
+	return importLimit(diskSize, free, err == nil)
+}
+
+// importLimit is gvImportLimit's arithmetic: the disk-size cap, lowered to the free space less
+// the margin when that is known and smaller.
+func importLimit(diskSize int64, free uint64, haveFree bool) (limit int64, byFree bool) {
+	limit = diskSize + diskSize/8 + 64<<20
+	if !haveFree {
+		return limit, false
+	}
+	if avail := int64(min(free, 1<<62)) - gvImportMargin; avail < limit {
+		return max(avail, 0), true
+	}
+	return limit, false
 }
 
 // debugfsRdumpErrors returns the debugfs error lines the import helper relayed on stderr. Unlike
@@ -112,7 +179,17 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 	if err != nil {
 		return Dock{}, err
 	}
-	rec, err := e.gvNewRecord(spec, false, suid)
+	var diskSize int64
+	if st, err := os.Stat(disk); err == nil {
+		diskSize = st.Size()
+	}
+	limit, byFree := e.gvImportLimit(ctx, diskSize)
+	if byFree && limit < max(diskSize/64, 16<<20) {
+		return Dock{}, errf("insufficient_space", "Docker's data directory has too little free space left to import into (%s)", HumanBytes(limit))
+	}
+	// The importing marker is written with the record: a crash from then until the copy succeeds
+	// leaves a partial (or empty) work directory, and the marker keeps anyone from booting it.
+	rec, err := e.gvNewRecord(spec, false, suid, true)
 	if err != nil {
 		return Dock{}, err
 	}
@@ -127,7 +204,13 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 		return Dock{}, err
 	}
 	e.logf("importing the work directory into %s", rec.ID)
-	stdout, stderr, err := g.docker(ctx, nil, gvImportArgs(rec.gvRuntime(), image, rec.ID, disk, NewID())...)
+	stdout, stderr, err := g.docker(ctx, nil, gvImportArgs(rec.gvRuntime(), image, rec.ID, disk, NewID(), limit>>10)...)
+	if strings.Contains(stdout, gvImportTooBigMarker) {
+		if byFree {
+			return fail(errf("insufficient_space", "the work directory is larger than the %s free in Docker's data directory (keeping %s spare); free some space, then pull again", HumanBytes(limit), HumanBytes(gvImportMargin)))
+		}
+		return fail(errf("import_too_big", "the work directory grew past %s while it was copied out of the disk, more than the disk can hold (a crafted disk with many hard links?)", HumanBytes(limit)))
+	}
 	if err != nil {
 		return fail(dockerFailure("import_failed", "copy the work directory out of the disk", err, lastLines(stderr, 20)))
 	}
@@ -138,6 +221,9 @@ func (e *Engine) ImportWork(ctx context.Context, in ImportWork) (Dock, error) {
 		e.logf("the disk has no %s; the new dock starts with an empty work directory", gvWorkDest)
 	}
 	if err := os.WriteFile(e.file(rec.ID, gvFreshMarker), nil, 0o600); err != nil {
+		return fail(errf("store_error", "%v", err))
+	}
+	if err := os.Remove(e.file(rec.ID, gvImportingMarker)); err != nil {
 		return fail(errf("store_error", "%v", err))
 	}
 	return e.view(ctx, rec), nil

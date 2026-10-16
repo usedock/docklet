@@ -92,7 +92,7 @@ On a Linux machine without usable KVM (for example a cloud VM without nested vir
   - `--disk` is not enforced: the work volume and, with `runsc-suid`, everything written elsewhere in the dock live in Docker's storage (`/var/lib/docker`) with no size limit. `docker container prune` or `docker system prune` deletes a stopped dock's container and everything installed in it; only `/home/user/work` (a named volume) survives.
   - `dock branch` works: the source is stopped if running, its container filesystem is committed to a `dock-local-gvisor-branch:<id>` image and its work volume copied (by a short-lived, network-less runsc container), then the source is resumed and the branch starts as a new dock with its own token, port and network. With the `runsc-suid` runtime the branch carries rootfs changes (installed packages) too; with plain `runsc` only `/home/user/work` carries over. `dock rm` removes the branch image. A committed image keeps a copy of the source's rootfs changes on disk until the source and all branches made from that commit are removed.
   - `--network off` works: the container runs with `--network none`, so it has no internet, no DNS and no route to the host or to other docks (the sandbox keeps only its own loopback). With no published port, `dock` reaches the guest agent through `docker exec -i <container> python3` (a small relay to the agent on the sandbox loopback), so `dock exec`, `dock ssh` and `dock port` work as on any other dock. Each agent call costs one `docker exec`, so they are slower than on a network-on dock. Stop, resume and branch keep the dock network-off, and a network-off dock never creates or connects a Docker network.
-  - Not supported: `dock push` and `dock pull`.
+  - `dock pull <dock> --from <ctx> --runtime gvisor` (or `DOCK_LOCAL_RUNTIME=gvisor`) copies only `/home/user/work` of a microVM dock into a new stopped gVisor dock; packages and files outside it are not copied. Pulling a gVisor dock from a control plane is not supported (it has no disk image to export). The copy is size-bounded, and a dock whose import was interrupted shows as `import_incomplete` in `dock ls`: remove it with `dock rm` and pull again.
   - Some syscall-heavy or file-I/O-heavy workloads are slower than in a VM.
 - If the `docker` binary is gone, `dock rm` still removes the record and warns with the names to clean up by hand; if Docker is installed but its daemon is down, it fails with `docker_unavailable` and you can retry after starting Docker.
 
@@ -132,6 +132,7 @@ dock login                               # prompts without echo; or: echo "$DOCK
 dock new web --cpus 4 --memory 8gb --disk 40gb --env staging   # returns once the dock is ready
 dock push web --to lab                  # copy a stopped local dock's disk to a control plane context (--name, --stop, --rm)
 dock pull web --from lab --name web-local   # copy a fleet dock's disk to a new stopped local dock (Dockyard-image docks only)
+dock pull web --from lab --runtime gvisor   # no KVM: copy only /home/user/work into a new stopped gVisor dock
 dock ls
 dock exec web -- uname -a                # exits with the command's exit code
 dock ssh web                             # runs ssh against the Dock SSH gateway (--print to show it)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,8 @@ type importDocker struct {
 	helper         [][]string
 	stdout, stderr string
 	err            error
+	// during runs while the helper "runs".
+	during func(args []string)
 }
 
 func (d *importDocker) run(ctx context.Context, stdin io.Reader, args ...string) (string, string, error) {
@@ -34,6 +37,9 @@ func (d *importDocker) run(ctx context.Context, stdin io.Reader, args ...string)
 			}
 		}
 		d.fakeDocker.mu.Unlock()
+		if d.during != nil {
+			d.during(args)
+		}
 		return d.stdout, d.stderr, d.err
 	}
 	return d.fakeDocker.run(ctx, stdin, args...)
@@ -340,5 +346,232 @@ func TestPullRuntimeGVisorPreflight(t *testing.T) {
 	e.GVisor.LookPath = func(string) (string, error) { return "", errors.New("not found") }
 	if _, err := e.PullRuntime(ctx, RuntimeGVisor, ""); ErrCode(err) != "docker_not_found" {
 		t.Fatalf("want docker_not_found, got %v", err)
+	}
+}
+
+func TestImportWorkMarkerSpansTheCopy(t *testing.T) {
+	e, d, _ := newImportEngine(t)
+	var during bool
+	d.during = func([]string) {
+		recs, _ := e.store().List()
+		during = len(recs) == 1 && e.importIncomplete(recs[0]) != nil
+	}
+	if _, err := e.ImportWork(context.Background(), ImportWork{Name: "m", RawPath: rawDisk(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if !during {
+		t.Fatal("the importing marker must exist while the helper copies")
+	}
+	rec, _ := e.Lookup("m")
+	if _, err := os.Stat(e.file(rec.ID, gvImportingMarker)); err == nil {
+		t.Fatal("the marker must go after a successful copy")
+	}
+}
+
+func TestIncompleteImportCannotBeUsed(t *testing.T) {
+	ctx := context.Background()
+	e, d, _ := newImportEngine(t)
+	dock, err := e.ImportWork(ctx, ImportWork{Name: "crashed", RawPath: rawDisk(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What a process killed mid-copy leaves behind.
+	if err := os.WriteFile(e.file(dock.ID, gvImportingMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.fakeDocker.calls = nil
+	if _, err := e.Resume(ctx, "crashed"); ErrCode(err) != "import_incomplete" || !strings.Contains(err.Error(), "dock rm crashed") {
+		t.Fatalf("resume: %v", err)
+	}
+	if len(d.fakeDocker.callsWith("run")) != 0 {
+		t.Fatalf("a partial import must not boot: %v", d.fakeDocker.calls)
+	}
+	if _, err := e.Branch(ctx, "crashed", 1, "", Spec{}); ErrCode(err) != "import_incomplete" {
+		t.Fatalf("branch: %v", err)
+	}
+	if _, err := e.flattenGVisor(ctx, mustLookup(t, e, "crashed"), "crashed", t.TempDir(), false, PushOpts{}); ErrCode(err) != "import_incomplete" {
+		t.Fatalf("push: %v", err)
+	}
+	docks, _ := e.List(ctx)
+	if len(docks) != 1 || docks[0].State != "import_incomplete" {
+		t.Fatalf("ls must show the broken state: %+v", docks)
+	}
+	e.Driver = &QEMU{GOOS: "linux", GOARCH: "amd64", Getenv: env(nil), system: "/q/qemu", img: "/q/qemu-img", KVM: func() error { return nil }}
+	var row *Check
+	for _, c := range e.Doctor(ctx) {
+		if c.Name == "dock crashed" {
+			row = &c
+		}
+	}
+	if row == nil || row.OK || !strings.Contains(row.Fix, "dock rm crashed") {
+		t.Fatalf("doctor row: %+v", row)
+	}
+	// Removing it is the way out.
+	if err := e.Remove(ctx, "crashed"); err != nil {
+		t.Fatal(err)
+	}
+	if docks, _ := e.List(ctx); len(docks) != 0 {
+		t.Fatalf("docks: %+v", docks)
+	}
+}
+
+func TestImportWorkTooBig(t *testing.T) {
+	e, d, _ := newImportEngine(t)
+	d.stdout = gvImportTooBigMarker + "\n"
+	d.err = errors.New("exit status 3")
+	_, err := e.ImportWork(context.Background(), ImportWork{Name: "big", RawPath: rawDisk(t)})
+	if ErrCode(err) != "import_too_big" {
+		t.Fatalf("got %v", err)
+	}
+	if recs, _ := e.List(context.Background()); len(recs) != 0 || len(d.volumes) != 0 {
+		t.Fatalf("nothing may be left: %+v %v", recs, d.volumes)
+	}
+}
+
+func TestImportWorkHelperGetsASizeLimit(t *testing.T) {
+	e, d, _ := newImportEngine(t)
+	disk := filepath.Join(t.TempDir(), "disk.raw")
+	f, err := os.Create(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if _, err := e.ImportWork(context.Background(), ImportWork{Name: "lim", RawPath: disk}); err != nil {
+		t.Fatal(err)
+	}
+	a := d.helper[0]
+	// 1 GiB disk: the limit is the disk plus an eighth and 64 MiB, in KiB, the last argument.
+	if want := strconv.FormatInt((1<<30+1<<27+64<<20)>>10, 10); a[len(a)-1] != want {
+		t.Fatalf("limit %q, want %q: %v", a[len(a)-1], want, a)
+	}
+	for _, want := range []string{"du -sk", "kill -9", gvImportTooBigMarker} {
+		if !strings.Contains(gvImportScript, want) {
+			t.Errorf("script lacks %q", want)
+		}
+	}
+}
+
+func TestImportLimit(t *testing.T) {
+	const gib = 1 << 30
+	if l, byFree := importLimit(10*gib, 0, false); byFree || l != 10*gib+10*gib/8+64<<20 {
+		t.Fatalf("unknown free space: %d %v", l, byFree)
+	}
+	if l, byFree := importLimit(10*gib, 100*gib, true); byFree || l != 10*gib+10*gib/8+64<<20 {
+		t.Fatalf("plenty free: %d %v", l, byFree)
+	}
+	if l, byFree := importLimit(10*gib, 5*gib, true); !byFree || l != 4*gib {
+		t.Fatalf("5 GiB free keeps the margin: %d %v", l, byFree)
+	}
+	if l, byFree := importLimit(10*gib, gib/2, true); !byFree || l != 0 {
+		t.Fatalf("less free than the margin: %d %v", l, byFree)
+	}
+}
+
+func TestImportWorkReadsDockerRootFreeSpace(t *testing.T) {
+	e, d, _ := newImportEngine(t)
+	// A real directory, whose free space is far above the tiny disk: the import goes through, and
+	// the arithmetic for a full one is TestImportLimit.
+	root := t.TempDir()
+	e.GVisor.Run = func(ctx context.Context, in io.Reader, args ...string) (string, string, error) {
+		if args[0] == "info" && slices.Contains(args, "{{.DockerRootDir}}") {
+			return root + "\n", "", nil
+		}
+		return d.run(ctx, in, args...)
+	}
+	if _, err := e.ImportWork(context.Background(), ImportWork{Name: "ok", RawPath: rawDisk(t)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportWorkNoRecordWithoutTheMarker(t *testing.T) {
+	e, d, _ := newImportEngine(t)
+	// The free-space probe runs before the record exists, and the record is born with the marker.
+	recsAtInfo := -1
+	e.GVisor.Run = func(ctx context.Context, in io.Reader, args ...string) (string, string, error) {
+		if args[0] == "info" && slices.Contains(args, "{{.DockerRootDir}}") {
+			recs, _ := e.store().List()
+			recsAtInfo = len(recs)
+			return "", "", errors.New("no info")
+		}
+		return d.run(ctx, in, args...)
+	}
+	if _, err := e.ImportWork(context.Background(), ImportWork{Name: "m2", RawPath: rawDisk(t)}); err != nil {
+		t.Fatal(err)
+	}
+	if recsAtInfo != 0 {
+		t.Fatalf("records during the free-space probe: %d", recsAtInfo)
+	}
+	spec, err := Spec{Name: "m3", Runtime: RuntimeGVisor}.withDefaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := e.gvNewRecord(spec, false, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.importIncomplete(rec) == nil {
+		t.Fatal("an importing record is registered with its marker")
+	}
+	plain, err := e.gvNewRecord(Spec{Name: "m4", Runtime: RuntimeGVisor, CPUs: spec.CPUs, MemoryMiB: spec.MemoryMiB, Network: spec.Network}, false, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.importIncomplete(plain) != nil {
+		t.Fatal("a dock new record has no importing marker")
+	}
+}
+
+func TestRemoveIncompleteImportStopsTheHelper(t *testing.T) {
+	ctx := context.Background()
+	e, d, _ := newImportEngine(t)
+	dock, err := e.ImportWork(ctx, ImportWork{Name: "killed", RawPath: rawDisk(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A CLI killed mid-copy leaves the marker and its helper still running on the volume.
+	if err := os.WriteFile(e.file(dock.ID, gvImportingMarker), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.fakeDocker.calls = nil
+	if err := e.Remove(ctx, "killed"); err != nil {
+		t.Fatal(err)
+	}
+	helperRm, volRm := -1, -1
+	for i, c := range d.fakeDocker.calls {
+		if c[0] == "rm" && c[len(c)-1] == gvImporter(dock.ID) && helperRm < 0 {
+			helperRm = i
+		}
+		if c[0] == "volume" && c[1] == "rm" {
+			volRm = i
+		}
+	}
+	if helperRm < 0 || volRm < 0 || helperRm > volRm {
+		t.Fatalf("the import helper must be removed before the volume: %v", d.fakeDocker.calls)
+	}
+	// A finished dock never touches the helper name.
+	done, err := e.ImportWork(ctx, ImportWork{Name: "fine", RawPath: rawDisk(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.fakeDocker.calls = nil
+	if err := e.Remove(ctx, "fine"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range d.fakeDocker.calls {
+		if c[len(c)-1] == gvImporter(done.ID) {
+			t.Fatalf("unexpected helper call: %v", c)
+		}
+	}
+}
+
+func TestImportScriptCountsTheErrorFile(t *testing.T) {
+	// debugfs writes one error line, with the full path, per failed entry: a directory loop on a
+	// crafted disk makes errors far faster than files, so the watchdog must count them too.
+	// The error file sits beside the stage, so the watchdog measures the whole fresh volume.
+	if !strings.Contains(gvImportScript, "du -sk "+gvWorkSrc+" ") || !strings.Contains(gvImportScript, "e=$s.err") {
+		t.Fatalf("the watchdog must measure the whole volume:\n%s", gvImportScript)
 	}
 }

@@ -617,9 +617,10 @@ type exportInfo struct {
 }
 
 func (a *App) cmdPull(ctx context.Context, args []string) error {
-	c := a.flags("pull", "pull <dock> --from <context> [--name N]")
+	c := a.flags("pull", "pull <dock> --from <context> [--name N] [--runtime qemu|gvisor]")
 	from := c.fs.String("from", "", "context to pull from (a control plane, not local)")
 	name := c.fs.String("name", "", "name of the new local dock (default: the remote name)")
+	runtimeFlag := c.fs.String("runtime", "", "runtime of the new local dock: qemu (default, the whole disk comes along) or gvisor (Linux with Docker and runsc, no KVM needed; only /home/user/work is copied). Default from DOCK_LOCAL_RUNTIME")
 	pos, err := c.parse(args, 1, 1)
 	if err != nil {
 		return err
@@ -659,11 +660,19 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 		localName = rd.Name
 	}
 	if rd.Runtime == local.RuntimeGVisor {
-		return newError("not_supported", "pull is not supported for gvisor docks (only /home/user/work persists; there is no disk image to export)")
+		return newError("not_supported", "the remote dock is a gvisor dock, which has no disk image to export, so it cannot be pulled")
+	}
+	// The runtime's preflight runs before the export, so a host that cannot run it fails early.
+	rt, err := eng.PullRuntime(ctx, *runtimeFlag, a.env("DOCK_LOCAL_RUNTIME"))
+	if err != nil {
+		return localError(err)
 	}
 	// Fail on a taken name before the long export and download.
 	if err := eng.CheckName(localName); err != nil {
 		return localError(err)
+	}
+	if rt == local.RuntimeGVisor {
+		fmt.Fprintln(a.Stderr, "note: only /home/user/work is copied into the gVisor dock; packages and files outside it on the remote dock are not.")
 	}
 
 	raw, err = cl.Do(ctx, "POST", "/docks/"+url.PathEscape(id)+"/export", nil, map[string]any{})
@@ -683,20 +692,30 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if info.BaseImage == "" {
-		return contractError(newError("export_base_unsupported", ""))
-	}
-	// Peak: the part file beside the sparse raw disk, then that raw disk beside the new qcow2,
-	// on top of a base image that may still have to be downloaded.
-	if err := eng.CheckFreeSpace(eng.PullSpaceNeed(ctx, info.SizeBytes, info.DataBytes, gibBytes(info.DiskGiB), info.BaseImage), "pull"); err != nil {
-		return localError(err)
-	}
-	if !*c.json {
-		fmt.Fprintf(a.Stderr, "preparing the %s image\n", info.BaseImage)
-	}
-	cached, err := eng.EnsureImage(ctx, info.BaseImage)
-	if err != nil {
-		return localError(err)
+	gv := rt == local.RuntimeGVisor
+	var cached local.CachedImage
+	if gv {
+		// No base image and no qcow2: the part file beside the sparse raw disk, then the raw
+		// disk alone while its work directory is copied out (into Docker's data directory).
+		if err := eng.CheckFreeSpace(eng.PullSpaceNeedGVisor(info.SizeBytes, info.DataBytes, gibBytes(info.DiskGiB)), "pull"); err != nil {
+			return localError(err)
+		}
+	} else {
+		if info.BaseImage == "" {
+			return contractError(newError("export_base_unsupported", ""))
+		}
+		// Peak: the part file beside the sparse raw disk, then that raw disk beside the new qcow2,
+		// on top of a base image that may still have to be downloaded.
+		if err := eng.CheckFreeSpace(eng.PullSpaceNeed(ctx, info.SizeBytes, info.DataBytes, gibBytes(info.DiskGiB), info.BaseImage), "pull"); err != nil {
+			return localError(err)
+		}
+		if !*c.json {
+			fmt.Fprintf(a.Stderr, "preparing the %s image\n", info.BaseImage)
+		}
+		cached, err = eng.EnsureImage(ctx, info.BaseImage)
+		if err != nil {
+			return localError(err)
+		}
 	}
 	dir, cleanup, err := a.tempDir(eng)
 	if err != nil {
@@ -716,6 +735,17 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 		return localError(err)
 	}
 	_ = os.Remove(part)
+	if gv {
+		d, err := eng.ImportWork(ctx, local.ImportWork{Name: localName, RawPath: rawDisk, CPUs: info.CPUs, MemoryMiB: info.MemoryMiB})
+		if err != nil {
+			return localError(err)
+		}
+		if *c.json {
+			return a.printValue(d)
+		}
+		fmt.Fprintf(a.Stdout, "pulled %s from %s as %s (%s) state=%s\n", pos[0], *from, dock(d).label(), d.ID, d.State)
+		return nil
+	}
 	d, err := eng.Import(ctx, local.Import{Name: localName, Image: info.BaseImage, Cached: cached, RawPath: rawDisk,
 		CPUs: info.CPUs, MemoryMiB: info.MemoryMiB, DiskGiB: info.DiskGiB})
 	if err != nil {

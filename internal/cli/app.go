@@ -70,7 +70,7 @@ Commands:
   branch <dock>         start independent docks from a dock's state (local: a copy of its disk)
   rm <dock>             delete a dock
   push <dock> --to <ctx>    copy a stopped local dock's disk to a control plane (--name, --stop, --rm)
-  pull <dock> --from <ctx>  copy a control plane dock's disk to a new stopped local dock (--name)
+  pull <dock> --from <ctx>  copy a control plane dock's disk to a new stopped local dock (--name, --runtime gvisor)
   images                list Dockyard images; 'images pull <name>' downloads one
   doctor                check what local docks need (QEMU, accelerator, disk, Dockyard)
   login                 store an API key for a context (read from stdin)

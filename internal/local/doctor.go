@@ -86,6 +86,13 @@ func (e *Engine) Doctor(ctx context.Context) []Check {
 	if showGVisor && gvErr == nil {
 		checks = append(checks, e.gvHostBlockChecks(ctx)...)
 	}
+	if recs, err := e.store().List(); err == nil {
+		for _, r := range recs {
+			if r.runtime() == RuntimeGVisor && e.importIncomplete(r) != nil {
+				add(Check{Name: "dock " + r.Name, Detail: "the import of its work directory did not finish", Fix: "dock rm " + r.Name + ", then pull again"})
+			}
+		}
+	}
 	if err := os.MkdirAll(e.Dir, 0o700); err != nil {
 		add(Check{Name: "data dir", Detail: err.Error()})
 	} else if free, err := freeBytes(e.Dir); err != nil {
