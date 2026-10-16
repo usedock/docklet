@@ -3,7 +3,8 @@
 # this machine (runsc, no KVM needed for the host). Creates a dock on the control plane, writes a marker tree
 # in /home/user/work (a file, a 0700 directory, a symlink), then runs dock pull --runtime gvisor twice with
 # the CLI under test: once while the remote dock is running (the host pauses it for the export) and once
-# more after a stop and resume (the control plane exports only ready docks). Each local copy is resumed and its
+# more after a stop and resume (the control plane exports only ready, idle or running docks; usedock/dock#165 tracks
+# pulling a stopped one). Each local copy is resumed and its
 # content, modes, symlink and owner are checked with dock exec. A last leg pulls into a QEMU dock (needs KVM) and
 # checks the same tree owned by user (uid 1000). Needs DOCK (binary), DOCK_URL, LOGS (dir); jq and curl. Docker
 # with the runsc and runsc-suid runtimes must be set up, as the workflow does.
@@ -34,9 +35,9 @@ $DOCK exec "$SRC" -- 'mkdir -p /home/user/work/tree/private \
   && ln -s file.txt /home/user/work/tree/link && sync'
 [ "$($DOCK exec "$SRC" -- cat /home/user/work/tree/file.txt)" = marker-content ] || die "marker not written on the fleet dock"
 
-# assert_tree <local dock> [late]: checks the pulled copy (after dock resume) with dock exec.
+# assert_tree <local dock> <dock user uid> [late]: checks the pulled copy (after dock resume) with dock exec.
 assert_tree() {
-  local name="$1" want_late="${2:-}" out uid
+  local name="$1" want_uid="$2" want_late="${3:-}" out uid
   out="$($DOCK exec "$name" -- cat /home/user/work/tree/file.txt)"
   [ "$out" = marker-content ] || die "${name}: file.txt is '${out}'"
   out="$($DOCK exec "$name" -- cat /home/user/work/tree/private/inner.txt)"
@@ -54,6 +55,7 @@ assert_tree() {
     [ "$out" = "$want_late" ] || die "${name}: late.txt is '${out}'"
   fi
   uid="$($DOCK exec "$name" -- id -u)"
+  [ "$uid" = "$want_uid" ] || die "${name}: exec runs as uid ${uid}, want the dock user ${want_uid}"
   out="$($DOCK exec "$name" -- stat -c '%u:%g' /home/user/work/tree /home/user/work/tree/file.txt /home/user/work/tree/private /home/user/work/tree/private/inner.txt | sort -u)"
   [ "$out" = "${uid}:${uid}" ] || die "${name}: owners are '${out}', want the dock user ${uid}:${uid}"
   log "${name}: marker tree intact, owned by uid ${uid}"
@@ -72,20 +74,20 @@ pull_gvisor() {
 
 # 1. Pull while the remote dock runs: the host pauses it for the export, so it must answer afterwards.
 pull_gvisor gv-running
-assert_tree gv-running
+assert_tree gv-running 1001
 $DOCK context use selfhost
 retry 6 $DOCK exec "$SRC" -- true || die "the fleet dock did not recover after the export of a running dock"
 [ "$($DOCK exec "$SRC" -- cat /home/user/work/tree/file.txt)" = marker-content ] || die "the fleet dock lost data across the export"
 log "running-dock pull ok"
 
 # 2. Stop and resume the fleet dock (the host saves the work directory on stop and restores it), then pull again
-# with a file written after the first pull. The control plane exports only ready docks, so a stopped one is not pulled.
+# with a file written after the first pull. A stopped dock cannot be exported yet (usedock/dock#165), so it is resumed first.
 $DOCK exec "$SRC" -- 'printf late-content > /home/user/work/tree/late.txt && sync'
 t=$(date +%s); $DOCK stop "$SRC"; timing "dock stop (fleet gvisor)" "$t"
 t=$(date +%s); $DOCK resume "$SRC"; timing "dock resume (fleet gvisor)" "$t"
 retry 6 $DOCK exec "$SRC" -- true || die "the fleet dock did not come back after resume"
 pull_gvisor gv-second
-assert_tree gv-second late-content
+assert_tree gv-second 1001 late-content
 log "second pull after stop and resume ok"
 
 # 3. A QEMU dock from the same remote dock (needs KVM): a fresh Dockyard base with the work directory unpacked as
@@ -99,7 +101,7 @@ $DOCK context use local
 t=$(date +%s); $DOCK resume gv-qemu; timing "local: dock resume (qemu)" "$t"
 [ "$($DOCK exec gv-qemu -- id -un)" = user ] || die "gv-qemu: exec does not run as user"
 [ "$($DOCK exec gv-qemu -- id -u)" = 1000 ] || die "gv-qemu: the dock user is not uid 1000"
-assert_tree gv-qemu late-content
+assert_tree gv-qemu 1000 late-content
 log "pull into a qemu dock ok"
 $DOCK rm gv-qemu
 
