@@ -123,7 +123,7 @@ func TestE2ELocalDockImportWorkTar(t *testing.T) {
 	if got := run("stat -c '%U:%G' " + w + "/hello.txt"); got != "user:user" {
 		t.Fatalf("group %q", got)
 	}
-	if got := run("readlink " + w + "/link && stat -c '%U' -h " + w + "/link"); got != "hello.txt\nuser" {
+	if got := run("readlink " + w + "/link && stat -c '%U' " + w + "/link"); got != "hello.txt\nuser" {
 		t.Fatalf("symlink %q", got)
 	}
 	if got := run("stat -c %i " + w + "/hello.txt " + w + "/hard.txt | sort -u | wc -l"); got != "1" {
