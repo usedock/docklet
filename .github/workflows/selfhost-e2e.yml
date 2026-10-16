@@ -43,6 +43,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Published usedock/dock release the selfhost-gvisor job runs on pull requests (bare semver; the git tag is v<this>).
+  # Bump it on usedock/dock releases. The weekly schedule still builds dock main to catch drift.
+  DOCK_PINNED_VERSION: 0.2.6
+
 concurrency:
   group: selfhost-e2e-${{ github.ref }}
   cancel-in-progress: true
@@ -152,8 +157,8 @@ jobs:
           if-no-files-found: warn
 
   # dock pull of a fleet gVisor dock (docklet#129, epic #125). The host is this runner bootstrapped with
-  # --runtime gvisor. The control plane is built from usedock/dock main, not pulled from ghcr: the work-tar
-  # export (usedock/dock#164, ca4431f) is newer than the latest published release.
+  # --runtime gvisor. Pull requests run the pinned release (tag v$DOCK_PINNED_VERSION, ghcr images); the schedule
+  # builds usedock/dock main; a dispatch honours dock_ref and images like the selfhost job.
   selfhost-gvisor:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -171,16 +176,32 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           mkdir -p "$LOGS"
           df -h / | tee "$LOGS/disk-before.txt"
+      - name: pick the control plane ref and image source
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_REF: ${{ inputs.dock_ref }}
+          IN_IMAGES: ${{ inputs.images }}
+        run: |
+          case "$EVENT" in
+            schedule) ref=main; mode=build ;;
+            workflow_dispatch) ref="${IN_REF:-main}"; mode="${IN_IMAGES:-ghcr}" ;;
+            *) ref="v${DOCK_PINNED_VERSION}"; mode=ghcr ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "control plane: usedock/dock ref $ref, images $mode (event $EVENT)"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: usedock/dock
-          ref: ${{ inputs.dock_ref || 'main' }}
+          ref: ${{ steps.plan.outputs.ref }}
           path: dock-src
           fetch-depth: 0
       - name: control plane ref has the work-tar export
         run: |
           git -C dock-src rev-parse HEAD | tee "$LOGS/dock-ref.txt"
+          # Holds for branches and tags alike: a tag at or after the release that shipped #164 contains the commit.
           git -C dock-src merge-base --is-ancestor "$DOCK_WORKTAR_COMMIT" HEAD \
             || { echo "::error::usedock/dock ref does not contain ${DOCK_WORKTAR_COMMIT} (work-tar export, usedock/dock#164)"; exit 1; }
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -207,12 +228,23 @@ jobs:
           echo "${RUNSC_SHA256_X86_64}  ${tmp}/gvisor.tar.bz2" | sha256sum -c -
           tar -xjf "${tmp}/gvisor.tar.bz2" -C "${tmp}" runsc
           sudo install -m 0755 "${tmp}/runsc" /usr/local/bin/runsc
-      - name: self-host control plane (deploy/self-host/setup.sh --build)
+      - name: self-host control plane (deploy/self-host/setup.sh)
         env:
           DOCKLET_DIR: ${{ github.workspace }}
+          MODE: ${{ steps.plan.outputs.mode }}
         run: |
           cd dock-src/deploy/self-host
-          ./setup.sh --build 2>&1 | tee "$LOGS/setup.log"
+          if [ "$MODE" = ghcr ]; then
+            ./setup.sh 2>&1 | tee "$LOGS/setup.log"
+          else
+            ./setup.sh --build 2>&1 | tee "$LOGS/setup.log"
+          fi
+          echo "DOCK_VERSION in .env: $(sed -n 's/^DOCK_VERSION=//p' .env)"
+          # A pull request must run exactly the pinned release, whatever the tag's .env.example says.
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            [ "$(sed -n 's/^DOCK_VERSION=//p' .env)" = "$DOCK_PINNED_VERSION" ] \
+              || { echo "::error::DOCK_VERSION is not ${DOCK_PINNED_VERSION}"; exit 1; }
+          fi
       - name: bootstrap this runner as a gVisor docklet host
         run: |
           token="$(sed -n 's/^FLEET_TOKEN=//p' dock-src/deploy/self-host/.env)"
