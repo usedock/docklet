@@ -14,45 +14,11 @@ EXTRA_DISK_GIB="${EXTRA_DISK_GIB:-20 80}"
 IMAGE="${IMAGE:-node-22}"
 PUSH_PULL="${PUSH_PULL:-auto}"
 case "$PUSH_PULL" in auto|skip|require) ;; *) echo "PUSH_PULL must be auto, skip or require" >&2; exit 1 ;; esac
-mkdir -p "$LOGS"
-TIMINGS="$LOGS/timings.txt"
-export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$LOGS/config}"
-# The session cookie stays out of LOGS, which is uploaded as an artifact.
-COOKIES="$(mktemp)"
-trap 'rm -f "$COOKIES"' EXIT
+# shellcheck source=scripts/lib-e2e-selfhost.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib-e2e-selfhost.sh"
 
-log() { printf 'e2e-selfhost: %s\n' "$*"; }
-die() { printf 'e2e-selfhost: FAIL: %s\n' "$*" >&2; exit 1; }
-# timing <label> <start epoch>: seconds since <start epoch>.
-timing() { printf '%-34s %5ss\n' "$1" "$(( $(date +%s) - $2 ))" | tee -a "$TIMINGS"; }
-
-# api <method> <path> [json body]: prints the response body, fails on a non-2xx status.
-api() {
-  local method="$1" path="$2" body="${3:-}" out code
-  out="$(mktemp)"
-  code="$(curl -sS -o "$out" -w '%{http_code}' -X "$method" "${DOCK_URL}${path}" \
-    -b "$COOKIES" -c "$COOKIES" -H "Origin: ${DOCK_URL}" -H 'content-type: application/json' \
-    ${body:+--data "$body"})"
-  case "$code" in 2??) cat "$out"; rm -f "$out" ;; *) cat "$out" >&2; rm -f "$out"; die "${method} ${path} -> HTTP ${code}" ;; esac
-}
-
-# 1. Account, org, workspace, API key: the same calls the dashboard makes.
-EMAIL="e2e-$(date +%s)@example.com"
-PASSWORD="$(openssl rand -hex 16)"
-api POST /api/auth/sign-up/email "$(jq -nc --arg e "$EMAIL" --arg p "$PASSWORD" '{email:$e,password:$p,name:"e2e"}')" >/dev/null
-ORG="$(api POST /v1/organizations '{"name":"selfhost-e2e"}' | jq -r '.data.id // .id')"
-[ -n "$ORG" ] && [ "$ORG" != null ] || die "no organization id"
-WS="$(api POST "/v1/organizations/${ORG}/workspaces" '{"name":"e2e"}' | jq -r '.data.id // .id')"
-[ -n "$WS" ] && [ "$WS" != null ] || die "no workspace id"
-KEY="$(api POST /v1/api-keys '{"name":"e2e"}' | jq -r '.data.apiKey // .apiKey')"
-case "$KEY" in dock_*) ;; *) die "no API key in the response" ;; esac
-if { true >&3; } 2>/dev/null; then echo "::add-mask::${KEY}" >&3; fi
-log "org ${ORG}, workspace ${WS}, key created"
-
-# 2. A self-hosted CLI context; the key comes from the environment, never argv or the log.
-export DOCK_API_KEY="$KEY"
-$DOCK context add selfhost --url "$DOCK_URL" --workspace "$WS"
-$DOCK context use selfhost
+# 1. Account, org, workspace, API key and a self-hosted CLI context.
+setup_selfhost_context
 
 # Root size in whole GiB as df reports it inside the dock ("39G" for a 40 GiB disk).
 root_gib() { $DOCK exec "$1" -- df -BG --output=size / | tail -n 1 | tr -dc '0-9'; }
@@ -64,17 +30,6 @@ assert_grown() {
   log "${name}: df / reports ${got}G (disk ${want} GiB, need >= ${min}G)"
   [ "$got" -ge "$min" ] && [ "$got" -le "$want" ] || { $DOCK exec "$name" -- df -h / >&2 || true; die "${name}: root filesystem is ${got}G, does not match ${want} GiB"; }
   echo "rootfs ${name}: ${got}G of ${want} GiB" >> "$TIMINGS"
-}
-
-# A new host reaches the control plane's scheduler a beat after bootstrap reports ready; retry the first create.
-new_dock() {
-  local attempt
-  for attempt in $(seq 1 30); do
-    if $DOCK new "$@"; then return 0; fi
-    log "dock new attempt ${attempt} failed; retrying"
-    sleep 10
-  done
-  die "dock new $* never succeeded"
 }
 
 # 3. A dock whose disk is larger than the 20 GiB base.
@@ -135,16 +90,6 @@ import_supported() {
     400|422) return 0 ;;
     *) die "probe of POST /v1/docks/import returned HTTP ${code}, expected 404 (unsupported) or 400" ;;
   esac
-}
-
-# retry <attempts> <cmd...>: the remote dock may need a beat after it reports running before exec works.
-retry() {
-  local n="$1" i; shift
-  for i in $(seq 1 "$n"); do
-    if "$@"; then return 0; fi
-    sleep 10
-  done
-  return 1
 }
 
 push_pull() {
