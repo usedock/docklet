@@ -110,8 +110,8 @@ A gVisor dock has no disk image, so push and pull move only `/home/user/work`. T
 - `dock push` sends only `/home/user/work`, written onto a fresh Dockyard base (`--image`, default `ubuntu-24.04`); packages and files outside it do not carry over, and the CLI prints a note saying so.
 - `--disk <size>` (for example `20gb`) sets the remote disk (default: the dock's disk size, else 10 GiB).
 - A running dock needs `--stop`, as for QEMU. The size and free-space checks run before the dock is stopped.
-- `--disk` smaller than the base image fails early with `push_too_big` and a hint to pass a larger `--disk`; this check runs before the dock is stopped.
-- A missing work volume fails, and a file name containing a newline or carriage return is refused (`push_unsupported_name`).
+- A `--disk` smaller than the base image, or too small for the work directory, fails with `push_too_big` and a hint to pass a larger `--disk`; these checks run before the dock is stopped.
+- A missing work volume fails (`push_failed`), and a file name or symlink target containing a newline or carriage return is refused (`push_unsupported_name`).
 - Device, fifo and socket files are skipped with a warning.
 - `--image` and `--disk` on a QEMU dock are a usage error.
 
@@ -121,7 +121,7 @@ A gVisor dock has no disk image, so push and pull move only `/home/user/work`. T
 - The runtime's preflight runs before the export, so a pull fails early on a machine that cannot run it. On a machine where QEMU/KVM cannot run, the QEMU path fails with a hint to pass `--runtime gvisor`; the gVisor path fails without Docker or `runsc`.
 - With `gvisor`, the CLI prints a note that only `/home/user/work` is copied. That directory is copied out of the pulled disk into a new stopped gVisor dock (owner mapped to the dock user), and the first `dock resume` boots it.
 - The disk is read inside the gVisor sandbox and is never mounted by the host kernel.
-- Pulling a remote dock that itself runs on gVisor is not supported (it has no disk image to export).
+- Pulling a remote dock that itself runs on gVisor fails with `not_supported` (it has no disk image to export).
 - The import is size-capped. It fails with `import_too_big` when the work directory grows past the cap (the disk size plus a little slack; hard links on the source disk become separate copies), and with `insufficient_space` when Docker's data root does not have enough free space.
 
 ### Interrupted imports
