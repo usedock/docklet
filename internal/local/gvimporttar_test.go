@@ -168,6 +168,15 @@ func TestSanitizeWorkTarRefusesWhatEscapesOrIsNotAFile(t *testing.T) {
 		"directory replaced by a symlink": {
 			tdir("./"), tdir("./a/"), tsym("./a", "/etc"), tfile("./a/passwd", "x"),
 		},
+		// A deeper entry implies its directories, which then keep their kind too.
+		"implied directory replaced by a symlink": {tdir("./"), tfile("./a/b", "x"), tsym("./a", "/etc")},
+		"implied directory replaced by a file":    {tdir("./"), tfile("./a/b", "x"), tfile("./a", "y")},
+		"implied directory replaced by a hard link": {
+			tdir("./"), tfile("./f", "x"), tfile("./a/b", "x"), thard("./a", "./f"),
+		},
+		"hard link through a replaced implied directory": {
+			tdir("./"), tfile("./a/b", "x"), tsym("./a", "/etc"), thard("./c", "./a/b"),
+		},
 		"file replaced by a symlink":  {tdir("./"), tfile("./a", "x"), tsym("./a", "/etc")},
 		"below a regular file":        {tdir("./"), tfile("./a", "x"), tfile("./a/b", "x")},
 		"hard link to an absolute":    {tdir("./"), thard("./h", "/etc/passwd")},
@@ -373,4 +382,30 @@ func TestImportWorkTarHelperLimitAndFailures(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+}
+
+func TestSanitizeWorkTarAcceptsImpliedDirectories(t *testing.T) {
+	// Parents that appear only through a deeper entry, then explicitly, then a hard link into them.
+	src := writeTar(t, tfile("a/b/c", "x"), tdir("./a/"), tdir("a/b"), thard("./h", "./a/b/c"), tfile("a/b/d", "y"))
+	dst := filepath.Join(t.TempDir(), "c.tar")
+	if _, err := sanitizeWorkTar(src, dst, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if names, hdrs, _ := readTar(t, dst); !slices.Equal(names, []string{"a/b/c", "a/", "a/b/", "h", "a/b/d"}) || hdrs["h"].Linkname != "a/b/c" {
+		t.Fatalf("names %v", names)
+	}
+}
+
+func TestPathTreeHashesKeepNamesApart(t *testing.T) {
+	pt := newPathTree()
+	for p, k := range map[string]byte{"a": 'd', "a/b": 'f', "ab": 'l', "b/a": 'f', "A": 'f'} {
+		if err := pt.add(p, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for p, want := range map[string]byte{"a": 'd', "a/b": 'f', "ab": 'l', "b": 'd', "b/a": 'f', "A": 'f', "a/a": 0, "b/b": 0, "ab/x": 0, "a/b/c": 0} {
+		if got := pt.kind(p); got != want {
+			t.Errorf("%s: %q, want %q", p, got, want)
+		}
+	}
 }

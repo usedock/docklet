@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"cmp"
 	"context"
+	"hash/maphash"
 	"io"
 	"os"
 	"path"
@@ -37,6 +38,80 @@ type workTarStats struct {
 	Declared int64
 	// Usage estimates what the tree takes on disk (blocks, directories).
 	Usage int64
+}
+
+// pathTree records the kind of every path the archive creates, including the directories a
+// deeper entry implies, so a path never changes kind. Nodes are keyed by their parent and a
+// 128-bit hash of their name, so a walk is linear in the name and memory is per node.
+type pathTree struct {
+	s1, s2 maphash.Seed
+	m      map[pathKey]pathNode
+}
+
+type pathKey struct{ parent, h1, h2 uint64 }
+
+// pathNode is a path's id (the root is 0) and kind: d directory, f file or hard link, l symlink.
+type pathNode struct {
+	id   uint64
+	kind byte
+}
+
+func newPathTree() *pathTree {
+	return &pathTree{s1: maphash.MakeSeed(), s2: maphash.MakeSeed(), m: map[pathKey]pathNode{}}
+}
+
+func (t *pathTree) key(parent uint64, name string) pathKey {
+	return pathKey{parent, maphash.String(t.s1, name), maphash.String(t.s2, name)}
+}
+
+// add records p (not the root) as kind, adding the directories above it that are not known
+// yet. It fails when a path above p is not a directory or p already has another kind.
+func (t *pathTree) add(p string, kind byte) error {
+	parent := uint64(0)
+	for {
+		name, rest, deeper := strings.Cut(p, "/")
+		k := t.key(parent, name)
+		n, ok := t.m[k]
+		if !ok {
+			if len(t.m) >= workTarMaxEntries {
+				return errf("import_too_big", "the work archive has more than %d paths", workTarMaxEntries)
+			}
+			n = pathNode{id: uint64(len(t.m)) + 1, kind: 'd'}
+			if !deeper {
+				n.kind = kind
+			}
+			t.m[k] = n
+		}
+		if !deeper {
+			if n.kind != kind {
+				return errf("invalid_archive", "the work archive reuses the path %q for a different kind of entry", p)
+			}
+			return nil
+		}
+		if n.kind != 'd' {
+			return errf("invalid_archive", "the work archive writes %q below a symlink or file", p)
+		}
+		parent, p = n.id, rest
+	}
+}
+
+// kind returns the kind of a path the archive created, or 0.
+func (t *pathTree) kind(p string) byte {
+	parent := uint64(0)
+	for {
+		name, rest, deeper := strings.Cut(p, "/")
+		n, ok := t.m[t.key(parent, name)]
+		if !ok {
+			return 0
+		}
+		if !deeper {
+			return n.kind
+		}
+		if n.kind != 'd' {
+			return 0
+		}
+		parent, p = n.id, rest
+	}
 }
 
 // cleanTarName turns an entry name into a path relative to the work directory. "" is the root.
@@ -88,8 +163,7 @@ func sanitizeWorkTar(src, dst string, maxDeclared int64) (st workTarStats, err e
 	}()
 	tr := tar.NewReader(in)
 	tw := tar.NewWriter(out)
-	// kinds is what each path so far holds: d directory, f file (or hard link), l symlink.
-	kinds := map[string]byte{}
+	paths := newPathTree()
 	for {
 		hdr, rerr := tr.Next()
 		if rerr == io.EOF {
@@ -140,7 +214,7 @@ func sanitizeWorkTar(src, dst string, maxDeclared int64) (st workTarStats, err e
 			if err != nil {
 				return st, err
 			}
-			if p == "" || target == "" || kinds[target] != 'f' {
+			if p == "" || target == "" || paths.kind(target) != 'f' {
 				return st, errf("invalid_archive", "the work archive has a hard link %q that does not point at an earlier file", hdr.Name)
 			}
 			kind, nh.Typeflag, nh.Name, nh.Linkname = 'f', tar.TypeLink, p, target
@@ -150,18 +224,10 @@ func sanitizeWorkTar(src, dst string, maxDeclared int64) (st workTarStats, err e
 		}
 		// Nothing may sit below a symlink or a file, and a path keeps its kind: a symlink must
 		// not replace a directory (or the reverse) so that a later entry lands outside the tree.
-		for i := 0; i < len(p); i++ {
-			if p[i] == '/' {
-				if k := kinds[p[:i]]; k == 'l' || k == 'f' {
-					return st, errf("invalid_archive", "the work archive writes %q below a symlink or file", hdr.Name)
-				}
-			}
-		}
-		if prev, ok := kinds[p]; ok && prev != kind {
-			return st, errf("invalid_archive", "the work archive reuses the path %q for a different kind of entry", hdr.Name)
-		}
 		if p != "" {
-			kinds[p] = kind
+			if err := paths.add(p, kind); err != nil {
+				return st, err
+			}
 		}
 		if err := tw.WriteHeader(nh); err != nil {
 			return st, errf("import_failed", "%v", err)

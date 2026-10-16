@@ -180,3 +180,20 @@ func TestPullDiskReportsSourceAndSendsNoFormats(t *testing.T) {
 		t.Fatalf("a disk pull must keep sending {}: %v", p.exportBody)
 	}
 }
+
+func TestPullGVisorRemoteWorkTarWithoutDataBytes(t *testing.T) {
+	// The control plane stores a zero data size as null; the disk size then caps the tar.
+	for _, v := range []any{nil, 0, "absent"} {
+		te, p, g := gvisorPullEnv(t)
+		gvisorRemote(t, p, workTarOf(t, tar.Header{Name: "./a.txt", Mode: 0o644}))
+		if v == "absent" {
+			delete(p.exportState, "dataBytes")
+		} else {
+			p.exportState["dataBytes"] = v
+		}
+		mustExit(t, te, 0, "pull", remoteID, "--from", "lab", "--name", "nodata", "--runtime", "gvisor")
+		if len(g.helpers) != 1 {
+			t.Fatalf("dataBytes %v: helpers %v stderr %q", v, g.helpers, te.errb)
+		}
+	}
+}
